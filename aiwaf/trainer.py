@@ -3,6 +3,7 @@ import glob
 import gzip
 import csv
 import re
+from itertools import chain
 try:
     import joblib
     JOBLIB_AVAILABLE = True
@@ -36,7 +37,13 @@ from .blacklist_manager import BlacklistManager
 from .settings_compat import apply_legacy_settings
 from .model_store import save_model_data
 from .geoip import lookup_country, lookup_country_name
-from .rust_backend import rust_available, extract_features as rust_extract_features
+from .rust_backend import (
+    rust_available,
+    extract_features as rust_extract_features,
+    supports_chunked_feature_extraction as rust_supports_chunked_features,
+    extract_features_batch as rust_extract_features_batch,
+    finalize_feature_state as rust_finalize_feature_state,
+)
 
 apply_legacy_settings()
 
@@ -321,36 +328,41 @@ def _extract_django_route_keywords() -> set:
 
 
 def _read_all_logs() -> list[str]:
-    lines = []
-    
-    # First try to read from main access log files
-    if LOG_PATH and os.path.exists(LOG_PATH):
-        if LOG_PATH.endswith(".csv") or LOG_PATH.endswith(".csv.gz"):
-            lines.extend(_read_csv_logs(LOG_PATH))
-        else:
-            with open(LOG_PATH, "r", errors="ignore") as f:
-                lines.extend(f.readlines())
-        for p in sorted(glob.glob(f"{LOG_PATH}.*")):
-            opener = gzip.open if p.endswith(".gz") else open
-            try:
-                if p.endswith(".csv") or p.endswith(".csv.gz"):
-                    lines.extend(_read_csv_logs(p))
-                else:
-                    with opener(p, "rt", errors="ignore") as f:
-                        lines.extend(f.readlines())
-            except OSError:
-                continue
-    
-    # If no log files found, fall back to RequestLog model data
-    if not lines:
-        lines = _get_logs_from_model()
-    
-    return lines
+    return list(_iter_all_logs())
 
 
 def _read_csv_logs(path: str) -> list[str]:
+    return list(_iter_csv_logs(path))
+
+
+def _iter_all_logs():
+    yielded = False
+
+    if LOG_PATH and os.path.exists(LOG_PATH):
+        base_and_rotated = chain([LOG_PATH], sorted(glob.glob(f"{LOG_PATH}.*")))
+        for p in base_and_rotated:
+            try:
+                if p.endswith(".csv") or p.endswith(".csv.gz"):
+                    for line in _iter_csv_logs(p):
+                        yielded = True
+                        yield line
+                else:
+                    opener = gzip.open if p.endswith(".gz") else open
+                    with opener(p, "rt", errors="ignore") as f:
+                        for line in f:
+                            yielded = True
+                            yield line
+            except OSError:
+                continue
+
+    # If no log files found, fall back to RequestLog model data
+    if not yielded:
+        for line in _iter_logs_from_model():
+            yield line
+
+
+def _iter_csv_logs(path: str):
     """Read CSV log files produced by AIWAFLoggerMiddleware and convert to log lines."""
-    log_lines = []
     try:
         opener = gzip.open if path.endswith(".gz") else open
         with opener(path, "rt", encoding="utf-8", newline="") as f:
@@ -371,13 +383,16 @@ def _read_csv_logs(path: str) -> list[str]:
                     f'"{row.get("referer", "-")}" "{row.get("user_agent", "-")}" '
                     f'response-time={row.get("response_time", "0")}\n'
                 )
-                log_lines.append(log_line)
+                yield log_line
     except Exception:
-        return []
-    return log_lines
+        return
 
 
 def _get_logs_from_model() -> list[str]:
+    return list(_iter_logs_from_model())
+
+
+def _iter_logs_from_model():
     """Get log data from RequestLog model when log files are not available"""
     try:
         # Import here to avoid circular imports
@@ -386,9 +401,9 @@ def _get_logs_from_model() -> list[str]:
         
         # Get logs from the last 30 days
         cutoff_date = timezone.now() - timedelta(days=30)
-        request_logs = RequestLog.objects.filter(timestamp__gte=cutoff_date).order_by('timestamp')
-        
-        log_lines = []
+        request_logs = RequestLog.objects.filter(timestamp__gte=cutoff_date).order_by('timestamp').iterator(chunk_size=2000)
+
+        count = 0
         for log in request_logs:
             # Convert RequestLog to Apache-style log format that _parse() expects
             # Format: IP - - [timestamp] "METHOD path HTTP/1.1" status content_length "referer" "user_agent" response-time=X.X
@@ -399,13 +414,13 @@ def _get_logs_from_model() -> list[str]:
                 f'{log.content_length} "{log.referer}" "{log.user_agent}" '
                 f'response-time={log.response_time}\n'
             )
-            log_lines.append(log_line)
-        
-        logger.info(f"Loaded {len(log_lines)} log entries from RequestLog model")
-        return log_lines
+            count += 1
+            yield log_line
+
+        logger.info(f"Loaded {count} log entries from RequestLog model")
     except Exception as e:
         logger.warning("Could not load logs from RequestLog model: %s", e, exc_info=True)
-        return []
+        return
 
 
 def _should_use_rust_features() -> bool:
@@ -606,21 +621,19 @@ def train(disable_ai=False, force_ai=False) -> None:
         for ip in exempted_ips:
             BlacklistManager.unblock(ip)
     
-    raw_lines = _read_all_logs()
-    if not raw_lines:
-        logger.info("No log lines found – check AIWAF_ACCESS_LOG setting.")
-        return
-
-    parsed = []
+    parsed_count = 0
     ip_404   = defaultdict(int)
     ip_404_login = defaultdict(int)  # Track 404s on login paths separately
     ip_times = defaultdict(list)
+    seen_any_lines = False
 
-    for line in raw_lines:
+    # Pass 1: collect aggregate stats only (no full parsed list in memory)
+    for line in _iter_all_logs():
+        seen_any_lines = True
         rec = _parse(line)
         if not rec:
             continue
-        parsed.append(rec)
+        parsed_count += 1
         ip_times[rec["ip"]].append(rec["timestamp"])
         if rec["status"] == "404":
             if is_exempt_path(rec["path"]):
@@ -628,8 +641,12 @@ def train(disable_ai=False, force_ai=False) -> None:
             else:
                 ip_404[rec["ip"]] += 1  # Non-login path 404s
 
-    if len(parsed) < MIN_TRAIN_LOGS:
-        logger.info(f"Not enough log lines ({len(parsed)}) for training. Need at least {MIN_TRAIN_LOGS}.")
+    if not seen_any_lines:
+        logger.info("No log lines found – check AIWAF_ACCESS_LOG setting.")
+        return
+
+    if parsed_count < MIN_TRAIN_LOGS:
+        logger.info(f"Not enough log lines ({parsed_count}) for training. Need at least {MIN_TRAIN_LOGS}.")
         return
 
     # 3. Optional immediate 404‐flood blocking (only for non-login paths)
@@ -643,7 +660,98 @@ def train(disable_ai=False, force_ai=False) -> None:
             if count > login_404s:  # More non-login 404s than login 404s
                 BlacklistManager.block(ip, f"Excessive 404s (≥6 non-login, {count}/{total_404s})")
 
-    feature_dicts = _generate_feature_dicts(parsed, ip_404, ip_times)
+    keyword_learning_enabled = getattr(settings, "AIWAF_ENABLE_KEYWORD_LEARNING", True)
+    legitimate_keywords = get_legitimate_keywords() if keyword_learning_enabled else set()
+    tokens = Counter()
+    token_example_paths = defaultdict(list)
+
+    # Pass 2: build features and keyword candidates.
+    use_rust_features = _should_use_rust_features()
+    rust_streaming_enabled = use_rust_features and rust_supports_chunked_features()
+    rust_chunk_size = max(1, int(getattr(settings, "AIWAF_RUST_FEATURE_CHUNK_SIZE", 5000)))
+    if use_rust_features and not rust_streaming_enabled:
+        logger.info("Rust streaming feature extraction unavailable; using single-batch Rust extraction.")
+    rust_state = None
+    rust_batch = [] if rust_streaming_enabled else None
+    rust_payload = [] if use_rust_features else None
+    feature_dicts = []
+    for line in _iter_all_logs():
+        rec = _parse(line)
+        if not rec:
+            continue
+
+        path = rec["path"]
+        known_path = path_exists_in_django(path)
+        kw_check = (not known_path) and (not is_exempt_path(path))
+        status_idx = STATUS_IDX.index(rec["status"]) if rec["status"] in STATUS_IDX else -1
+        if use_rust_features:
+            rust_record = {
+                "ip": rec["ip"],
+                "path_lower": path.lower(),
+                "path_len": len(path),
+                "timestamp": rec["timestamp"].timestamp(),
+                "response_time": rec["response_time"],
+                "status_idx": status_idx,
+                "kw_check": kw_check,
+                "total_404": ip_404.get(rec["ip"], 0),
+            }
+            if rust_streaming_enabled:
+                rust_batch.append(rust_record)
+                if len(rust_batch) >= rust_chunk_size:
+                    batch_features, rust_state = rust_extract_features_batch(rust_batch, STATIC_KW, rust_state)
+                    if batch_features is not None:
+                        feature_dicts.extend(batch_features)
+                    rust_batch = []
+            else:
+                rust_payload.append(rust_record)
+        else:
+            kw_hits = 0
+            path_lower = path.lower()
+            if kw_check:
+                kw_hits = sum(1 for kw in STATIC_KW if kw in path_lower)
+
+            burst = 0
+            timestamps = ip_times.get(rec["ip"], [])
+            for ts in timestamps:
+                if (rec["timestamp"] - ts).total_seconds() <= 10:
+                    burst += 1
+
+            feature_dicts.append({
+                "ip": rec["ip"],
+                "path_len": len(path),
+                "kw_hits": kw_hits,
+                "resp_time": rec["response_time"],
+                "status_idx": status_idx,
+                "burst_count": burst,
+                "total_404": ip_404.get(rec["ip"], 0),
+            })
+
+        if keyword_learning_enabled and rec["status"].startswith(("4", "5")) and not known_path and not is_exempt_path(path):
+            path_lower = path.lower()
+            for seg in re.split(r"\W+", path_lower):
+                if (len(seg) > 3 and
+                    seg not in STATIC_KW and
+                    seg not in legitimate_keywords and
+                    _is_malicious_context_trainer(path, seg, rec["status"])):
+                    tokens[seg] += 1
+                    if len(token_example_paths[seg]) < 5:
+                        token_example_paths[seg].append(path)
+
+    if rust_streaming_enabled and rust_batch:
+        batch_features, rust_state = rust_extract_features_batch(rust_batch, STATIC_KW, rust_state)
+        if batch_features is not None:
+            feature_dicts.extend(batch_features)
+        rust_batch = []
+
+    if rust_streaming_enabled:
+        tail_features = rust_finalize_feature_state(STATIC_KW, rust_state)
+        if tail_features:
+            feature_dicts.extend(tail_features)
+
+    if use_rust_features and not rust_streaming_enabled and rust_payload:
+        feature_dicts = rust_extract_features(rust_payload, STATIC_KW)
+        if feature_dicts is None:
+            feature_dicts = []
 
     if not feature_dicts:
         logger.info(" Nothing to train on – no valid log entries.")
@@ -652,8 +760,8 @@ def train(disable_ai=False, force_ai=False) -> None:
     # AI Model Training (optional)
     blocked_count = 0
     force_ai = force_ai or getattr(settings, "AIWAF_FORCE_AI_TRAINING", False)
-    if not disable_ai and not force_ai and len(parsed) < MIN_AI_LOGS:
-        logger.info(f"AI training skipped: {len(parsed)} log lines < {MIN_AI_LOGS}. Falling back to keyword-only.")
+    if not disable_ai and not force_ai and parsed_count < MIN_AI_LOGS:
+        logger.info(f"AI training skipped: {parsed_count} log lines < {MIN_AI_LOGS}. Falling back to keyword-only.")
         disable_ai = True
 
     if not disable_ai:
@@ -762,26 +870,9 @@ def train(disable_ai=False, force_ai=False) -> None:
     else:
         logger.info("AI model training skipped (disabled)")
 
-    keyword_learning_enabled = getattr(settings, "AIWAF_ENABLE_KEYWORD_LEARNING", True)
     filtered_tokens = []
-    legitimate_keywords = get_legitimate_keywords()
     if keyword_learning_enabled:
-        tokens = Counter()
-        
-        logger.info(f"Learning keywords from {len(parsed)} parsed requests...")
-        
-        for r in parsed:
-            # Only learn from suspicious requests (errors on non-existent paths)
-            if (r["status"].startswith(("4", "5")) and 
-                not path_exists_in_django(r["path"]) and 
-                not is_exempt_path(r["path"])):
-                
-                for seg in re.split(r"\W+", r["path"].lower()):
-                    if (len(seg) > 3 and 
-                        seg not in STATIC_KW and 
-                        seg not in legitimate_keywords and  # Don't learn legitimate keywords
-                        _is_malicious_context_trainer(r["path"], seg, r["status"])):  # Smart context check
-                        tokens[seg] += 1
+        logger.info(f"Learning keywords from {parsed_count} parsed requests...")
 
         keyword_store = get_keyword_store()
         top_tokens = tokens.most_common(getattr(settings, "AIWAF_DYNAMIC_TOP_N", 10))
@@ -790,11 +881,7 @@ def train(disable_ai=False, force_ai=False) -> None:
         learned_from_paths = []  # Track which paths we learned from
         
         for kw, cnt in top_tokens:
-            # Find example paths where this keyword appeared
-            example_paths = [r["path"] for r in parsed 
-                            if kw in r["path"].lower() and 
-                            r["status"].startswith(("4", "5")) and
-                            not path_exists_in_django(r["path"])]
+            example_paths = token_example_paths.get(kw, [])
             
             # Only add if keyword appears in malicious contexts
             if (cnt >= 2 and  # Must appear at least twice
@@ -827,7 +914,7 @@ def train(disable_ai=False, force_ai=False) -> None:
     else:
         logger.info("AIWAF ENHANCED TRAINING COMPLETE")
     logger.info("="*60)
-    logger.info(f"Training Data: {len(parsed)} log entries processed")
+    logger.info(f"Training Data: {parsed_count} log entries processed")
     
     if not disable_ai:
         logger.info(f"AI Model: Trained with {len(feature_cols) if 'feature_cols' in locals() else 'N/A'} features")

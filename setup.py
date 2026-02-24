@@ -40,7 +40,7 @@ setup(
             "geoip2>=4.0",
         ],
         "rust": [
-            "aiwaf-rust>=0.1.0",
+            "aiwaf-rust>=0.1.1",
         ],
         "light": [],
     },

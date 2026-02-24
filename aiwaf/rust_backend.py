@@ -39,6 +39,54 @@ def extract_features(records, static_keywords):
         return None
 
 
+def supports_chunked_feature_extraction() -> bool:
+    if aiwaf_rust is None:
+        return False
+    return (
+        hasattr(aiwaf_rust, "extract_features_batch_with_state")
+        and hasattr(aiwaf_rust, "finalize_feature_state")
+    )
+
+
+def extract_features_batch(records, static_keywords, state=None):
+    """Chunk-aware feature extraction for Rust backends that support stateful batches.
+
+    Expected extension contract:
+    - extract_features_batch_with_state(records, static_keywords, state)
+      returns either:
+      - {"features": [...], "state": ...}
+      - (features, state)
+    """
+    if aiwaf_rust is None:
+        return None, state
+    if not hasattr(aiwaf_rust, "extract_features_batch_with_state"):
+        return None, state
+    try:
+        result = aiwaf_rust.extract_features_batch_with_state(records, static_keywords, state)
+        if isinstance(result, dict):
+            return result.get("features"), result.get("state")
+        if isinstance(result, (list, tuple)) and len(result) == 2:
+            return result[0], result[1]
+        return None, state
+    except Exception:
+        return None, state
+
+
+def finalize_feature_state(static_keywords, state=None):
+    """Finalize pending state for chunked Rust feature extraction."""
+    if aiwaf_rust is None:
+        return None
+    if not hasattr(aiwaf_rust, "finalize_feature_state"):
+        return None
+    try:
+        result = aiwaf_rust.finalize_feature_state(static_keywords, state)
+        if isinstance(result, dict):
+            return result.get("features")
+        return result
+    except Exception:
+        return None
+
+
 def analyze_recent_behavior(entries, static_keywords):
     if aiwaf_rust is None:
         return None

@@ -16,14 +16,14 @@ class PackagingRustOptionalTests(unittest.TestCase):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn("[project.optional-dependencies]", pyproject)
         self.assertIn("rust = [", pyproject)
-        self.assertIn('"aiwaf-rust>=0.1.0"', pyproject)
+        self.assertIn('"aiwaf-rust>=0.1.1"', pyproject)
         self.assertNotIn('"maturin>=1.6,<2.0"', pyproject)
 
     def test_setup_rust_extra_points_to_aiwaf_rust(self):
         setup_py = (ROOT / "setup.py").read_text(encoding="utf-8")
         self.assertIn("extras_require={", setup_py)
         self.assertIn('"rust": [', setup_py)
-        self.assertIn('"aiwaf-rust>=0.1.0"', setup_py)
+        self.assertIn('"aiwaf-rust>=0.1.1"', setup_py)
         self.assertNotIn('"maturin>=1.6,<2.0"', setup_py)
 
     def test_docs_explain_rust_extra_install(self):
