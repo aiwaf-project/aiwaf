@@ -4,6 +4,7 @@ import gzip
 import csv
 import re
 from itertools import chain
+from concurrent.futures import ThreadPoolExecutor
 try:
     import joblib
     JOBLIB_AVAILABLE = True
@@ -427,12 +428,100 @@ def _should_use_rust_features() -> bool:
     return getattr(settings, "AIWAF_USE_RUST", False) and rust_available()
 
 
+def _iter_batches(items, batch_size: int):
+    batch_size = max(1, int(batch_size))
+    for idx in range(0, len(items), batch_size):
+        yield items[idx:idx + batch_size]
+
+
+def _extract_rust_features_parallel(records, static_keywords, chunk_size, max_workers):
+    """Parallel feature extraction for Rust backends without stateful batching."""
+    if not records:
+        return []
+
+    chunk_size = max(1, int(chunk_size))
+    max_workers = max(1, int(max_workers))
+    if max_workers == 1 or len(records) <= chunk_size:
+        return rust_extract_features(records, static_keywords)
+
+    chunks = [records[i:i + chunk_size] for i in range(0, len(records), chunk_size)]
+    features = []
+    def _extract_chunk(chunk):
+        return rust_extract_features(chunk, static_keywords)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        chunk_results = list(executor.map(_extract_chunk, chunks))
+
+    for result in chunk_results:
+        if result is None:
+            return None
+        features.extend(result)
+    return features
+
+
+def _python_feature_from_record(rec, ip_times):
+    kw_hits = 0
+    if rec["kw_check"]:
+        path_lower = rec["path_lower"]
+        kw_hits = sum(1 for kw in STATIC_KW if kw in path_lower)
+
+    burst = 0
+    timestamps = ip_times.get(rec["ip"], [])
+    for ts in timestamps:
+        if (rec["timestamp"] - ts).total_seconds() <= 10:
+            burst += 1
+
+    return {
+        "ip": rec["ip"],
+        "path_len": rec["path_len"],
+        "kw_hits": kw_hits,
+        "resp_time": rec["resp_time"],
+        "status_idx": rec["status_idx"],
+        "burst_count": burst,
+        "total_404": rec["total_404"],
+    }
+
+
+def _extract_python_features_batched(records, ip_times, batch_size: int, parallel_enabled: bool, parallel_chunk_size: int, max_workers: int):
+    if not records:
+        return []
+
+    batch_size = max(1, int(batch_size))
+    parallel_chunk_size = max(1, int(parallel_chunk_size))
+    max_workers = max(1, int(max_workers))
+
+    features = []
+    if parallel_enabled and max_workers > 1:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for batch in _iter_batches(records, batch_size):
+                if len(batch) >= parallel_chunk_size:
+                    features.extend(list(executor.map(lambda r: _python_feature_from_record(r, ip_times), batch)))
+                else:
+                    features.extend([_python_feature_from_record(r, ip_times) for r in batch])
+        return features
+
+    for batch in _iter_batches(records, batch_size):
+        features.extend([_python_feature_from_record(r, ip_times) for r in batch])
+    return features
+
+
 def _generate_feature_dicts(parsed, ip_404, ip_times):
     records = []
+    known_cache = {}
+    exempt_cache = {}
     for record in parsed:
         path = record["path"]
-        known_path = path_exists_in_django(path)
-        kw_check = (not known_path) and (not is_exempt_path(path))
+        known_path = known_cache.get(path)
+        if known_path is None:
+            known_path = path_exists_in_django(path)
+            known_cache[path] = known_path
+
+        exempt = exempt_cache.get(path)
+        if exempt is None:
+            exempt = is_exempt_path(path)
+            exempt_cache[path] = exempt
+
+        kw_check = (not known_path) and (not exempt)
         status_idx = STATUS_IDX.index(record["status"]) if record["status"] in STATUS_IDX else -1
         records.append({
             "ip": record["ip"],
@@ -460,34 +549,54 @@ def _generate_feature_dicts(parsed, ip_404, ip_times):
             }
             for rec in records
         ]
-        rust_features = rust_extract_features(rust_payload, STATIC_KW)
-        if rust_features is not None:
-            return rust_features
 
-    feature_dicts = []
-    for rec in records:
-        kw_hits = 0
-        if rec["kw_check"]:
-            path_lower = rec["path_lower"]
-            kw_hits = sum(1 for kw in STATIC_KW if kw in path_lower)
+        if rust_supports_chunked_features():
+            rust_chunk_size = max(1, int(getattr(settings, "AIWAF_RUST_FEATURE_CHUNK_SIZE", 5000)))
+            rust_state = None
+            rust_features = []
+            for batch in _iter_batches(rust_payload, rust_chunk_size):
+                batch_features, rust_state = rust_extract_features_batch(batch, STATIC_KW, rust_state)
+                if batch_features is not None:
+                    rust_features.extend(batch_features)
+            tail_features = rust_finalize_feature_state(STATIC_KW, rust_state)
+            if tail_features:
+                rust_features.extend(tail_features)
+            if rust_features:
+                return rust_features
+        else:
+            parallel_enabled = getattr(settings, "AIWAF_RUST_PARALLEL_FEATURES", True)
+            parallel_chunk_size = max(1, int(getattr(settings, "AIWAF_RUST_PARALLEL_CHUNK_SIZE", 5000)))
+            configured_workers = int(getattr(settings, "AIWAF_RUST_PARALLEL_WORKERS", 0))
+            max_workers = configured_workers if configured_workers > 0 else max(1, min((os.cpu_count() or 1), 32))
 
-        burst = 0
-        timestamps = ip_times.get(rec["ip"], [])
-        for ts in timestamps:
-            if (rec["timestamp"] - ts).total_seconds() <= 10:
-                burst += 1
+            if parallel_enabled and max_workers > 1 and len(rust_payload) > parallel_chunk_size:
+                parallel_features = _extract_rust_features_parallel(
+                    rust_payload,
+                    STATIC_KW,
+                    parallel_chunk_size,
+                    max_workers,
+                )
+                if parallel_features is not None:
+                    return parallel_features
 
-        feature_dicts.append({
-            "ip": rec["ip"],
-            "path_len": rec["path_len"],
-            "kw_hits": kw_hits,
-            "resp_time": rec["resp_time"],
-            "status_idx": rec["status_idx"],
-            "burst_count": burst,
-            "total_404": rec["total_404"],
-        })
+            rust_features = rust_extract_features(rust_payload, STATIC_KW)
+            if rust_features is not None:
+                return rust_features
 
-    return feature_dicts
+    python_batch_size = int(getattr(settings, "AIWAF_PYTHON_FEATURE_BATCH_SIZE", 2000))
+    python_parallel_enabled = bool(getattr(settings, "AIWAF_PYTHON_PARALLEL_FEATURES", True))
+    python_parallel_chunk_size = int(getattr(settings, "AIWAF_PYTHON_PARALLEL_CHUNK_SIZE", python_batch_size))
+    configured_workers = int(getattr(settings, "AIWAF_PYTHON_PARALLEL_WORKERS", 0))
+    python_workers = configured_workers if configured_workers > 0 else max(1, min((os.cpu_count() or 1), 32))
+
+    return _extract_python_features_batched(
+        records,
+        ip_times,
+        batch_size=python_batch_size,
+        parallel_enabled=python_parallel_enabled,
+        parallel_chunk_size=python_parallel_chunk_size,
+        max_workers=python_workers,
+    )
 
 
 def _parse(line: str) -> dict | None:
@@ -675,14 +784,50 @@ def train(disable_ai=False, force_ai=False) -> None:
     rust_batch = [] if rust_streaming_enabled else None
     rust_payload = [] if use_rust_features else None
     feature_dicts = []
+
+    python_batch_size = max(1, int(getattr(settings, "AIWAF_PYTHON_FEATURE_BATCH_SIZE", 2000)))
+    python_parallel_enabled = bool(getattr(settings, "AIWAF_PYTHON_PARALLEL_FEATURES", True))
+    python_parallel_chunk_size = max(1, int(getattr(settings, "AIWAF_PYTHON_PARALLEL_CHUNK_SIZE", python_batch_size)))
+    configured_workers = int(getattr(settings, "AIWAF_PYTHON_PARALLEL_WORKERS", 0))
+    python_workers = configured_workers if configured_workers > 0 else max(1, min((os.cpu_count() or 1), 32))
+    python_batch = [] if not use_rust_features else None
+    python_executor = (
+        ThreadPoolExecutor(max_workers=python_workers)
+        if (python_batch is not None and python_parallel_enabled and python_workers > 1)
+        else None
+    )
+
+    known_cache = {}
+    exempt_cache = {}
+
+    def _flush_python_batch():
+        nonlocal python_batch
+        if not python_batch:
+            return
+
+        if python_executor is not None and len(python_batch) >= python_parallel_chunk_size:
+            feature_dicts.extend(list(python_executor.map(lambda r: _python_feature_from_record(r, ip_times), python_batch)))
+        else:
+            feature_dicts.extend([_python_feature_from_record(r, ip_times) for r in python_batch])
+        python_batch = []
+
     for line in _iter_all_logs():
         rec = _parse(line)
         if not rec:
             continue
 
         path = rec["path"]
-        known_path = path_exists_in_django(path)
-        kw_check = (not known_path) and (not is_exempt_path(path))
+        known_path = known_cache.get(path)
+        if known_path is None:
+            known_path = path_exists_in_django(path)
+            known_cache[path] = known_path
+
+        exempt = exempt_cache.get(path)
+        if exempt is None:
+            exempt = is_exempt_path(path)
+            exempt_cache[path] = exempt
+
+        kw_check = (not known_path) and (not exempt)
         status_idx = STATUS_IDX.index(rec["status"]) if rec["status"] in STATUS_IDX else -1
         if use_rust_features:
             rust_record = {
@@ -705,28 +850,20 @@ def train(disable_ai=False, force_ai=False) -> None:
             else:
                 rust_payload.append(rust_record)
         else:
-            kw_hits = 0
-            path_lower = path.lower()
-            if kw_check:
-                kw_hits = sum(1 for kw in STATIC_KW if kw in path_lower)
-
-            burst = 0
-            timestamps = ip_times.get(rec["ip"], [])
-            for ts in timestamps:
-                if (rec["timestamp"] - ts).total_seconds() <= 10:
-                    burst += 1
-
-            feature_dicts.append({
+            python_batch.append({
                 "ip": rec["ip"],
                 "path_len": len(path),
-                "kw_hits": kw_hits,
                 "resp_time": rec["response_time"],
                 "status_idx": status_idx,
-                "burst_count": burst,
+                "timestamp": rec["timestamp"],
+                "path_lower": path.lower(),
+                "kw_check": kw_check,
                 "total_404": ip_404.get(rec["ip"], 0),
             })
+            if len(python_batch) >= python_batch_size:
+                _flush_python_batch()
 
-        if keyword_learning_enabled and rec["status"].startswith(("4", "5")) and not known_path and not is_exempt_path(path):
+        if keyword_learning_enabled and rec["status"].startswith(("4", "5")) and not known_path and not exempt:
             path_lower = path.lower()
             for seg in re.split(r"\W+", path_lower):
                 if (len(seg) > 3 and
@@ -736,6 +873,11 @@ def train(disable_ai=False, force_ai=False) -> None:
                     tokens[seg] += 1
                     if len(token_example_paths[seg]) < 5:
                         token_example_paths[seg].append(path)
+
+    if python_batch is not None:
+        _flush_python_batch()
+    if python_executor is not None:
+        python_executor.shutdown(wait=True)
 
     if rust_streaming_enabled and rust_batch:
         batch_features, rust_state = rust_extract_features_batch(rust_batch, STATIC_KW, rust_state)
@@ -749,9 +891,24 @@ def train(disable_ai=False, force_ai=False) -> None:
             feature_dicts.extend(tail_features)
 
     if use_rust_features and not rust_streaming_enabled and rust_payload:
-        feature_dicts = rust_extract_features(rust_payload, STATIC_KW)
-        if feature_dicts is None:
-            feature_dicts = []
+        parallel_enabled = getattr(settings, "AIWAF_RUST_PARALLEL_FEATURES", True)
+        parallel_chunk_size = max(1, int(getattr(settings, "AIWAF_RUST_PARALLEL_CHUNK_SIZE", rust_chunk_size)))
+        configured_workers = int(getattr(settings, "AIWAF_RUST_PARALLEL_WORKERS", 0))
+        max_workers = configured_workers if configured_workers > 0 else max(1, min((os.cpu_count() or 1), 32))
+
+        if parallel_enabled and max_workers > 1 and len(rust_payload) > parallel_chunk_size:
+            parallel_features = _extract_rust_features_parallel(
+                rust_payload,
+                STATIC_KW,
+                parallel_chunk_size,
+                max_workers,
+            )
+            if parallel_features is None:
+                feature_dicts = rust_extract_features(rust_payload, STATIC_KW) or []
+            else:
+                feature_dicts = parallel_features
+        else:
+            feature_dicts = rust_extract_features(rust_payload, STATIC_KW) or []
 
     if not feature_dicts:
         logger.info(" Nothing to train on – no valid log entries.")

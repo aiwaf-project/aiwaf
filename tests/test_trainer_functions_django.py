@@ -112,6 +112,7 @@ class TrainerFunctionsTestCase(AIWAFTestCase):
         with patch('aiwaf.trainer.path_exists_in_django', return_value=False), \
              patch('aiwaf.trainer.is_exempt_path', return_value=False), \
              patch('aiwaf.trainer.rust_available', return_value=True), \
+             patch('aiwaf.trainer.rust_supports_chunked_features', return_value=False), \
              patch('aiwaf.trainer.rust_extract_features', return_value=[{"ip": "1.1.1.1"}]) as mock_rust:
             result = self.trainer_module._generate_feature_dicts(parsed, ip_404, ip_times)
 
@@ -147,3 +148,114 @@ class TrainerFunctionsTestCase(AIWAFTestCase):
             "total_404": 3,
         }]
         self.assertEqual(result, expected)
+
+    def test_extract_rust_features_parallel_merges_in_order(self):
+        records = [{"id": idx} for idx in range(5)]
+
+        def fake_extract_features(chunk, _static_keywords):
+            return [{"ip": str(item["id"])} for item in chunk]
+
+        with patch("aiwaf.trainer.rust_extract_features", side_effect=fake_extract_features):
+            result = self.trainer_module._extract_rust_features_parallel(
+                records,
+                [],
+                chunk_size=2,
+                max_workers=2,
+            )
+
+        self.assertEqual(result, [{"ip": "0"}, {"ip": "1"}, {"ip": "2"}, {"ip": "3"}, {"ip": "4"}])
+
+    @override_settings(AIWAF_USE_RUST=True, AIWAF_RUST_FEATURE_CHUNK_SIZE=1)
+    def test_generate_feature_dicts_uses_rust_batch_when_supported(self):
+        parsed = [
+            {
+                "ip": "1.1.1.1",
+                "timestamp": datetime(2025, 1, 1, 0, 0, 0),
+                "path": "/test1",
+                "status": "200",
+                "response_time": 0.2,
+            },
+            {
+                "ip": "2.2.2.2",
+                "timestamp": datetime(2025, 1, 1, 0, 0, 1),
+                "path": "/test2",
+                "status": "200",
+                "response_time": 0.3,
+            },
+        ]
+        ip_404 = {"1.1.1.1": 0, "2.2.2.2": 0}
+        ip_times = {
+            "1.1.1.1": [parsed[0]["timestamp"]],
+            "2.2.2.2": [parsed[1]["timestamp"]],
+        }
+
+        with patch("aiwaf.trainer.path_exists_in_django", return_value=False), \
+             patch("aiwaf.trainer.is_exempt_path", return_value=False), \
+             patch("aiwaf.trainer.rust_available", return_value=True), \
+             patch("aiwaf.trainer.rust_supports_chunked_features", return_value=True), \
+             patch("aiwaf.trainer.rust_extract_features_batch", side_effect=[([{"ip": "1.1.1.1"}], "s1"), ([{"ip": "2.2.2.2"}], "s2")]) as mock_batch, \
+             patch("aiwaf.trainer.rust_finalize_feature_state", return_value=[]) as mock_finalize, \
+             patch("aiwaf.trainer.rust_extract_features") as mock_single:
+            result = self.trainer_module._generate_feature_dicts(parsed, ip_404, ip_times)
+
+        self.assertEqual(result, [{"ip": "1.1.1.1"}, {"ip": "2.2.2.2"}])
+        self.assertEqual(mock_batch.call_count, 2)
+        mock_finalize.assert_called_once()
+        mock_single.assert_not_called()
+
+    @override_settings(
+        AIWAF_USE_RUST=False,
+        AIWAF_PYTHON_FEATURE_BATCH_SIZE=2,
+        AIWAF_PYTHON_PARALLEL_FEATURES=True,
+        AIWAF_PYTHON_PARALLEL_CHUNK_SIZE=2,
+        AIWAF_PYTHON_PARALLEL_WORKERS=2,
+    )
+    def test_generate_feature_dicts_python_parallel_uses_threadpool(self):
+        ts0 = datetime(2025, 1, 1, 0, 0, 0)
+        ts1 = datetime(2025, 1, 1, 0, 0, 1)
+        ts2 = datetime(2025, 1, 1, 0, 0, 2)
+        ts3 = datetime(2025, 1, 1, 0, 0, 3)
+        parsed = [
+            {"ip": "9.9.9.9", "timestamp": ts0, "path": "/.env", "status": "404", "response_time": 0.1},
+            {"ip": "9.9.9.9", "timestamp": ts1, "path": "/.env", "status": "404", "response_time": 0.1},
+            {"ip": "9.9.9.9", "timestamp": ts2, "path": "/.env", "status": "404", "response_time": 0.1},
+            {"ip": "9.9.9.9", "timestamp": ts3, "path": "/.env", "status": "404", "response_time": 0.1},
+        ]
+        ip_404 = {"9.9.9.9": 3}
+        ip_times = {"9.9.9.9": [ts0, ts1, ts2, ts3]}
+
+        class FakeExecutor:
+            instances = []
+
+            def __init__(self, max_workers=1):
+                self.max_workers = max_workers
+                self.map_calls = 0
+                FakeExecutor.instances.append(self)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def map(self, fn, iterable):
+                self.map_calls += 1
+                return list(map(fn, iterable))
+
+        with patch("aiwaf.trainer.ThreadPoolExecutor", FakeExecutor), \
+             patch("aiwaf.trainer.path_exists_in_django", return_value=False), \
+             patch("aiwaf.trainer.is_exempt_path", return_value=False):
+            result = self.trainer_module._generate_feature_dicts(parsed, ip_404, ip_times)
+
+        expected = [{
+            "ip": "9.9.9.9",
+            "path_len": len("/.env"),
+            "kw_hits": 1,
+            "resp_time": 0.1,
+            "status_idx": 2,
+            "burst_count": 4,
+            "total_404": 3,
+        }] * 4
+        self.assertEqual(result, expected)
+        self.assertGreater(len(FakeExecutor.instances), 0)
+        self.assertGreater(sum(ex.map_calls for ex in FakeExecutor.instances), 0)
