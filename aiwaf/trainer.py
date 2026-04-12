@@ -44,6 +44,8 @@ from .rust_backend import (
     supports_chunked_feature_extraction as rust_supports_chunked_features,
     extract_features_batch as rust_extract_features_batch,
     finalize_feature_state as rust_finalize_feature_state,
+    rust_isolation_forest_available,
+    rust_isolation_forest_class,
 )
 
 apply_legacy_settings()
@@ -917,6 +919,7 @@ def train(disable_ai=False, force_ai=False) -> None:
     # AI Model Training (optional)
     blocked_count = 0
     force_ai = force_ai or getattr(settings, "AIWAF_FORCE_AI_TRAINING", False)
+    use_rust_ai = bool(getattr(settings, "AIWAF_USE_RUST", False)) and rust_isolation_forest_available()
     if not disable_ai and not force_ai and parsed_count < MIN_AI_LOGS:
         logger.info(f"AI training skipped: {parsed_count} log lines < {MIN_AI_LOGS}. Falling back to keyword-only.")
         disable_ai = True
@@ -925,8 +928,11 @@ def train(disable_ai=False, force_ai=False) -> None:
         if not JOBLIB_AVAILABLE:
             logger.info("AI model training skipped - joblib not available.")
             disable_ai = True
-        elif not PANDAS_AVAILABLE or not SKLEARN_AVAILABLE:
-            logger.info("AI model training skipped - pandas or scikit-learn not available.")
+        elif not PANDAS_AVAILABLE:
+            logger.info("AI model training skipped - pandas not available.")
+            disable_ai = True
+        elif not SKLEARN_AVAILABLE and not use_rust_ai:
+            logger.info("AI model training skipped - scikit-learn not available and Rust backend unavailable.")
             disable_ai = True
 
     if not disable_ai:
@@ -936,29 +942,60 @@ def train(disable_ai=False, force_ai=False) -> None:
             df = pd.DataFrame(feature_dicts)
             feature_cols = [c for c in df.columns if c != "ip"]
             X = df[feature_cols].astype(float).values
-            model = IsolationForest(
-                contamination=getattr(settings, "AIWAF_AI_CONTAMINATION", 0.05), 
-                random_state=42
-            )
-            
-            # Suppress sklearn warnings during training
-            import warnings
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
-                model.fit(X)
+            contamination = getattr(settings, "AIWAF_AI_CONTAMINATION", 0.05)
+            model = None
+            metadata = {}
 
-            import sklearn
-            from django.utils import timezone as django_timezone
+            if use_rust_ai:
+                rust_cls = rust_isolation_forest_class()
+                if rust_cls is None:
+                    raise RuntimeError("Rust IsolationForest class unavailable")
+                model = rust_cls(
+                    n_estimators=getattr(settings, "AIWAF_AI_N_ESTIMATORS", 100),
+                    max_samples=getattr(settings, "AIWAF_AI_MAX_SAMPLES", "auto"),
+                    contamination=contamination,
+                    max_features=getattr(settings, "AIWAF_AI_MAX_FEATURES", 1.0),
+                    bootstrap=getattr(settings, "AIWAF_AI_BOOTSTRAP", False),
+                    random_state=getattr(settings, "AIWAF_AI_RANDOM_STATE", 42),
+                    warm_start=getattr(settings, "AIWAF_AI_WARM_START", False),
+                )
+                model.fit(X.tolist())
+                from django.utils import timezone as django_timezone
+                metadata = {
+                    "model_backend": "aiwaf_rust",
+                    "created_at": str(django_timezone.now()),
+                    "feature_count": len(feature_cols),
+                    "samples_count": len(X),
+                }
+                model_data = {
+                    "model_backend": "aiwaf_rust",
+                    "model_state": model.to_json(),
+                    **metadata,
+                }
+            else:
+                model = IsolationForest(
+                    contamination=contamination,
+                    random_state=42
+                )
+                
+                # Suppress sklearn warnings during training
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
+                    model.fit(X)
 
-            metadata = {
-                "sklearn_version": sklearn.__version__,
-                "created_at": str(django_timezone.now()),
-                "feature_count": len(feature_cols),
-                "samples_count": len(X),
-            }
-            
-            # Save model with version metadata
-            model_data = {"model": model, **metadata}
+                import sklearn
+                from django.utils import timezone as django_timezone
+
+                metadata = {
+                    "sklearn_version": sklearn.__version__,
+                    "created_at": str(django_timezone.now()),
+                    "feature_count": len(feature_cols),
+                    "samples_count": len(X),
+                }
+                
+                # Save model with version metadata
+                model_data = {"model": model, **metadata}
             if save_model_data(model_data, metadata=metadata):
                 logger.info(f"Model trained on {len(X)} samples")
             else:
@@ -969,11 +1006,18 @@ def train(disable_ai=False, force_ai=False) -> None:
                     logger.info(f"Model trained on {len(X)} samples → {MODEL_PATH}")
                 else:
                     logger.info("Model trained, but saving failed (storage fallback disabled).")
-            logger.info(f"Created with scikit-learn v{metadata['sklearn_version']}")
+            if metadata.get("model_backend") == "aiwaf_rust":
+                logger.info("Created with aiwaf-rust IsolationForest backend")
+            else:
+                logger.info(f"Created with scikit-learn v{metadata['sklearn_version']}")
             
             # Check for anomalies and intelligently decide which IPs to block
-            preds = model.predict(X)
-            anomalous_ips = set(df.loc[preds == -1, "ip"])
+            if metadata.get("model_backend") == "aiwaf_rust":
+                preds = model.predict(X.tolist())
+                anomalous_ips = {df.iloc[idx]["ip"] for idx, pred in enumerate(preds) if pred == -1}
+            else:
+                preds = model.predict(X)
+                anomalous_ips = set(df.loc[preds == -1, "ip"])
             
             if anomalous_ips:
                 logger.info(f"Detected {len(anomalous_ips)} potentially anomalous IPs during training")

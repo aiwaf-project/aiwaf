@@ -71,6 +71,9 @@ def main() -> int:
     parser.add_argument("--feature-iters", type=int, default=20, help="Iterations for feature benchmark")
     parser.add_argument("--anomaly-size", type=int, default=500, help="Recent entries for anomaly benchmark")
     parser.add_argument("--anomaly-iters", type=int, default=2000, help="Iterations for anomaly benchmark")
+    parser.add_argument("--iforest-size", type=int, default=20000, help="Rows for IsolationForest benchmark")
+    parser.add_argument("--iforest-fit-iters", type=int, default=5, help="Fit iterations for IsolationForest benchmark")
+    parser.add_argument("--iforest-predict-iters", type=int, default=50, help="Predict iterations for IsolationForest benchmark")
     args = parser.parse_args()
 
     headers = {
@@ -268,6 +271,82 @@ def main() -> int:
         finally:
             middleware_module.path_exists_in_django = orig_mw_path_exists
             middleware_module.is_exempt_path = orig_mw_is_exempt
+
+        # Isolation Forest benchmark (scikit-learn vs Rust)
+        def build_iforest_data(count: int):
+            rng = random.Random(42)
+            data = []
+            for _ in range(count):
+                x = rng.random()
+                y = rng.random()
+                data.append([x, y])
+            return data
+
+        iforest_data = build_iforest_data(args.iforest_size)
+
+        try:
+            from sklearn.ensemble import IsolationForest as SklearnIsolationForest
+            sklearn_available = True
+        except Exception:
+            SklearnIsolationForest = None
+            sklearn_available = False
+
+        if sklearn_available:
+            def bench_iforest_sklearn_fit():
+                model = SklearnIsolationForest(
+                    contamination="auto",
+                    random_state=42,
+                    n_estimators=100,
+                )
+                model.fit(iforest_data)
+
+            py_fit_time = bench(bench_iforest_sklearn_fit, args.iforest_fit_iters)
+            print(f"Python IsolationForest fit:     {args.iforest_fit_iters / py_fit_time:.2f} fits/sec")
+
+            py_model = SklearnIsolationForest(
+                contamination="auto",
+                random_state=42,
+                n_estimators=100,
+            )
+            py_model.fit(iforest_data)
+
+            py_pred_time = bench(lambda: py_model.predict(iforest_data), args.iforest_predict_iters)
+            print(f"Python IsolationForest predict: {args.iforest_predict_iters / py_pred_time:.2f} predicts/sec")
+        else:
+            print("Python IsolationForest:   skipped (scikit-learn not available)")
+
+        rust_iforest_cls = getattr(aiwaf_rust, "IsolationForest", None) if aiwaf_rust is not None else None
+        if rust_iforest_cls is not None:
+            def bench_iforest_rust_fit():
+                model = rust_iforest_cls(
+                    n_estimators=100,
+                    max_samples="auto",
+                    contamination="auto",
+                    max_features=1.0,
+                    bootstrap=False,
+                    random_state=42,
+                    warm_start=False,
+                )
+                model.fit(iforest_data)
+
+            rust_fit_time = bench(bench_iforest_rust_fit, args.iforest_fit_iters)
+            print(f"Rust IsolationForest fit:       {args.iforest_fit_iters / rust_fit_time:.2f} fits/sec")
+
+            rust_model = rust_iforest_cls(
+                n_estimators=100,
+                max_samples="auto",
+                contamination="auto",
+                max_features=1.0,
+                bootstrap=False,
+                random_state=42,
+                warm_start=False,
+            )
+            rust_model.fit(iforest_data)
+
+            rust_pred_time = bench(lambda: rust_model.predict(iforest_data), args.iforest_predict_iters)
+            print(f"Rust IsolationForest predict:   {args.iforest_predict_iters / rust_pred_time:.2f} predicts/sec")
+        else:
+            print("Rust IsolationForest:     skipped (aiwaf_rust IsolationForest unavailable)")
     finally:
         tmpdir.cleanup()
         try:

@@ -119,6 +119,65 @@ class TrainerFunctionsTestCase(AIWAFTestCase):
         self.assertEqual(result, [{"ip": "1.1.1.1"}])
         mock_rust.assert_called_once()
 
+    @override_settings(
+        AIWAF_USE_RUST=True,
+        AIWAF_MIN_AI_LOGS=0,
+        AIWAF_MIN_TRAIN_LOGS=1,
+    )
+    def test_train_uses_rust_isolation_forest_when_available(self):
+        class StubRustIsolationForest:
+            def __init__(self, **_kwargs):
+                self.fitted = False
+
+            def fit(self, _data):
+                self.fitted = True
+
+            def predict(self, data):
+                return [1 for _ in data]
+
+            def to_json(self):
+                return {"stub": True}
+
+        lines = ["line1", "line2"]
+        rec = {
+            "ip": "1.1.1.1",
+            "timestamp": datetime.now(),
+            "path": "/test",
+            "status": "200",
+            "response_time": 0.1,
+        }
+
+        with patch("aiwaf.trainer._iter_all_logs", side_effect=[lines, lines]), \
+             patch("aiwaf.trainer._parse", return_value=rec), \
+             patch("aiwaf.trainer.remove_exempt_keywords"), \
+             patch("aiwaf.trainer.get_exemption_store") as mock_exempt_store, \
+             patch("aiwaf.trainer.BlacklistManager.unblock"), \
+             patch("aiwaf.trainer.BlacklistManager.block"), \
+             patch("aiwaf.trainer.MIN_TRAIN_LOGS", 1), \
+             patch("aiwaf.trainer.MIN_AI_LOGS", 0), \
+             patch("aiwaf.trainer.PANDAS_AVAILABLE", True), \
+             patch("aiwaf.trainer.JOBLIB_AVAILABLE", True), \
+             patch("aiwaf.trainer.SKLEARN_AVAILABLE", False), \
+             patch("aiwaf.trainer.rust_isolation_forest_available", return_value=True), \
+             patch("aiwaf.trainer.rust_isolation_forest_class", return_value=StubRustIsolationForest), \
+             patch("aiwaf.trainer.save_model_data", return_value=True) as mock_save, \
+             patch("aiwaf.trainer._python_feature_from_record", return_value={
+                 "ip": "1.1.1.1",
+                 "path_len": 4,
+                 "kw_hits": 0,
+                 "resp_time": 0.1,
+                 "status_idx": 0,
+                 "burst_count": 0,
+                 "total_404": 0,
+            }):
+            mock_exempt_store.return_value.get_all.return_value = []
+            self.trainer_module.train(disable_ai=False, force_ai=True)
+
+        self.assertTrue(mock_save.called)
+        saved_model_data = mock_save.call_args[0][0]
+        self.assertEqual(saved_model_data.get("model_backend"), "aiwaf_rust")
+        self.assertIn("model_state", saved_model_data)
+
     @override_settings(AIWAF_USE_RUST=True)
     def test_generate_feature_dicts_falls_back_when_rust_unavailable(self):
         ts = datetime(2025, 1, 1, 0, 0, 0)

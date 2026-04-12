@@ -451,8 +451,9 @@ If you want the trainer to use the CSV log file, point `AIWAF_ACCESS_LOG` at the
 ### Optional Rust Backend (Header Validation)
 
 When `AIWAF_USE_RUST = True`, AI-WAF uses a Rust
-backend (pyo3/maturin) for header validation. If the Rust module is not
-available, it automatically falls back to the Python implementation.
+backend (pyo3/maturin) for header validation, feature extraction, and
+behavior analysis. If the Rust module is not available, it automatically
+falls back to the Python implementation.
 
 Default install does not require Rust:
 ```bash
@@ -464,7 +465,7 @@ Install the Rust extension from the separate package:
 pip install "aiwaf[rust]"
 ```
 
-This pulls the separately-released Rust extension package (`aiwaf-rust`).
+This pulls the separately-released Rust extension package (`aiwaf-rust>=0.1.6`).
 
 **Enable in settings:**
 ```python

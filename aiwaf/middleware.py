@@ -55,6 +55,8 @@ from .rust_backend import (
     rust_available,
     validate_headers as rust_validate_headers,
     analyze_recent_behavior as rust_analyze_recent_behavior,
+    is_rust_isolation_forest,
+    rust_isolation_forest_from_json,
 )
 
 apply_legacy_settings()
@@ -159,12 +161,6 @@ def load_model_safely():
         return None
 
     try:
-        import sklearn
-    except ImportError:
-        logger.info("sklearn not available, AI functionality disabled")
-        return None
-
-    try:
         # Suppress sklearn version warnings temporarily
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.base")
@@ -173,19 +169,32 @@ def load_model_safely():
                 raise ValueError("no model data available")
 
             # Handle both old format (direct model) and new format (with metadata)
+            if isinstance(model_data, dict) and model_data.get("model_backend") == "aiwaf_rust":
+                state = model_data.get("model_state")
+                if state is None:
+                    raise ValueError("missing rust model state")
+                model = rust_isolation_forest_from_json(state)
+                if model is None:
+                    raise ValueError("failed to restore rust model")
+                return model
             if isinstance(model_data, dict) and "model" in model_data:
                 # New format with metadata
                 model = model_data["model"]
-                stored_version = model_data.get("sklearn_version", "unknown")
-                current_version = sklearn.__version__
+                try:
+                    import sklearn
+                    stored_version = model_data.get("sklearn_version", "unknown")
+                    current_version = sklearn.__version__
 
-                if stored_version != current_version:
-                    logger.warning(
-                        "Model was trained with sklearn v%s, current v%s",
-                        stored_version,
-                        current_version,
-                    )
-                    logger.info("Run 'python manage.py detect_and_train' to update the model if needed.")
+                    if stored_version != current_version:
+                        logger.warning(
+                            "Model was trained with sklearn v%s, current v%s",
+                            stored_version,
+                            current_version,
+                        )
+                        logger.info("Run 'python manage.py detect_and_train' to update the model if needed.")
+                except ImportError:
+                    logger.info("sklearn not available, AI functionality disabled")
+                    return None
 
                 return model
             else:
@@ -978,11 +987,19 @@ class AIAnomalyMiddleware(MiddlewareMixin):
         total_404 = sum(1 for (_, _, st, _) in data if st == 404)
         feats = [path_len, kw_hits, resp_time, status_idx, burst_count, total_404]
         
-        # Only use AI model if it's available and numpy is available
-        if self.model is not None and NUMPY_AVAILABLE:
-            X = np.array(feats, dtype=float).reshape(1, -1)
-            
-            if self.model.predict(X)[0] == -1:
+        # Only use AI model if it's available
+        if self.model is not None:
+            model_is_rust = is_rust_isolation_forest(self.model)
+            if model_is_rust:
+                prediction = self.model.predict([list(map(float, feats))])[0]
+            else:
+                if not NUMPY_AVAILABLE:
+                    prediction = None
+                else:
+                    X = np.array(feats, dtype=float).reshape(1, -1)
+                    prediction = self.model.predict(X)[0]
+
+            if prediction == -1:
                 # AI detected anomaly - but analyze patterns before blocking (like trainer.py)
                 
                 # Get recent behavior data for this IP to make intelligent blocking decision
@@ -1008,7 +1025,7 @@ class AIAnomalyMiddleware(MiddlewareMixin):
                                 f"AI anomaly + scanning 404s (total:{max_404s}, scanning:{scanning_404s}, kw:{avg_kw_hits:.1f}, burst:{avg_burst:.1f})",
                                 status_code=403,
                             )
-            else:
+            elif prediction is not None:
                 # No recent data to analyze - be more conservative
                 # Only block on multiple suspicious indicators, not single 404
                 current_scanning = self._is_scanning_path(request.path)

@@ -15,6 +15,34 @@ def rust_available() -> bool:
     return aiwaf_rust is not None
 
 
+def rust_isolation_forest_available() -> bool:
+    return aiwaf_rust is not None and hasattr(aiwaf_rust, "IsolationForest")
+
+
+def rust_isolation_forest_class():
+    if aiwaf_rust is None:
+        return None
+    return getattr(aiwaf_rust, "IsolationForest", None)
+
+
+def is_rust_isolation_forest(obj) -> bool:
+    if aiwaf_rust is None or obj is None:
+        return False
+    rust_cls = getattr(aiwaf_rust, "IsolationForest", None)
+    if rust_cls is None:
+        return False
+    return isinstance(obj, rust_cls)
+
+
+def rust_isolation_forest_from_json(state):
+    if aiwaf_rust is None or not hasattr(aiwaf_rust, "IsolationForest"):
+        return None
+    try:
+        return aiwaf_rust.IsolationForest.from_json(state)
+    except Exception:
+        return None
+
+
 def validate_headers(headers, required_headers=None, min_score=None) -> str | None:
     if aiwaf_rust is None:
         return None

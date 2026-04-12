@@ -6,6 +6,7 @@ Skips if aiwaf_rust isn't available.
 
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -102,6 +103,116 @@ class RustBackendIntegrationTests(TestCase):
         result = aiwaf_rust.analyze_recent_behavior(entries, ["wp-"])
         self.assertIsNotNone(result)
         self.assertTrue(result["should_block"])
+
+    def test_isolation_forest_round_trip(self):
+        forest = aiwaf_rust.IsolationForest(
+            n_estimators=50,
+            max_samples="auto",
+            contamination="auto",
+            max_features=1.0,
+            bootstrap=False,
+            random_state=42,
+            warm_start=False,
+        )
+        data = [[0.1, 1.0], [0.2, 1.1], [0.3, 0.9], [9.0, 9.0]]
+        forest.fit(data)
+        preds = forest.predict(data)
+        self.assertEqual(len(preds), len(data))
+        self.assertEqual(preds[-1], -1)
+
+        state = forest.to_json()
+        forest2 = aiwaf_rust.IsolationForest.from_json(state)
+        preds2 = forest2.predict(data)
+        self.assertEqual(preds2, preds)
+
+        new_data = [[0.15, 1.05], [0.25, 1.2], [8.9, 9.1]]
+        forest2.retrain(new_data)
+        preds3 = forest2.predict(new_data)
+        self.assertEqual(len(preds3), len(new_data))
+
+    def test_rust_model_load_via_middleware(self):
+        import aiwaf.middleware as mw
+        forest = aiwaf_rust.IsolationForest(
+            n_estimators=10,
+            max_samples="auto",
+            contamination="auto",
+            max_features=1.0,
+            bootstrap=False,
+            random_state=42,
+            warm_start=False,
+        )
+        data = [[0.1, 1.0], [0.2, 1.1], [9.0, 9.0]]
+        forest.fit(data)
+        state = forest.to_json()
+
+        original_loader = mw.load_model_data
+        original_joblib = mw.JOBLIB_AVAILABLE
+        try:
+            mw.load_model_data = lambda: {
+                "model_backend": "aiwaf_rust",
+                "model_state": state,
+            }
+            mw.JOBLIB_AVAILABLE = True
+            model = mw.load_model_safely()
+        finally:
+            mw.load_model_data = original_loader
+            mw.JOBLIB_AVAILABLE = original_joblib
+
+        self.assertIsNotNone(model)
+        preds = model.predict(data)
+        self.assertEqual(len(preds), len(data))
+
+    def test_ai_anomaly_middleware_uses_rust_without_numpy(self):
+        import aiwaf.middleware as mw
+        from types import SimpleNamespace
+
+        forest = aiwaf_rust.IsolationForest(
+            n_estimators=10,
+            max_samples="auto",
+            contamination="auto",
+            max_features=1.0,
+            bootstrap=False,
+            random_state=42,
+            warm_start=False,
+        )
+        forest.fit([[0.1, 1.0], [0.2, 1.1], [9.0, 9.0]])
+
+        original_numpy = mw.NUMPY_AVAILABLE
+        original_is_exempt = mw.is_exempt
+        original_is_ip_exempted = mw.is_ip_exempted
+        original_is_mw_disabled = mw.is_middleware_disabled
+        original_get_ip = mw.get_ip
+        original_path_exists = mw.path_exists_in_django
+        original_is_exempt_path = mw.is_exempt_path
+        try:
+            mw.NUMPY_AVAILABLE = False
+            mw.is_exempt = lambda _req: False
+            mw.is_ip_exempted = lambda _ip: False
+            mw.is_middleware_disabled = lambda _req, _cls: False
+            mw.get_ip = lambda _req: "203.0.113.10"
+            mw.path_exists_in_django = lambda _path: False
+            mw.is_exempt_path = lambda _path: False
+
+            middleware = mw.AIAnomalyMiddleware(lambda r: None)
+            middleware.model = forest
+
+            request = SimpleNamespace(
+                path="/wp-admin",
+                META={},
+                _start_time=time.time() - 0.01,
+            )
+            response = SimpleNamespace(status_code=404)
+            result = middleware.process_response(request, response)
+        finally:
+            mw.NUMPY_AVAILABLE = original_numpy
+            mw.is_exempt = original_is_exempt
+            mw.is_ip_exempted = original_is_ip_exempted
+            mw.is_middleware_disabled = original_is_mw_disabled
+            mw.get_ip = original_get_ip
+            mw.path_exists_in_django = original_path_exists
+            mw.is_exempt_path = original_is_exempt_path
+
+        self.assertIsNotNone(result)
 
 
 

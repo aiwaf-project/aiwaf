@@ -9,7 +9,7 @@ long_description = (HERE / "README.md").read_text(encoding="utf-8")
 
 setup(
     name="aiwaf",
-    version="0.1.9.6.4",
+    version="0.1.9.6.5",
     description="AI‑driven, self‑learning Web Application Firewall for Django",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -40,7 +40,7 @@ setup(
             "geoip2>=4.0",
         ],
         "rust": [
-            "aiwaf-rust>=0.1.1",
+            "aiwaf-rust>=0.1.6",
         ],
         "light": [],
     },

@@ -8,6 +8,8 @@ try:
 except ImportError:
     pd = None
 from django.conf import settings
+from django.db import connection
+from django.db.utils import OperationalError
 from django.utils import timezone
 import os
 import json
@@ -21,6 +23,143 @@ FeatureSample = BlacklistEntry = IPExemption = ExemptPath = DynamicKeyword = Non
 _fallback_keywords = defaultdict(int)
 _fallback_storage_path = os.path.join(os.path.dirname(__file__), 'fallback_keywords.json')
 logger = logging.getLogger("aiwaf.storage")
+
+_blacklist_columns_cache = None
+
+
+def _blacklist_table_columns():
+    global _blacklist_columns_cache
+
+    if _blacklist_columns_cache is not None:
+        return _blacklist_columns_cache
+
+    _import_models()
+    if BlacklistEntry is None:
+        # Models/app registry not ready; don't cache a value yet.
+        return {"extended_request_info"}
+
+    try:
+        table = BlacklistEntry._meta.db_table
+        with connection.cursor() as cursor:
+            desc = connection.introspection.get_table_description(cursor, table)
+        _blacklist_columns_cache = {col.name for col in desc}
+    except Exception:
+        # If introspection fails, assume the column exists and let ORM handle errors.
+        _blacklist_columns_cache = {"extended_request_info"}
+
+    return _blacklist_columns_cache
+
+
+def _blacklist_has_extended_request_info_column() -> bool:
+    cols = _blacklist_table_columns()
+    return "extended_request_info" in cols
+
+
+def _block_ip_legacy_schema(ip, reason):
+    """Block an IP when the BlacklistEntry schema is missing newer columns.
+
+    Uses raw SQL to avoid selecting/inserting missing columns.
+    """
+    _import_models()
+    if BlacklistEntry is None:
+        return
+
+    cols = _blacklist_table_columns()
+    qn = connection.ops.quote_name
+    table = qn(BlacklistEntry._meta.db_table)
+
+    insert_cols = ["ip_address", "reason"]
+    insert_vals = [ip, reason]
+
+    if "created_at" in cols:
+        insert_cols.append("created_at")
+        insert_vals.append(timezone.now())
+
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT 1 FROM {table} WHERE ip_address = %s LIMIT 1", [ip])
+        exists = cursor.fetchone() is not None
+        if exists:
+            cursor.execute(f"UPDATE {table} SET reason = %s WHERE ip_address = %s", [reason, ip])
+            return
+
+        cols_sql = ", ".join(qn(c) for c in insert_cols)
+        placeholders = ", ".join(["%s"] * len(insert_vals))
+        cursor.execute(f"INSERT INTO {table} ({cols_sql}) VALUES ({placeholders})", insert_vals)
+
+
+def _is_blocked_legacy_schema(ip):
+    _import_models()
+    if BlacklistEntry is None:
+        return False
+
+    qn = connection.ops.quote_name
+    table = qn(BlacklistEntry._meta.db_table)
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT 1 FROM {table} WHERE ip_address = %s LIMIT 1", [ip])
+        return cursor.fetchone() is not None
+
+
+def _unblock_ip_legacy_schema(ip):
+    _import_models()
+    if BlacklistEntry is None:
+        return
+
+    qn = connection.ops.quote_name
+    table = qn(BlacklistEntry._meta.db_table)
+    with connection.cursor() as cursor:
+        cursor.execute(f"DELETE FROM {table} WHERE ip_address = %s", [ip])
+
+
+def _get_all_blocked_ips_legacy_schema():
+    _import_models()
+    if BlacklistEntry is None:
+        return []
+
+    qn = connection.ops.quote_name
+    table = qn(BlacklistEntry._meta.db_table)
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT ip_address FROM {table}")
+        return [row[0] for row in cursor.fetchall()]
+
+
+def _get_all_blacklist_entries_legacy_schema():
+    _import_models()
+    if BlacklistEntry is None:
+        return []
+
+    cols = _blacklist_table_columns()
+    select_cols = ["ip_address", "reason"]
+    if "created_at" in cols:
+        select_cols.append("created_at")
+
+    qn = connection.ops.quote_name
+    table = qn(BlacklistEntry._meta.db_table)
+    cols_sql = ", ".join(qn(c) for c in select_cols)
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {cols_sql} FROM {table}")
+        rows = cursor.fetchall()
+
+    results = []
+    for row in rows:
+        item = dict(zip(select_cols, row))
+        item["extended_request_info"] = {}
+        results.append(item)
+    return results
+
+
+def _clear_all_blacklist_entries_legacy_schema():
+    _import_models()
+    if BlacklistEntry is None:
+        return 0
+
+    qn = connection.ops.quote_name
+    table = qn(BlacklistEntry._meta.db_table)
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT COUNT(*) FROM {table}")
+        count = int(cursor.fetchone()[0])
+        cursor.execute(f"DELETE FROM {table}")
+    return count
+
 
 def _import_models():
     """Import Django models only when needed and apps are ready."""
@@ -122,6 +261,11 @@ class ModelBlacklistStore:
         _import_models()
         if BlacklistEntry is None:
             return False
+        if not _blacklist_has_extended_request_info_column():
+            try:
+                return _is_blocked_legacy_schema(ip)
+            except Exception:
+                return False
         try:
             return BlacklistEntry.objects.filter(ip_address=ip).exists()
         except Exception:
@@ -133,6 +277,12 @@ class ModelBlacklistStore:
         _import_models()
         if BlacklistEntry is None:
             logger.warning("Cannot block IP %s, models not available", ip)
+            return
+        if not _blacklist_has_extended_request_info_column():
+            try:
+                _block_ip_legacy_schema(ip, reason)
+            except Exception as e:
+                logger.error("Error blocking IP %s (legacy schema): %s", ip, e, exc_info=True)
             return
         try:
             obj, created = BlacklistEntry.objects.get_or_create(
@@ -147,6 +297,15 @@ class ModelBlacklistStore:
                     and not getattr(obj, "extended_request_info", None)):
                 obj.extended_request_info = extended_request_info
                 obj.save(update_fields=["extended_request_info"])
+        except OperationalError as e:
+            # Compatibility for deployments created before extended_request_info existed.
+            if "extended_request_info" in str(e):
+                try:
+                    _block_ip_legacy_schema(ip, reason)
+                    return
+                except Exception:
+                    pass
+            logger.error("Error blocking IP %s: %s", ip, e, exc_info=True)
         except Exception as e:
             logger.error("Error blocking IP %s: %s", ip, e, exc_info=True)
 
@@ -155,6 +314,12 @@ class ModelBlacklistStore:
         """Remove IP from blacklist"""
         _import_models()
         if BlacklistEntry is None:
+            return
+        if not _blacklist_has_extended_request_info_column():
+            try:
+                _unblock_ip_legacy_schema(ip)
+            except Exception as e:
+                logger.error("Error unblocking IP %s (legacy schema): %s", ip, e, exc_info=True)
             return
         try:
             BlacklistEntry.objects.filter(ip_address=ip).delete()
@@ -177,6 +342,11 @@ class ModelBlacklistStore:
         _import_models()
         if BlacklistEntry is None:
             return []
+        if not _blacklist_has_extended_request_info_column():
+            try:
+                return _get_all_blocked_ips_legacy_schema()
+            except Exception:
+                return []
         try:
             return list(BlacklistEntry.objects.values_list('ip_address', flat=True))
         except Exception:
@@ -188,6 +358,11 @@ class ModelBlacklistStore:
         _import_models()
         if BlacklistEntry is None:
             return []
+        if not _blacklist_has_extended_request_info_column():
+            try:
+                return _get_all_blacklist_entries_legacy_schema()
+            except Exception:
+                return []
         try:
             return list(BlacklistEntry.objects.values(
                 'ip_address', 'reason', 'created_at', 'extended_request_info'
@@ -201,6 +376,12 @@ class ModelBlacklistStore:
         _import_models()
         if BlacklistEntry is None:
             return 0
+        if not _blacklist_has_extended_request_info_column():
+            try:
+                return _clear_all_blacklist_entries_legacy_schema()
+            except Exception as e:
+                logger.error("Error clearing all blacklist entries (legacy schema): %s", e, exc_info=True)
+                return 0
         try:
             count = BlacklistEntry.objects.count()
             BlacklistEntry.objects.all().delete()
