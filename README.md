@@ -1,7 +1,7 @@
 # AIWAF
 
 > A self-learning Web Application Firewall for Python web applications.
-> Framework-agnostic core with optional Django and Flask adapters.
+> Framework-agnostic core with optional Django, Flask, and FastAPI adapters.
 
 AIWAF provides context-aware protection with rate limiting, anomaly detection, honeypots, UUID tamper protection, smart keyword learning, file-extension probing detection, exempt path/IP awareness, and scheduled retraining.
 
