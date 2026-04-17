@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 
-TARGETS = ("direct", "protected_django", "protected_flask")
+TARGETS = ("direct", "protected_django", "protected_flask", "protected_fastapi")
 
 
 def _comparison_files(sandbox_dir: Path) -> set[Path]:
@@ -107,7 +107,7 @@ def main() -> None:
 
     for i in range(1, args.iterations + 1):
         print(f"\n=== Iteration {i}/{args.iterations} ===")
-        print("Running full test suite (Django + Flask, normal + attacks)...")
+        print("Running full test suite (Django + Flask + FastAPI, normal + attacks)...")
         before = _comparison_files(sandbox_dir)
         subprocess.check_call([sys.executable, str(sandbox_dir / "attack-suite.py")], cwd=str(sandbox_dir))
 

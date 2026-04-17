@@ -34,6 +34,14 @@ from .rust_backend import (  # noqa: F401
     analyze_recent_behavior,
 )
 
+
+def __getattr__(name):
+    if name == "AIWAF":
+        from aiwaf.fast.core import AIWAF
+
+        return AIWAF
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 __all__ = [
     "STATUS_IDX",
     "DEFAULT_EXEMPT_PATHS_DJANGO",
@@ -65,4 +73,5 @@ __all__ = [
     "extract_features_batch",
     "finalize_feature_state",
     "analyze_recent_behavior",
+    "AIWAF",
 ]

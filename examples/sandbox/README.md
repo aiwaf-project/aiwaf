@@ -1,6 +1,6 @@
 # AIWAF (Python) + OWASP Juice Shop Sandbox
 
-This sandbox runs AIWAF in front of OWASP Juice Shop using Django and Flask proxy apps.
+This sandbox runs AIWAF in front of OWASP Juice Shop using Django, Flask, and FastAPI proxy apps.
 
 ## Run
 
@@ -14,6 +14,7 @@ Then open:
 
 - AIWAF-protected (Django): `http://localhost:3009`
 - AIWAF-protected (Flask): `http://localhost:3010`
+- AIWAF-protected (FastAPI): `http://localhost:3011`
 - Direct Juice Shop: `http://localhost:3001`
 
 ## Test
@@ -47,10 +48,16 @@ Run against AIWAF-protected Juice Shop (Flask):
 python attack-suite.py http://localhost:3010 protected_flask --mode=attacks
 ```
 
+Run against AIWAF-protected Juice Shop (FastAPI):
+
+```bash
+python attack-suite.py http://localhost:3011 protected_fastapi --mode=attacks
+```
+
 Compare results:
 
 ```bash
-python compare-results.py results_direct_*.json results_protected_django_*.json results_protected_flask_*.json
+python compare-results.py results_direct_*.json results_protected_django_*.json results_protected_flask_*.json results_protected_fastapi_*.json
 ```
 
 Or run the full suite + comparison in one command:

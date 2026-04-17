@@ -8,7 +8,7 @@ README_PATH = HERE / "README.md"
 setup(
     name="aiwaf",
     version="0.1.9.7.1",
-    description="AIdriven, selflearning Web Application Firewall for Python web applications",
+    description="AI-driven, self-learning Web Application Firewall for Python web applications",
     long_description=README_PATH.read_text(encoding="utf-8") if README_PATH.exists() else "AIWAF",
     long_description_content_type="text/markdown",
     author="Aayush Gauba",
@@ -34,6 +34,11 @@ setup(
             "Flask>=2.3",
             "Flask-SQLAlchemy>=3.0",
         ],
+        "fastapi": [
+            "fastapi>=0.110",
+            "starlette>=0.36",
+            "uvicorn>=0.27",
+        ],
         "rust": [
             "aiwaf-rust>=0.1.6",
         ],
@@ -47,13 +52,20 @@ setup(
     },
     entry_points={
         "console_scripts": [
+            "aiwaf=aiwaf.cli:main",
             "aiwaf-detect=aiwaf.cli:aiwaf_detect",
+            "aiwaf-fast=aiwaf.fast.cli:main",
         ]
     },
     classifiers=[
+        "Development Status :: 4 - Beta",
         "Framework :: Django",
         "Framework :: Flask",
+        "Framework :: FastAPI",
+        "Intended Audience :: Developers",
+        "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
-        "License :: MIT License",
+        "Programming Language :: Python :: 3 :: Only",
+        "License :: OSI Approved :: MIT License",
     ],
 )

@@ -14,6 +14,14 @@ This guide helps you properly install AI-WAF in your Django project to avoid com
 pip install aiwaf
 ```
 
+Framework extras:
+
+```bash
+pip install "aiwaf[django]"
+pip install "aiwaf[flask]"
+pip install "aiwaf[fastapi]"
+```
+
 ## Step 2: Configure Django Settings
 
 Add AI-WAF to your Django project's `settings.py`:

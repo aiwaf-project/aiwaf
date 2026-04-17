@@ -421,6 +421,7 @@ def run_default_comparison() -> None:
         {"name": "direct", "url": "http://localhost:3001"},
         {"name": "protected_django", "url": "http://localhost:3009"},
         {"name": "protected_flask", "url": "http://localhost:3010"},
+        {"name": "protected_fastapi", "url": "http://localhost:3011"},
     ]
 
     all_reports: Dict[str, List[Dict[str, Any]]] = {"normal": [], "attacks": []}
@@ -510,4 +511,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

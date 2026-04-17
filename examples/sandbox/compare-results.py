@@ -62,6 +62,7 @@ def main() -> None:
     direct_file: Optional[Path] = None
     django_file: Optional[Path] = None
     flask_file: Optional[Path] = None
+    fastapi_file: Optional[Path] = None
 
     if resolved:
         for p in resolved:
@@ -72,43 +73,57 @@ def main() -> None:
                 django_file = p
             if name.startswith("results_protected_flask_") and flask_file is None:
                 flask_file = p
+            if name.startswith("results_protected_fastapi_") and fastapi_file is None:
+                fastapi_file = p
     else:
         direct_file = _pick_latest_for_target(base_dir, "direct")
         django_file = _pick_latest_for_target(base_dir, "protected_django")
         flask_file = _pick_latest_for_target(base_dir, "protected_flask")
+        fastapi_file = _pick_latest_for_target(base_dir, "protected_fastapi")
 
-    if not direct_file or not django_file or not flask_file:
+    if not direct_file or not django_file or not flask_file or not fastapi_file:
         raise SystemExit(
-            "Need results for direct, protected_django, protected_flask.\n"
-            "Place results_direct_*.json, results_protected_django_*.json, results_protected_flask_*.json in examples/sandbox/ "
+            "Need results for direct, protected_django, protected_flask, protected_fastapi.\n"
+            "Place results_direct_*.json, results_protected_django_*.json, "
+            "results_protected_flask_*.json, results_protected_fastapi_*.json in examples/sandbox/ "
             "or pass them as args."
         )
 
     direct = _load_json(direct_file)
     django = _load_json(django_file)
     flask = _load_json(flask_file)
+    fastapi = _load_json(fastapi_file)
 
     direct_by = _index_by_attack(direct)
     django_by = _index_by_attack(django)
     flask_by = _index_by_attack(flask)
+    fastapi_by = _index_by_attack(fastapi)
 
-    attack_types = sorted(set(direct_by) | set(django_by) | set(flask_by))
+    attack_types = sorted(set(direct_by) | set(django_by) | set(flask_by) | set(fastapi_by))
     rows: List[Dict[str, Any]] = []
 
-    totals = {"direct": {"blocked": 0, "requests": 0}, "django": {"blocked": 0, "requests": 0}, "flask": {"blocked": 0, "requests": 0}}
+    totals = {
+        "direct": {"blocked": 0, "requests": 0},
+        "django": {"blocked": 0, "requests": 0},
+        "flask": {"blocked": 0, "requests": 0},
+        "fastapi": {"blocked": 0, "requests": 0},
+    }
     for attack in attack_types:
         d = direct_by.get(attack, {})
         dj = django_by.get(attack, {})
         fl = flask_by.get(attack, {})
+        fa = fastapi_by.get(attack, {})
 
         row = {
             "attack_type": attack,
             "direct_blocked": int(d.get("blocked") or 0),
             "django_blocked": int(dj.get("blocked") or 0),
             "flask_blocked": int(fl.get("blocked") or 0),
+            "fastapi_blocked": int(fa.get("blocked") or 0),
             "direct_requests": int(d.get("requests_sent") or 0),
             "django_requests": int(dj.get("requests_sent") or 0),
             "flask_requests": int(fl.get("requests_sent") or 0),
+            "fastapi_requests": int(fa.get("requests_sent") or 0),
         }
         rows.append(row)
 
@@ -118,11 +133,14 @@ def main() -> None:
         totals["django"]["requests"] += row["django_requests"]
         totals["flask"]["blocked"] += row["flask_blocked"]
         totals["flask"]["requests"] += row["flask_requests"]
+        totals["fastapi"]["blocked"] += row["fastapi_blocked"]
+        totals["fastapi"]["requests"] += row["fastapi_requests"]
 
     summary = {
         "direct_file": os.path.relpath(str(direct_file), str(base_dir)),
         "django_file": os.path.relpath(str(django_file), str(base_dir)),
         "flask_file": os.path.relpath(str(flask_file), str(base_dir)),
+        "fastapi_file": os.path.relpath(str(fastapi_file), str(base_dir)),
         "rows": rows,
         "totals": totals,
     }
@@ -131,26 +149,27 @@ def main() -> None:
         print(json.dumps(summary, indent=2))
         return
 
-    print("\nAttack Type              | Direct        | Django        | Flask")
-    print("                         | Blocked / Reqs| Blocked / Reqs| Blocked / Reqs")
-    print("-" * 80)
+    print("\nAttack Type              | Direct        | Django        | Flask         | FastAPI")
+    print("                         | Blocked / Reqs| Blocked / Reqs| Blocked / Reqs| Blocked / Reqs")
+    print("-" * 108)
     for row in rows:
         print(
             f"{row['attack_type']:<24} | "
             f"{row['direct_blocked']:>3}/{row['direct_requests']:<4} ({_pct(row['direct_blocked'], row['direct_requests']):>6}) | "
             f"{row['django_blocked']:>3}/{row['django_requests']:<4} ({_pct(row['django_blocked'], row['django_requests']):>6}) | "
-            f"{row['flask_blocked']:>3}/{row['flask_requests']:<4} ({_pct(row['flask_blocked'], row['flask_requests']):>6})"
+            f"{row['flask_blocked']:>3}/{row['flask_requests']:<4} ({_pct(row['flask_blocked'], row['flask_requests']):>6}) | "
+            f"{row['fastapi_blocked']:>3}/{row['fastapi_requests']:<4} ({_pct(row['fastapi_blocked'], row['fastapi_requests']):>6})"
         )
-    print("-" * 80)
+    print("-" * 108)
     print(
         f"{'TOTAL':<24} | "
         f"{totals['direct']['blocked']:>3}/{totals['direct']['requests']:<4} ({_pct(totals['direct']['blocked'], totals['direct']['requests']):>6}) | "
         f"{totals['django']['blocked']:>3}/{totals['django']['requests']:<4} ({_pct(totals['django']['blocked'], totals['django']['requests']):>6}) | "
-        f"{totals['flask']['blocked']:>3}/{totals['flask']['requests']:<4} ({_pct(totals['flask']['blocked'], totals['flask']['requests']):>6})"
+        f"{totals['flask']['blocked']:>3}/{totals['flask']['requests']:<4} ({_pct(totals['flask']['blocked'], totals['flask']['requests']):>6}) | "
+        f"{totals['fastapi']['blocked']:>3}/{totals['fastapi']['requests']:<4} ({_pct(totals['fastapi']['blocked'], totals['fastapi']['requests']):>6})"
     )
     print("")
 
 
 if __name__ == "__main__":
     main()
-

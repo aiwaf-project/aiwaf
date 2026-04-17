@@ -13,10 +13,24 @@ from django.db.utils import OperationalError
 from django.utils import timezone
 import os
 import json
+import csv
 import logging
 from collections import defaultdict
 from ..core.keyword_fallback import KeywordFallbackStore
 from ..core.storage_interfaces import BlacklistStore, ExemptionStore, KeywordStore
+from ..core.storage_schema import (
+    DEFAULT_DATA_DIR,
+    BLACKLIST_CSV as CORE_BLACKLIST_CSV_NAME,
+    WHITELIST_CSV as CORE_WHITELIST_CSV_NAME,
+    KEYWORDS_CSV as CORE_KEYWORDS_CSV_NAME,
+    PATH_EXEMPTIONS_CSV as CORE_PATH_EXEMPTIONS_CSV_NAME,
+)
+from ..core.runtime_storage import (
+    initialize_storage as runtime_initialize_storage,
+    get_blacklist_store as runtime_get_blacklist_store,
+    get_exemption_store as runtime_get_exemption_store,
+    get_keyword_store as runtime_get_keyword_store,
+)
 
 # Defer model imports to avoid AppRegistryNotReady during Django app loading
 FeatureSample = BlacklistEntry = IPExemption = ExemptPath = DynamicKeyword = None
@@ -635,23 +649,244 @@ class ModelKeywordStore:
         # In a full implementation, this would return route-specific keywords
         return ModelKeywordStore.get_all_keywords()
 
-# Factory functions that only return Django model stores
+# Unified CSV/runtime compatibility for Django
+def _resolve_storage_mode():
+    mode = getattr(settings, "AIWAF_STORAGE_MODE", "models")
+    if mode is None:
+        mode = "models"
+    return str(mode).strip().lower()
+
+
+def _resolve_csv_data_dir():
+    explicit = getattr(settings, "AIWAF_DATA_DIR", None) or getattr(settings, "AIWAF_CSV_DATA_DIR", None)
+    if explicit:
+        return str(explicit)
+    env_dir = os.getenv("AIWAF_DATA_DIR")
+    if env_dir:
+        return env_dir
+    return DEFAULT_DATA_DIR
+
+
+def _ensure_runtime_csv_backend():
+    data_dir = _resolve_csv_data_dir()
+    os.makedirs(data_dir, exist_ok=True)
+    runtime_initialize_storage(backend="csv", file_path=os.path.join(data_dir, "runtime_store.csv"))
+    return data_dir
+
+
+def _is_csv_mode():
+    return _resolve_storage_mode() == "csv"
+
+
+CSV_DATA_DIR = _resolve_csv_data_dir()
+BLACKLIST_CSV = os.path.join(CSV_DATA_DIR, CORE_BLACKLIST_CSV_NAME)
+EXEMPTION_CSV = os.path.join(CSV_DATA_DIR, CORE_WHITELIST_CSV_NAME)
+KEYWORDS_CSV = os.path.join(CSV_DATA_DIR, CORE_KEYWORDS_CSV_NAME)
+PATH_EXEMPTIONS_CSV = os.path.join(CSV_DATA_DIR, CORE_PATH_EXEMPTIONS_CSV_NAME)
+STORAGE_MODE = _resolve_storage_mode()
+
+
+class CSVBlacklistStoreAdapter:
+    @staticmethod
+    def is_blocked(ip):
+        return runtime_get_blacklist_store().is_blocked(ip)
+
+    @staticmethod
+    def block_ip(ip, reason="Automated block", extended_request_info=None):
+        runtime_get_blacklist_store().block_ip(ip, reason)
+
+    @staticmethod
+    def unblock_ip(ip):
+        runtime_get_blacklist_store().unblock_ip(ip)
+
+    @staticmethod
+    def add_ip(ip, reason="Automated block", extended_request_info=None):
+        CSVBlacklistStoreAdapter.block_ip(ip, reason, extended_request_info=extended_request_info)
+
+    @staticmethod
+    def remove_ip(ip):
+        CSVBlacklistStoreAdapter.unblock_ip(ip)
+
+    @staticmethod
+    def get_all_blocked_ips():
+        return runtime_get_blacklist_store().get_blocked_ips()
+
+    @staticmethod
+    def get_all():
+        rows = []
+        for ip in runtime_get_blacklist_store().get_blocked_ips():
+            info = runtime_get_blacklist_store().get_block_info(ip) or {}
+            rows.append(
+                {
+                    "ip_address": ip,
+                    "reason": info.get("reason", ""),
+                    "created_at": info.get("blocked_at"),
+                    "extended_request_info": {},
+                }
+            )
+        return rows
+
+    @staticmethod
+    def clear_all():
+        ips = list(runtime_get_blacklist_store().get_blocked_ips())
+        for ip in ips:
+            runtime_get_blacklist_store().unblock_ip(ip)
+        return len(ips)
+
+
+class CSVExemptionStoreAdapter:
+    @staticmethod
+    def is_exempted(ip):
+        return runtime_get_exemption_store().is_exempted(ip)
+
+    @staticmethod
+    def add_exemption(ip, reason="Manual exemption"):
+        runtime_get_exemption_store().add_ip(ip, reason)
+
+    @staticmethod
+    def remove_exemption(ip):
+        runtime_get_exemption_store().remove_ip(ip)
+
+    @staticmethod
+    def add_ip(ip, reason="Manual exemption"):
+        CSVExemptionStoreAdapter.add_exemption(ip, reason)
+
+    @staticmethod
+    def remove_ip(ip):
+        CSVExemptionStoreAdapter.remove_exemption(ip)
+
+    @staticmethod
+    def get_all_exempted_ips():
+        return list(runtime_get_exemption_store().get_exempted_ips())
+
+    @staticmethod
+    def get_all():
+        return [
+            {"ip_address": ip, "reason": "csv exemption", "created_at": None}
+            for ip in sorted(runtime_get_exemption_store().get_exempted_ips())
+        ]
+
+    @staticmethod
+    def clear_all():
+        ips = list(runtime_get_exemption_store().get_exempted_ips())
+        for ip in ips:
+            runtime_get_exemption_store().remove_ip(ip)
+        return len(ips)
+
+
+class CSVKeywordStoreAdapter:
+    @staticmethod
+    def add_keyword(keyword, count=1):
+        runtime_get_keyword_store().add_keyword(keyword, count)
+
+    @staticmethod
+    def remove_keyword(keyword):
+        runtime_get_keyword_store().remove_keyword(keyword)
+
+    @staticmethod
+    def get_top_keywords(n=10):
+        return runtime_get_keyword_store().get_top_keywords(n)
+
+    @staticmethod
+    def get_all_keywords():
+        return runtime_get_keyword_store().get_all_keywords()
+
+    @staticmethod
+    def reset_keywords():
+        for keyword in runtime_get_keyword_store().get_all_keywords():
+            runtime_get_keyword_store().remove_keyword(keyword)
+
+
+class CSVPathExemptionStoreAdapter:
+    @staticmethod
+    def _read():
+        data_dir = _resolve_csv_data_dir()
+        os.makedirs(data_dir, exist_ok=True)
+        path = os.path.join(data_dir, CORE_PATH_EXEMPTIONS_CSV_NAME)
+        rows = {}
+        if not os.path.exists(path):
+            return rows
+        with open(path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                p = (row.get("path") or "").strip()
+                if p:
+                    rows[p] = row.get("reason", "")
+        return rows
+
+    @staticmethod
+    def _write(rows):
+        data_dir = _resolve_csv_data_dir()
+        os.makedirs(data_dir, exist_ok=True)
+        path = os.path.join(data_dir, CORE_PATH_EXEMPTIONS_CSV_NAME)
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["path", "reason", "added_date"])
+            for p, reason in sorted(rows.items()):
+                writer.writerow([p, reason, timezone.now().isoformat()])
+
+    @staticmethod
+    def is_exempted(path):
+        return str(path) in CSVPathExemptionStoreAdapter._read()
+
+    @staticmethod
+    def add_exemption(path, reason="Manual exemption", enabled=True):
+        if not enabled:
+            return
+        rows = CSVPathExemptionStoreAdapter._read()
+        rows[str(path)] = reason
+        CSVPathExemptionStoreAdapter._write(rows)
+
+    @staticmethod
+    def remove_exemption(path):
+        rows = CSVPathExemptionStoreAdapter._read()
+        rows.pop(str(path), None)
+        CSVPathExemptionStoreAdapter._write(rows)
+
+    @staticmethod
+    def get_all_exempted_paths():
+        return list(CSVPathExemptionStoreAdapter._read().keys())
+
+    @staticmethod
+    def get_all():
+        rows = CSVPathExemptionStoreAdapter._read()
+        return [{"path": p, "reason": r, "enabled": True, "created_at": None} for p, r in rows.items()]
+
+    @staticmethod
+    def clear_all():
+        rows = CSVPathExemptionStoreAdapter._read()
+        CSVPathExemptionStoreAdapter._write({})
+        return len(rows)
+
+
+# Factory functions
 def get_feature_store():
     """Get the feature store (Django models only)"""
     return ModelFeatureStore()
 
 def get_blacklist_store() -> BlacklistStore:
-    """Get the blacklist store (Django models only)"""
+    """Get the blacklist store."""
+    if _is_csv_mode():
+        _ensure_runtime_csv_backend()
+        return CSVBlacklistStoreAdapter()
     return ModelBlacklistStore()
 
 def get_exemption_store() -> ExemptionStore:
-    """Get the exemption store (Django models only)"""
+    """Get the exemption store."""
+    if _is_csv_mode():
+        _ensure_runtime_csv_backend()
+        return CSVExemptionStoreAdapter()
     return ModelExemptionStore()
 
 def get_path_exemption_store():
-    """Get the path exemption store (Django models only)"""
+    """Get the path exemption store."""
+    if _is_csv_mode():
+        return CSVPathExemptionStoreAdapter()
     return ModelPathExemptionStore()
 
 def get_keyword_store() -> KeywordStore:
-    """Get the keyword store (Django models only)"""
+    """Get the keyword store."""
+    if _is_csv_mode():
+        _ensure_runtime_csv_backend()
+        return CSVKeywordStoreAdapter()
     return ModelKeywordStore()

@@ -46,6 +46,23 @@ services:
     volumes:
       - aiwaf_logs:/logs
 
+  aiwaf-fastapi:
+    build:
+      context: ../..
+      dockerfile: examples/sandbox/aiwaf-fastapi-proxy/Dockerfile
+    container_name: aiwaf-fastapi-proxy
+    ports:
+      - "3011:3011"
+    environment:
+      TARGET_BASE_URL: http://juice:3000
+      PORT: 3011
+      AIWAF_LOG_DIR: /logs
+      AIWAF_LOG_FORMAT: json
+    depends_on:
+      - juice
+    volumes:
+      - aiwaf_logs:/logs
+
   juice:
     image: bkimminich/juice-shop
     container_name: juice_shop

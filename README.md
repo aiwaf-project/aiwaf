@@ -28,10 +28,11 @@ Optional framework extras:
 ```bash
 pip install "aiwaf[django]"
 pip install "aiwaf[flask]"
+pip install "aiwaf[fastapi]"
 ```
 
 Important:
-- Use the adapter package for your framework (`aiwaf.django` or `aiwaf.flask`).
+- Use the adapter package for your framework (`aiwaf.django`, `aiwaf.flask`, or `aiwaf.fast`).
 - For Django setup and command details, see `INSTALLATION.md` and `REPO_GUIDE_DJANGO.md`.
 
 ---
@@ -54,6 +55,7 @@ aiwaf/
   core/geolock/ipinfo_lite.mmdb # bundled GeoIP database
   django/                       # Django adapter (middleware, models, trainer, commands)
   flask/                        # Flask adapter (integration class, middleware, CLI helpers)
+  fast/                         # FastAPI adapter (middleware, decorators, CLI helpers)
 ```
 
 Framework entry points:
@@ -64,6 +66,9 @@ import aiwaf.django as aiwaf
 
 # Flask
 import aiwaf.flask as aiwaf
+
+# FastAPI
+import aiwaf.fast as aiwaf
 ```
 
 ---
@@ -252,7 +257,7 @@ Legacy compatibility:
 
 ## Middleware Setup
 
-Order matters in both adapters. Put protection middleware early and logging middleware near the end.
+Order matters in all adapters. Put protection middleware early and logging middleware near the end.
 
 Django example order:
 
@@ -271,6 +276,23 @@ MIDDLEWARE = [
 ```
 
 If JSON API clients need JSON 403 bodies, keep `JsonExceptionMiddleware` near the top.
+
+FastAPI quick integration:
+
+```python
+from fastapi import FastAPI
+from aiwaf.fast import AIWAF
+
+app = FastAPI()
+
+aiwaf = AIWAF(
+    app,
+    storage={"backend": "memory"},
+    header_validation={"enabled": True, "quality_threshold": 3},
+    rate_limiting={"enabled": True, "window_seconds": 10, "max_requests": 20},
+    logging_middleware={"enabled": True, "log_dir": "aiwaf_logs", "log_format": "json"},
+)
+```
 
 ---
 
@@ -293,6 +315,10 @@ python manage.py geo_block_country remove US
 Flask adapter:
 - use `aiwaf.flask.AIWAF` for middleware registration
 - use `aiwaf.flask.cli.AIWAFManager` for CSV-backed operational tasks
+
+FastAPI adapter:
+- use `aiwaf.fast.AIWAF` for middleware registration
+- use `aiwaf fast ...` or `aiwaf-fast ...` for CLI operations
 
 ### Django Command Reference
 
@@ -363,6 +389,25 @@ python -m aiwaf.flask.cli add keyword ../etc/passwd
 python -m aiwaf.flask.cli status
 ```
 
+### FastAPI Adapter Reference
+
+Programmatic integration:
+
+```python
+from fastapi import FastAPI
+from aiwaf.fast import AIWAF
+
+app = FastAPI()
+AIWAF(app)
+```
+
+CLI usage:
+
+```bash
+aiwaf fast --help
+aiwaf-fast --help
+```
+
 ### Path-Specific Rules
 
 Use path rules to selectively disable middleware or override rate limits without globally weakening protection:
@@ -409,6 +454,7 @@ The sandbox in `examples/sandbox/` provides:
 - `direct` (no AIWAF)
 - `protected_django`
 - `protected_flask`
+- `protected_fastapi`
 
 Run full benchmark:
 
