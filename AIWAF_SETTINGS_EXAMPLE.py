@@ -83,7 +83,7 @@ AIWAF_MIN_FORM_TIME = 1.0  # minimum seconds for form submission
 AIWAF_WINDOW_SECONDS = 60  # seconds to analyze behavior
 
 # Model path for AI detection
-AIWAF_MODEL_PATH = os.path.join(BASE_DIR, "aiwaf", "resources", "model.pkl")
+AIWAF_MODEL_PATH = os.path.join(BASE_DIR, "aiwaf", "django", "resources", "model.pkl")
 
 # Model storage configuration
 AIWAF_MODEL_STORAGE = "file"  # file | db | cache
@@ -93,7 +93,7 @@ AIWAF_MODEL_STORAGE_FALLBACK = True
 
 # Geo-blocking (optional, requires aiwaf[geoblock])
 AIWAF_GEO_BLOCK_ENABLED = False
-AIWAF_GEOIP_DB_PATH = "aiwaf/geolock/ipinfo_lite.mmdb"
+AIWAF_GEOIP_DB_PATH = "aiwaf/core/geolock/ipinfo_lite.mmdb"
 AIWAF_GEO_BLOCK_COUNTRIES = ["CN", "RU"]
 AIWAF_GEO_ALLOW_COUNTRIES = []
 AIWAF_GEO_CACHE_SECONDS = 3600

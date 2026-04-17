@@ -23,9 +23,9 @@ def analyze_storage_code():
     # Check 1: Global variable initialization
     print("1. Checking global variable initialization:")
     if "FeatureSample = BlacklistEntry = IPExemption = DynamicKeyword = None" in content:
-        print("   ✓ Models initialized as None (deferred import pattern)")
+        print("    Models initialized as None (deferred import pattern)")
     else:
-        print("   ✗ Models not properly initialized")
+        print("    Models not properly initialized")
     print()
     
     # Check 2: _import_models function
@@ -35,19 +35,19 @@ def analyze_storage_code():
         function_body = import_models_match.group(1)
         
         if "apps.ready" in function_body:
-            print("   ✓ Checks for apps.ready")
+            print("    Checks for apps.ready")
         else:
-            print("   ✗ Missing apps.ready check")
+            print("    Missing apps.ready check")
             
         if "apps.is_installed" in function_body:
-            print("   ⚠ Uses apps.is_installed('aiwaf') - this can fail if app name differs")
+            print("    Uses apps.is_installed('aiwaf') - this can fail if app name differs")
         else:
             print("   ? No specific app installation check")
             
         if "try:" in function_body and "except" in function_body:
-            print("   ✓ Has exception handling")
+            print("    Has exception handling")
         else:
-            print("   ✗ Missing exception handling")
+            print("    Missing exception handling")
     print()
     
     # Check 3: add_keyword method
@@ -57,18 +57,18 @@ def analyze_storage_code():
         method_body = add_keyword_match.group(1)
         
         if "if DynamicKeyword is None:" in method_body:
-            print("   ✓ Checks if DynamicKeyword is None")
+            print("    Checks if DynamicKeyword is None")
             if "return" in method_body.split("if DynamicKeyword is None:")[1].split('\n')[1]:
-                print("   ⚠ Returns silently when models unavailable")
+                print("    Returns silently when models unavailable")
             else:
-                print("   ✓ Provides feedback when models unavailable")
+                print("    Provides feedback when models unavailable")
         else:
-            print("   ✗ Missing None check for DynamicKeyword")
+            print("    Missing None check for DynamicKeyword")
             
         if "get_or_create" in method_body:
-            print("   ✓ Uses get_or_create for database operations")
+            print("    Uses get_or_create for database operations")
         else:
-            print("   ✗ Not using get_or_create")
+            print("    Not using get_or_create")
     print()
     
     # Check 4: Middleware usage
@@ -85,7 +85,7 @@ def analyze_storage_code():
         if len(add_keyword_calls) > 3:
             print(f"   ... and {len(add_keyword_calls) - 3} more")
     else:
-        print("   ✗ middleware.py not found")
+        print("    middleware.py not found")
     print()
     
     # Check 5: Potential issues summary
@@ -93,7 +93,7 @@ def analyze_storage_code():
     issues = []
     
     if "apps.is_installed('aiwaf')" in content:
-        issues.append("⚠ Hard-coded 'aiwaf' app name check may fail in different installations")
+        issues.append(" Hard-coded 'aiwaf' app name check may fail in different installations")
     
     if 'return' in content and 'if DynamicKeyword is None:' in content:
         silent_return = True
@@ -109,10 +109,10 @@ def analyze_storage_code():
                     elif 'return' in next_line.strip():
                         break
         if silent_return:
-            issues.append("⚠ Silent failure when models unavailable - no error logging")
+            issues.append(" Silent failure when models unavailable - no error logging")
     
     if not issues:
-        print("   ✓ No obvious issues detected")
+        print("    No obvious issues detected")
     else:
         for issue in issues:
             print(f"   {issue}")

@@ -12,7 +12,7 @@ if __name__ == "__main__":
     sys.path.insert(0, project_root)
     
     # Set Django settings
-    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "tests.test_settings")
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "tests.django.test_settings")
     
     try:
         from django.core.management import execute_from_command_line
@@ -23,4 +23,13 @@ if __name__ == "__main__":
             "forget to activate a virtual environment?"
         ) from exc
     
+    # Django's default test discovery can pick up unrelated directories and create
+    # confusing import attempts (e.g. `aiwaf.tests`, `aiwaf.aiwaf`) when run from
+    # the repo root with no explicit labels. Default to running the Django test
+    # package (`tests/django`) in that case.
+    if len(sys.argv) >= 2 and sys.argv[1] == "test":
+        has_label = any(arg and not arg.startswith("-") for arg in sys.argv[2:])
+        if not has_label:
+            sys.argv.append("tests.django")
+
     execute_from_command_line(sys.argv)

@@ -2,7 +2,7 @@
 
 from django.shortcuts import render
 from django.http import JsonResponse
-from aiwaf.decorators import aiwaf_exempt
+from aiwaf.django.decorators import aiwaf_exempt
 
 # Example 1: Function-based view with decorator
 @aiwaf_exempt

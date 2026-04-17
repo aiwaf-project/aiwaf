@@ -4,7 +4,7 @@ This guide helps you properly install AI-WAF in your Django project to avoid com
 
 ## Common Error Fix
 
-**Error:** `RuntimeError: Model class aiwaf.models.FeatureSample doesn't declare an explicit app_label and isn't in an application in INSTALLED_APPS.`
+**Error:** `RuntimeError: Model class aiwaf.django.models.FeatureSample doesn't declare an explicit app_label and isn't in an application in INSTALLED_APPS.`
 
 **Solution:** Follow the complete installation steps below.
 
@@ -35,7 +35,7 @@ INSTALLED_APPS = [
     'your_app',
     
     # AI-WAF (REQUIRED - must be in INSTALLED_APPS)
-    'aiwaf',
+    'aiwaf.django',
 ]
 ```
 
@@ -60,16 +60,16 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     
     # AI-WAF Protection Middleware (add these)
-    'aiwaf.middleware.JsonExceptionMiddleware',   # Optional: JSON error responses for API clients
-    'aiwaf.middleware.IPAndKeywordBlockMiddleware',
-    'aiwaf.middleware.HeaderValidationMiddleware',
-    'aiwaf.middleware.RateLimitMiddleware',
-    'aiwaf.middleware.AIAnomalyMiddleware',
-    'aiwaf.middleware.HoneypotTimingMiddleware',
-    'aiwaf.middleware.UUIDTamperMiddleware',
+    'aiwaf.django.middleware.JsonExceptionMiddleware',   # Optional: JSON error responses for API clients
+    'aiwaf.django.middleware.IPAndKeywordBlockMiddleware',
+    'aiwaf.django.middleware.HeaderValidationMiddleware',
+    'aiwaf.django.middleware.RateLimitMiddleware',
+    'aiwaf.django.middleware.AIAnomalyMiddleware',
+    'aiwaf.django.middleware.HoneypotTimingMiddleware',
+    'aiwaf.django.middleware.UUIDTamperMiddleware',
     
     # Optional: AI-WAF Request Logger
-    'aiwaf.middleware_logger.AIWAFLoggerMiddleware',
+    'aiwaf.django.middleware_logger.AIWAFLoggerMiddleware',
 ]
 ```
 
@@ -110,7 +110,7 @@ python manage.py add_ipexemption 127.0.0.1 --reason "Testing"
 python manage.py aiwaf_logging --status
 ```
 
-## 🔧 Step 5: Optional Configuration
+##  Step 5: Optional Configuration
 
 ### **Enable Built-in Request Logger**
 
@@ -202,11 +202,11 @@ pip install "Django>=3.2" "requests>=2.25.0"
 **Problem:** AI-WAF models can't be loaded.
 
 **Solutions:**
-1. Add `'aiwaf'` to `INSTALLED_APPS` (required)
+1. Add `'aiwaf.django'` to `INSTALLED_APPS` (required)
 2. Run `python manage.py migrate` if using models
 3. Use CSV mode: `AIWAF_STORAGE_MODE = "csv"`
 
-### **Error: No module named 'aiwaf'**
+### **Error: No module named 'aiwaf.django'**
 
 **Problem:** AI-WAF not installed properly.
 
@@ -230,18 +230,18 @@ pip install --upgrade aiwaf
 ### **Django Models Storage:**
 ```
 your_project/
-├── manage.py
-├── settings.py
-├── db.sqlite3 (contains aiwaf tables)
-└── aiwaf_requests.log (if middleware logging enabled)
+ manage.py
+ settings.py
+ db.sqlite3 (contains aiwaf tables)
+ aiwaf_requests.log (if middleware logging enabled)
 ```
 
 ### **CSV Mode:**
 ```
 your_project/
-├── manage.py  
-├── settings.py
-└── db.sqlite3               # Contains AI-WAF model tables
+ manage.py  
+ settings.py
+ db.sqlite3               # Contains AI-WAF model tables
 ```
 
 **Database Tables Created:**
@@ -275,28 +275,28 @@ AIWAF_USE_RUST = True
 
 ## Verification Checklist
 
-- [ ] `aiwaf` added to `INSTALLED_APPS`
+- [ ] `aiwaf.django` added to `INSTALLED_APPS`
 - [ ] `AIWAF_ACCESS_LOG` configured
 - [ ] Middleware added to `MIDDLEWARE`
 - [ ] Migrations run: `python manage.py migrate aiwaf`
 - [ ] `python manage.py check` passes
 - [ ] Test command works: `python manage.py add_exemption 127.0.0.1`
 
-## 🏃‍♂️ Quick Start (Minimal Setup)
+##  Quick Start (Minimal Setup)
 
 ```python
 # settings.py - Minimal configuration
 
 INSTALLED_APPS = [
     # ... existing apps ...
-    'aiwaf',  # Required
+    'aiwaf.django',  # Required
 ]
 
 MIDDLEWARE = [
     # ... existing middleware ...
-    'aiwaf.middleware.JsonExceptionMiddleware',      # Optional: JSON error responses for API clients
-    'aiwaf.middleware.HeaderValidationMiddleware',   # Bot detection (recommended first)
-    'aiwaf.middleware.IPAndKeywordBlockMiddleware',  # Basic protection
+    'aiwaf.django.middleware.JsonExceptionMiddleware',      # Optional: JSON error responses for API clients
+    'aiwaf.django.middleware.HeaderValidationMiddleware',   # Bot detection (recommended first)
+    'aiwaf.django.middleware.IPAndKeywordBlockMiddleware',  # Basic protection
 ]
 
 # Choose one:

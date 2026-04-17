@@ -1,6 +1,9 @@
 include README.md
 include LICENSE
 recursive-include aiwaf *.py
+recursive-include aiwaf/django/resources *
+recursive-include aiwaf/core/geolock *
+recursive-include aiwaf/flask/resources *
 prune venv
 prune .venv
 recursive-exclude venv *

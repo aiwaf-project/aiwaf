@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def test_imports():
     """Test if all required modules can be imported"""
-    print("🔍 Testing Module Imports...")
+    print(" Testing Module Imports...")
     
     results = {}
     
@@ -27,27 +27,27 @@ def test_imports():
         import warnings
         from collections import defaultdict
         results['core_python'] = True
-        print("   ✅ Core Python modules imported successfully")
+        print("    Core Python modules imported successfully")
     except Exception as e:
         results['core_python'] = False
-        print(f"   ❌ Core Python import failed: {e}")
+        print(f"    Core Python import failed: {e}")
     
     # Test optional dependencies
     try:
         import numpy as np
         results['numpy'] = True
-        print("   ✅ numpy imported successfully")
+        print("    numpy imported successfully")
     except Exception as e:
         results['numpy'] = False
-        print(f"   ⚠️  numpy import failed: {e}")
+        print(f"     numpy import failed: {e}")
     
     try:
         import joblib
         results['joblib'] = True
-        print("   ✅ joblib imported successfully")
+        print("    joblib imported successfully")
     except Exception as e:
         results['joblib'] = False
-        print(f"   ⚠️  joblib import failed: {e}")
+        print(f"     joblib import failed: {e}")
     
     # Test Django modules (might fail outside Django context)
     try:
@@ -55,33 +55,33 @@ def test_imports():
         from django.conf import settings
         from django.core.cache import cache
         results['django_core'] = True
-        print("   ✅ Django core modules imported successfully")
+        print("    Django core modules imported successfully")
     except Exception as e:
         results['django_core'] = False
-        print(f"   ⚠️  Django core import failed: {e} (expected outside Django)")
+        print(f"     Django core import failed: {e} (expected outside Django)")
     
     # Test AIWAF modules
     try:
-        from aiwaf.blacklist_manager import BlacklistManager
+        from aiwaf.django.blacklist_manager import BlacklistManager
         results['blacklist_manager'] = True
-        print("   ✅ BlacklistManager imported successfully")
+        print("    BlacklistManager imported successfully")
     except Exception as e:
         results['blacklist_manager'] = False
-        print(f"   ❌ BlacklistManager import failed: {e}")
+        print(f"    BlacklistManager import failed: {e}")
     
     try:
-        from aiwaf.utils import get_ip, is_exempt
+        from aiwaf.django.utils import get_ip, is_exempt
         results['utils'] = True
-        print("   ✅ AIWAF utils imported successfully")
+        print("    AIWAF utils imported successfully")
     except Exception as e:
         results['utils'] = False
-        print(f"   ❌ AIWAF utils import failed: {e}")
+        print(f"    AIWAF utils import failed: {e}")
     
     return results
 
 def test_rate_limiting_logic():
     """Test the core rate limiting logic without Django dependencies"""
-    print("\n🔍 Testing Rate Limiting Logic...")
+    print("\n Testing Rate Limiting Logic...")
     
     # Simulate the rate limiting algorithm
     WINDOW = 10  # seconds
@@ -134,25 +134,25 @@ def test_rate_limiting_logic():
     rate_limited_count = results.count("RATE_LIMITED")
     flood_count = results.count("FLOOD")
     
-    print(f"   📊 Results for 50 rapid requests:")
+    print(f"    Results for 50 rapid requests:")
     print(f"      - OK: {ok_count}")
     print(f"      - RATE_LIMITED (429): {rate_limited_count}")
     print(f"      - FLOOD (403): {flood_count}")
     
     # Analyze results
     if ok_count > 0 and rate_limited_count > 0:
-        print("   ✅ Rate limiting logic working correctly")
+        print("    Rate limiting logic working correctly")
         return True
     else:
-        print("   ❌ Rate limiting logic not working as expected")
+        print("    Rate limiting logic not working as expected")
         return False
 
 def test_blacklist_manager():
     """Test BlacklistManager functionality"""
-    print("\n🔍 Testing BlacklistManager...")
+    print("\n Testing BlacklistManager...")
     
     try:
-        from aiwaf.blacklist_manager import BlacklistManager
+        from aiwaf.django.blacklist_manager import BlacklistManager
         
         # Check if required methods exist
         required_methods = ['block', 'is_blocked', 'unblock']
@@ -163,59 +163,59 @@ def test_blacklist_manager():
                 missing_methods.append(method)
         
         if missing_methods:
-            print(f"   ❌ Missing methods: {missing_methods}")
+            print(f"    Missing methods: {missing_methods}")
             return False
         
-        print("   ✅ BlacklistManager has all required methods")
+        print("    BlacklistManager has all required methods")
         
         # Test method signatures
         import inspect
         
         block_sig = inspect.signature(BlacklistManager.block)
-        print(f"   📋 block() signature: {block_sig}")
+        print(f"    block() signature: {block_sig}")
         
         is_blocked_sig = inspect.signature(BlacklistManager.is_blocked)
-        print(f"   📋 is_blocked() signature: {is_blocked_sig}")
+        print(f"    is_blocked() signature: {is_blocked_sig}")
         
         return True
         
     except Exception as e:
-        print(f"   ❌ BlacklistManager test failed: {e}")
+        print(f"    BlacklistManager test failed: {e}")
         return False
 
 def test_storage_dependencies():
     """Test storage system dependencies"""
-    print("\n🔍 Testing Storage Dependencies...")
+    print("\n Testing Storage Dependencies...")
     
     try:
-        from aiwaf.storage import get_blacklist_store, get_exemption_store
+        from aiwaf.django.storage import get_blacklist_store, get_exemption_store
         
-        print("   ✅ Storage imports successful")
+        print("    Storage imports successful")
         
         # Test store initialization
         try:
             blacklist_store = get_blacklist_store()
-            print("   ✅ Blacklist store created")
+            print("    Blacklist store created")
         except Exception as e:
-            print(f"   ❌ Blacklist store creation failed: {e}")
+            print(f"    Blacklist store creation failed: {e}")
             return False
         
         try:
             exemption_store = get_exemption_store()
-            print("   ✅ Exemption store created")
+            print("    Exemption store created")
         except Exception as e:
-            print(f"   ❌ Exemption store creation failed: {e}")
+            print(f"    Exemption store creation failed: {e}")
             return False
         
         return True
         
     except Exception as e:
-        print(f"   ❌ Storage test failed: {e}")
+        print(f"    Storage test failed: {e}")
         return False
 
 def analyze_middleware_code():
     """Analyze the actual middleware code for potential issues"""
-    print("\n🔍 Analyzing Middleware Code...")
+    print("\n Analyzing Middleware Code...")
     
     middleware_path = os.path.join(os.path.dirname(__file__), "aiwaf", "middleware.py")
     
@@ -234,43 +234,43 @@ def analyze_middleware_code():
         
         # Check rate limiting logic
         if 'timestamps = [t for t in timestamps if now - t < self.WINDOW]' in content:
-            print("   ✅ Timestamp filtering logic found")
+            print("    Timestamp filtering logic found")
         else:
             issues.append("Missing timestamp filtering logic")
         
         if 'len(timestamps) > self.FLOOD' in content:
-            print("   ✅ Flood detection logic found")
+            print("    Flood detection logic found")
         else:
             issues.append("Missing flood detection logic")
         
         if 'len(timestamps) > self.MAX' in content:
-            print("   ✅ Rate limit detection logic found")
+            print("    Rate limit detection logic found")
         else:
             issues.append("Missing rate limit detection logic")
         
         # Check exemption handling
         exemption_checks = content.count('is_exempt')
         if exemption_checks > 0:
-            print(f"   ✅ Found {exemption_checks} exemption checks")
+            print(f"    Found {exemption_checks} exemption checks")
         else:
             issues.append("No exemption checks found")
         
         if issues:
-            print("   ❌ Issues found:")
+            print("    Issues found:")
             for issue in issues:
                 print(f"      - {issue}")
             return False
         else:
-            print("   ✅ Middleware code analysis passed")
+            print("    Middleware code analysis passed")
             return True
         
     except Exception as e:
-        print(f"   ❌ Code analysis failed: {e}")
+        print(f"    Code analysis failed: {e}")
         return False
 
 def suggest_fixes():
     """Suggest fixes based on the analysis"""
-    print("\n🔧 Suggested Fixes:")
+    print("\n Suggested Fixes:")
     
     print("\n1. Import Issues Fix:")
     print("   Add graceful imports to middleware.py:")
@@ -302,7 +302,7 @@ def suggest_fixes():
     print("   ```python")
     print("   MIDDLEWARE = [")
     print("       # ... other middleware ...")
-    print("       'aiwaf.middleware.RateLimitMiddleware',")
+    print("       'aiwaf.django.middleware.RateLimitMiddleware',")
     print("       # ... rest of AIWAF middleware ...")
     print("   ]")
     print("   ```")
@@ -319,7 +319,7 @@ def suggest_fixes():
 
 def main():
     """Run comprehensive rate limiting diagnostics"""
-    print("🧪 AIWAF Rate Limiting Logic Comprehensive Check")
+    print(" AIWAF Rate Limiting Logic Comprehensive Check")
     print("=" * 60)
     
     tests = [
@@ -338,15 +338,15 @@ def main():
             if test():
                 passed += 1
         except Exception as e:
-            print(f"❌ Test {test.__name__} failed with exception: {e}")
+            print(f" Test {test.__name__} failed with exception: {e}")
     
     print("\n" + "=" * 60)
-    print(f"📊 Diagnostic Results: {passed}/{total} checks passed")
+    print(f" Diagnostic Results: {passed}/{total} checks passed")
     
     if passed < total:
         suggest_fixes()
     else:
-        print("\n🎉 All checks passed! Rate limiting logic appears correct.")
+        print("\n All checks passed! Rate limiting logic appears correct.")
         print("\nIf rate limiting still isn't working, check:")
         print("   1. Django server is running")
         print("   2. Middleware is properly configured")

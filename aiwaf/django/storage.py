@@ -1,0 +1,657 @@
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+from django.conf import settings
+from django.db import connection
+from django.db.utils import OperationalError
+from django.utils import timezone
+import os
+import json
+import logging
+from collections import defaultdict
+from ..core.keyword_fallback import KeywordFallbackStore
+from ..core.storage_interfaces import BlacklistStore, ExemptionStore, KeywordStore
+
+# Defer model imports to avoid AppRegistryNotReady during Django app loading
+FeatureSample = BlacklistEntry = IPExemption = ExemptPath = DynamicKeyword = None
+
+# Fallback storage for when Django models are unavailable
+_fallback_storage_path = os.path.join(os.path.dirname(__file__), 'fallback_keywords.json')
+_fallback_store = KeywordFallbackStore(_fallback_storage_path)
+logger = logging.getLogger("aiwaf.django.storage")
+
+_blacklist_columns_cache = None
+
+
+def _blacklist_table_columns():
+    global _blacklist_columns_cache
+
+    if _blacklist_columns_cache is not None:
+        return _blacklist_columns_cache
+
+    _import_models()
+    if BlacklistEntry is None:
+        # Models/app registry not ready; don't cache a value yet.
+        return {"extended_request_info"}
+
+    try:
+        table = BlacklistEntry._meta.db_table
+        with connection.cursor() as cursor:
+            desc = connection.introspection.get_table_description(cursor, table)
+        _blacklist_columns_cache = {col.name for col in desc}
+    except Exception:
+        # If introspection fails, assume the column exists and let ORM handle errors.
+        _blacklist_columns_cache = {"extended_request_info"}
+
+    return _blacklist_columns_cache
+
+
+def _blacklist_has_extended_request_info_column() -> bool:
+    cols = _blacklist_table_columns()
+    return "extended_request_info" in cols
+
+
+def _block_ip_legacy_schema(ip, reason):
+    """Block an IP when the BlacklistEntry schema is missing newer columns.
+
+    Uses raw SQL to avoid selecting/inserting missing columns.
+    """
+    _import_models()
+    if BlacklistEntry is None:
+        return
+
+    cols = _blacklist_table_columns()
+    qn = connection.ops.quote_name
+    table = qn(BlacklistEntry._meta.db_table)
+
+    insert_cols = ["ip_address", "reason"]
+    insert_vals = [ip, reason]
+
+    if "created_at" in cols:
+        insert_cols.append("created_at")
+        insert_vals.append(timezone.now())
+
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT 1 FROM {table} WHERE ip_address = %s LIMIT 1", [ip])
+        exists = cursor.fetchone() is not None
+        if exists:
+            cursor.execute(f"UPDATE {table} SET reason = %s WHERE ip_address = %s", [reason, ip])
+            return
+
+        cols_sql = ", ".join(qn(c) for c in insert_cols)
+        placeholders = ", ".join(["%s"] * len(insert_vals))
+        cursor.execute(f"INSERT INTO {table} ({cols_sql}) VALUES ({placeholders})", insert_vals)
+
+
+def _is_blocked_legacy_schema(ip):
+    _import_models()
+    if BlacklistEntry is None:
+        return False
+
+    qn = connection.ops.quote_name
+    table = qn(BlacklistEntry._meta.db_table)
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT 1 FROM {table} WHERE ip_address = %s LIMIT 1", [ip])
+        return cursor.fetchone() is not None
+
+
+def _unblock_ip_legacy_schema(ip):
+    _import_models()
+    if BlacklistEntry is None:
+        return
+
+    qn = connection.ops.quote_name
+    table = qn(BlacklistEntry._meta.db_table)
+    with connection.cursor() as cursor:
+        cursor.execute(f"DELETE FROM {table} WHERE ip_address = %s", [ip])
+
+
+def _get_all_blocked_ips_legacy_schema():
+    _import_models()
+    if BlacklistEntry is None:
+        return []
+
+    qn = connection.ops.quote_name
+    table = qn(BlacklistEntry._meta.db_table)
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT ip_address FROM {table}")
+        return [row[0] for row in cursor.fetchall()]
+
+
+def _get_all_blacklist_entries_legacy_schema():
+    _import_models()
+    if BlacklistEntry is None:
+        return []
+
+    cols = _blacklist_table_columns()
+    select_cols = ["ip_address", "reason"]
+    if "created_at" in cols:
+        select_cols.append("created_at")
+
+    qn = connection.ops.quote_name
+    table = qn(BlacklistEntry._meta.db_table)
+    cols_sql = ", ".join(qn(c) for c in select_cols)
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {cols_sql} FROM {table}")
+        rows = cursor.fetchall()
+
+    results = []
+    for row in rows:
+        item = dict(zip(select_cols, row))
+        item["extended_request_info"] = {}
+        results.append(item)
+    return results
+
+
+def _clear_all_blacklist_entries_legacy_schema():
+    _import_models()
+    if BlacklistEntry is None:
+        return 0
+
+    qn = connection.ops.quote_name
+    table = qn(BlacklistEntry._meta.db_table)
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT COUNT(*) FROM {table}")
+        count = int(cursor.fetchone()[0])
+        cursor.execute(f"DELETE FROM {table}")
+    return count
+
+
+def _import_models():
+    """Import Django models only when needed and apps are ready."""
+    global FeatureSample, BlacklistEntry, IPExemption, ExemptPath, DynamicKeyword
+    
+    if FeatureSample is not None:
+        return  # Already imported
+    try:
+        from django.apps import apps
+        if apps.ready:
+            # Try multiple ways to import models
+            try:
+                # First try: direct import (most reliable)
+                from .models import (
+                    FeatureSample,
+                    BlacklistEntry,
+                    IPExemption,
+                    ExemptPath,
+                    DynamicKeyword,
+                )
+            except ImportError:
+                # Second try: check if aiwaf app is installed under different name
+                for app_config in apps.get_app_configs():
+                    if 'aiwaf' in app_config.name.lower() or 'aiwaf' in app_config.label.lower():
+                        try:
+                            from .models import (
+                                FeatureSample,
+                                BlacklistEntry,
+                                IPExemption,
+                                ExemptPath,
+                                DynamicKeyword,
+                            )
+                            break
+                        except ImportError:
+                            continue
+    except (ImportError, RuntimeError, Exception) as e:
+        # Log the error for debugging but don't fail silently
+        logger.warning("Could not import AIWAF models: %s", e, exc_info=True)
+        # Keep models as None if can't import
+        pass
+
+class ModelFeatureStore:
+    @staticmethod
+    def persist_rows(rows):
+        """Persist feature data to Django models"""
+        _import_models()
+        if FeatureSample is None:
+            logger.warning("Django models not available, skipping feature storage")
+            return
+            
+        for row in rows:
+            try:
+                FeatureSample.objects.create(
+                    ip=row[0],
+                    path_len=int(row[1]),
+                    kw_hits=int(row[2]),
+                    resp_time=float(row[3]),
+                    status_idx=int(row[4]),
+                    burst_count=int(row[5]),
+                    total_404=int(row[6]),
+                    label=int(row[7]),
+                    created_at=timezone.now()
+                )
+            except Exception as e:
+                logger.error("Error saving feature sample: %s", e, exc_info=True)
+
+    @staticmethod
+    def get_all_data():
+        """Get all feature data as DataFrame"""
+        _import_models()
+        if FeatureSample is None:
+            return pd.DataFrame() if pd is not None else []
+            
+        try:
+            queryset = FeatureSample.objects.all().values(
+                'ip', 'path_len', 'kw_hits', 'resp_time', 
+                'status_idx', 'burst_count', 'total_404', 'label'
+            )
+            if pd is None:
+                return list(queryset)
+            df = pd.DataFrame(list(queryset))
+            if df.empty:
+                return df
+            
+            feature_cols = ['path_len', 'kw_hits', 'resp_time', 'status_idx', 'burst_count', 'total_404']
+            for col in feature_cols:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+            return df
+        except Exception as e:
+            logger.error("Error loading feature data: %s", e, exc_info=True)
+            return pd.DataFrame()
+
+class ModelBlacklistStore:
+    @staticmethod
+    def is_blocked(ip):
+        """Check if IP is in blacklist"""
+        _import_models()
+        if BlacklistEntry is None:
+            return False
+        if not _blacklist_has_extended_request_info_column():
+            try:
+                return _is_blocked_legacy_schema(ip)
+            except Exception:
+                return False
+        try:
+            return BlacklistEntry.objects.filter(ip_address=ip).exists()
+        except Exception:
+            return False
+
+    @staticmethod
+    def block_ip(ip, reason="Automated block", extended_request_info=None):
+        """Add IP to blacklist"""
+        _import_models()
+        if BlacklistEntry is None:
+            logger.warning("Cannot block IP %s, models not available", ip)
+            return
+        if not _blacklist_has_extended_request_info_column():
+            try:
+                _block_ip_legacy_schema(ip, reason)
+            except Exception as e:
+                logger.error("Error blocking IP %s (legacy schema): %s", ip, e, exc_info=True)
+            return
+        try:
+            obj, created = BlacklistEntry.objects.get_or_create(
+                ip_address=ip,
+                defaults={
+                    'reason': reason,
+                    'created_at': timezone.now(),
+                    'extended_request_info': extended_request_info or {},
+                }
+            )
+            if (not created and extended_request_info
+                    and not getattr(obj, "extended_request_info", None)):
+                obj.extended_request_info = extended_request_info
+                obj.save(update_fields=["extended_request_info"])
+        except OperationalError as e:
+            # Compatibility for deployments created before extended_request_info existed.
+            if "extended_request_info" in str(e):
+                try:
+                    _block_ip_legacy_schema(ip, reason)
+                    return
+                except Exception:
+                    pass
+            logger.error("Error blocking IP %s: %s", ip, e, exc_info=True)
+        except Exception as e:
+            logger.error("Error blocking IP %s: %s", ip, e, exc_info=True)
+
+    @staticmethod
+    def unblock_ip(ip):
+        """Remove IP from blacklist"""
+        _import_models()
+        if BlacklistEntry is None:
+            return
+        if not _blacklist_has_extended_request_info_column():
+            try:
+                _unblock_ip_legacy_schema(ip)
+            except Exception as e:
+                logger.error("Error unblocking IP %s (legacy schema): %s", ip, e, exc_info=True)
+            return
+        try:
+            BlacklistEntry.objects.filter(ip_address=ip).delete()
+        except Exception as e:
+            logger.error("Error unblocking IP %s: %s", ip, e, exc_info=True)
+
+    @staticmethod
+    def remove_ip(ip):
+        """Remove IP from blacklist (alias for unblock_ip)"""
+        ModelBlacklistStore.unblock_ip(ip)
+
+    @staticmethod
+    def add_ip(ip, reason="Automated block", extended_request_info=None):
+        """Add IP to blacklist (alias for block_ip)"""
+        ModelBlacklistStore.block_ip(ip, reason, extended_request_info=extended_request_info)
+
+    @staticmethod
+    def get_all_blocked_ips():
+        """Get all blocked IPs"""
+        _import_models()
+        if BlacklistEntry is None:
+            return []
+        if not _blacklist_has_extended_request_info_column():
+            try:
+                return _get_all_blocked_ips_legacy_schema()
+            except Exception:
+                return []
+        try:
+            return list(BlacklistEntry.objects.values_list('ip_address', flat=True))
+        except Exception:
+            return []
+
+    @staticmethod
+    def get_all():
+        """Get all blacklist entries as dictionaries"""
+        _import_models()
+        if BlacklistEntry is None:
+            return []
+        if not _blacklist_has_extended_request_info_column():
+            try:
+                return _get_all_blacklist_entries_legacy_schema()
+            except Exception:
+                return []
+        try:
+            return list(BlacklistEntry.objects.values(
+                'ip_address', 'reason', 'created_at', 'extended_request_info'
+            ))
+        except Exception:
+            return []
+
+    @staticmethod
+    def clear_all():
+        """Clear all blacklist entries"""
+        _import_models()
+        if BlacklistEntry is None:
+            return 0
+        if not _blacklist_has_extended_request_info_column():
+            try:
+                return _clear_all_blacklist_entries_legacy_schema()
+            except Exception as e:
+                logger.error("Error clearing all blacklist entries (legacy schema): %s", e, exc_info=True)
+                return 0
+        try:
+            count = BlacklistEntry.objects.count()
+            BlacklistEntry.objects.all().delete()
+            return count
+        except Exception as e:
+            logger.error("Error clearing all blacklist entries: %s", e, exc_info=True)
+            return 0
+
+class ModelExemptionStore:
+    @staticmethod
+    def is_exempted(ip):
+        """Check if IP is exempted"""
+        _import_models()
+        if IPExemption is None:
+            return False
+        try:
+            return IPExemption.objects.filter(ip_address=ip).exists()
+        except Exception:
+            return False
+
+    @staticmethod
+    def add_exemption(ip, reason="Manual exemption"):
+        """Add IP to exemption list"""
+        _import_models()
+        if IPExemption is None:
+            logger.warning("Cannot exempt IP %s, models not available", ip)
+            return
+        try:
+            IPExemption.objects.get_or_create(
+                ip_address=ip,
+                defaults={'reason': reason, 'created_at': timezone.now()}
+            )
+        except Exception as e:
+            logger.error("Error exempting IP %s: %s", ip, e, exc_info=True)
+
+    @staticmethod
+    def remove_exemption(ip):
+        """Remove IP from exemption list"""
+        _import_models()
+        if IPExemption is None:
+            return
+        try:
+            IPExemption.objects.filter(ip_address=ip).delete()
+        except Exception as e:
+            logger.error("Error removing exemption for IP %s: %s", ip, e, exc_info=True)
+
+    @staticmethod
+    def remove_ip(ip):
+        """Remove IP from exemption list (alias for remove_exemption)"""
+        ModelExemptionStore.remove_exemption(ip)
+
+    @staticmethod
+    def add_ip(ip, reason="Manual exemption"):
+        """Add IP to exemption list (alias for add_exemption)"""
+        ModelExemptionStore.add_exemption(ip, reason)
+
+    @staticmethod
+    def get_all_exempted_ips():
+        """Get all exempted IPs"""
+        _import_models()
+        if IPExemption is None:
+            return []
+        try:
+            return list(IPExemption.objects.values_list('ip_address', flat=True))
+        except Exception:
+            return []
+
+    @staticmethod
+    def get_all():
+        """Get all exempted IP entries as dictionaries"""
+        _import_models()
+        if IPExemption is None:
+            return []
+        try:
+            return list(IPExemption.objects.values('ip_address', 'reason', 'created_at'))
+        except Exception:
+            return []
+
+    @staticmethod
+    def clear_all():
+        """Clear all exemption entries"""
+        _import_models()
+        if IPExemption is None:
+            return 0
+        try:
+            count = IPExemption.objects.count()
+            IPExemption.objects.all().delete()
+            return count
+        except Exception as e:
+            logger.error("Error clearing all exemption entries: %s", e, exc_info=True)
+            return 0
+
+class ModelPathExemptionStore:
+    @staticmethod
+    def is_exempted(path):
+        """Check if a path is exempted"""
+        _import_models()
+        if ExemptPath is None:
+            return False
+        try:
+            return ExemptPath.objects.filter(path=path, enabled=True).exists()
+        except Exception:
+            return False
+
+    @staticmethod
+    def add_exemption(path, reason="Manual exemption", enabled=True):
+        """Add a path to the exemption list"""
+        _import_models()
+        if ExemptPath is None:
+            logger.warning("Cannot exempt path %s, models not available", path)
+            return
+        try:
+            ExemptPath.objects.update_or_create(
+                path=path,
+                defaults={"reason": reason, "enabled": enabled},
+            )
+        except Exception as e:
+            logger.error("Error exempting path %s: %s", path, e, exc_info=True)
+
+    @staticmethod
+    def remove_exemption(path):
+        """Remove a path from the exemption list"""
+        _import_models()
+        if ExemptPath is None:
+            return
+        try:
+            ExemptPath.objects.filter(path=path).delete()
+        except Exception as e:
+            logger.error("Error removing exemption for path %s: %s", path, e, exc_info=True)
+
+    @staticmethod
+    def get_all_exempted_paths():
+        """Get all exempted paths"""
+        _import_models()
+        if ExemptPath is None:
+            return []
+        try:
+            return list(
+                ExemptPath.objects.filter(enabled=True).values_list("path", flat=True)
+            )
+        except Exception:
+            return []
+
+    @staticmethod
+    def get_all():
+        """Get all exempted path entries as dictionaries"""
+        _import_models()
+        if ExemptPath is None:
+            return []
+        try:
+            return list(ExemptPath.objects.values("path", "reason", "enabled", "created_at"))
+        except Exception:
+            return []
+
+    @staticmethod
+    def clear_all():
+        """Clear all path exemption entries"""
+        _import_models()
+        if ExemptPath is None:
+            return 0
+        try:
+            count = ExemptPath.objects.count()
+            ExemptPath.objects.all().delete()
+            return count
+        except Exception as e:
+            logger.error("Error clearing all path exemptions: %s", e, exc_info=True)
+            return 0
+
+class ModelKeywordStore:
+    @staticmethod
+    def add_keyword(keyword, count=1):
+        """Add a keyword to the dynamic keyword list"""
+        _import_models()
+        if DynamicKeyword is None:
+            _fallback_store.add(keyword, count)
+            logger.info("Using fallback storage for keyword '%s' - Django models not available", keyword)
+            return
+        try:
+            obj, created = DynamicKeyword.objects.get_or_create(keyword=keyword)
+            if not created:
+                obj.count += count
+                obj.save()
+            else:
+                obj.count = count
+                obj.save()
+        except Exception as e:
+            _fallback_store.add(keyword, count)
+            logger.error("Database error adding keyword %s, using fallback storage: %s", keyword, e, exc_info=True)
+
+    @staticmethod
+    def remove_keyword(keyword):
+        """Remove a keyword from the dynamic keyword list"""
+        _import_models()
+        if DynamicKeyword is None:
+            return
+        try:
+            DynamicKeyword.objects.filter(keyword=keyword).delete()
+        except Exception as e:
+            logger.error("Error removing keyword %s: %s", keyword, e, exc_info=True)
+
+    @staticmethod
+    def get_top_keywords(n=10):
+        """Get top N keywords by count"""
+        _import_models()
+        if DynamicKeyword is None:
+            return [keyword for keyword, _count in _fallback_store.top(n)]
+        try:
+            return list(
+                DynamicKeyword.objects.order_by('-count')[:n]
+                .values_list('keyword', flat=True)
+            )
+        except Exception as e:
+            logger.error("Database error getting top keywords, using fallback storage: %s", e, exc_info=True)
+            return [keyword for keyword, _count in _fallback_store.top(n)]
+
+    @staticmethod
+    def get_all_keywords():
+        """Get all keywords"""
+        _import_models()
+        if DynamicKeyword is None:
+            return []
+        try:
+            return list(
+                DynamicKeyword.objects.all().values_list('keyword', flat=True)
+            )
+        except Exception:
+            return []
+
+    @staticmethod
+    def reset_keywords():
+        """Reset all keyword counts"""
+        _import_models()
+        if DynamicKeyword is None:
+            return
+        try:
+            DynamicKeyword.objects.all().delete()
+        except Exception as e:
+            logger.error("Error resetting keywords: %s", e, exc_info=True)
+
+    def add_keyword_for_route(self, route, keyword, count=1):
+        """Add a keyword for a specific route (fallback method)"""
+        # For now, just use the general add_keyword method
+        # In a full implementation, this would handle route-specific storage
+        return ModelKeywordStore.add_keyword(keyword, count)
+    
+    def get_keywords_for_route(self, route):
+        """Get keywords for a specific route (fallback method)"""
+        # For now, return all keywords
+        # In a full implementation, this would return route-specific keywords
+        return ModelKeywordStore.get_all_keywords()
+
+# Factory functions that only return Django model stores
+def get_feature_store():
+    """Get the feature store (Django models only)"""
+    return ModelFeatureStore()
+
+def get_blacklist_store() -> BlacklistStore:
+    """Get the blacklist store (Django models only)"""
+    return ModelBlacklistStore()
+
+def get_exemption_store() -> ExemptionStore:
+    """Get the exemption store (Django models only)"""
+    return ModelExemptionStore()
+
+def get_path_exemption_store():
+    """Get the path exemption store (Django models only)"""
+    return ModelPathExemptionStore()
+
+def get_keyword_store() -> KeywordStore:
+    """Get the keyword store (Django models only)"""
+    return ModelKeywordStore()

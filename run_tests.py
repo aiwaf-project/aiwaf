@@ -30,10 +30,10 @@ def run_tests():
     failures = test_runner.run_tests(["tests"])
     
     if failures:
-        print(f"\n❌ {failures} test(s) failed!")
+        print(f"\n {failures} test(s) failed!")
         sys.exit(1)
     else:
-        print("\n✅ All tests passed!")
+        print("\n All tests passed!")
         sys.exit(0)
 
 

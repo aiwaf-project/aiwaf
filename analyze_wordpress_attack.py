@@ -5,7 +5,7 @@ Demonstrate how AIWAF would handle the /wp-admin/css/colors/midnight/colors.php 
 
 def analyze_wordpress_attack_path():
     """Analyze how AIWAF would handle a WordPress attack path"""
-    print("🔍 Analyzing WordPress Attack Path")
+    print(" Analyzing WordPress Attack Path")
     print("=" * 60)
     
     attack_path = "/wp-admin/css/colors/midnight/colors.php"
@@ -38,23 +38,23 @@ def analyze_wordpress_attack_path():
     print(f"   Flagged segments: {flagged_segments}")
     
     print(f"\n3. Attack Pattern Characteristics:")
-    print(f"   ✓ Contains 'wp-' (WordPress indicator)")
-    print(f"   ✓ Contains '.php' (executable file)")
-    print(f"   ✓ Targets admin area (/wp-admin/)")
-    print(f"   ✓ Specific vulnerable file (colors.php)")
-    print(f"   ✓ Deep directory traversal (css/colors/midnight/)")
+    print(f"    Contains 'wp-' (WordPress indicator)")
+    print(f"    Contains '.php' (executable file)")
+    print(f"    Targets admin area (/wp-admin/)")
+    print(f"    Specific vulnerable file (colors.php)")
+    print(f"    Deep directory traversal (css/colors/midnight/)")
     
     print(f"\n4. Why This Attack Exists:")
-    print(f"   • Historical WordPress vulnerability in theme color files")
-    print(f"   • Remote code execution possibility")
-    print(f"   • Common in automated WordPress scanning tools")
-    print(f"   • Part of broader WordPress vulnerability assessment")
+    print(f"    Historical WordPress vulnerability in theme color files")
+    print(f"    Remote code execution possibility")
+    print(f"    Common in automated WordPress scanning tools")
+    print(f"    Part of broader WordPress vulnerability assessment")
     
     print(f"\n5. AIWAF Response:")
-    print(f"   • Request would be flagged due to 'wp-' and '.php' keywords")
-    print(f"   • If path doesn't exist (non-WordPress site), would trigger learning")
-    print(f"   • IP would likely be blocked after multiple similar requests")
-    print(f"   • AI anomaly detection would flag the pattern")
+    print(f"    Request would be flagged due to 'wp-' and '.php' keywords")
+    print(f"    If path doesn't exist (non-WordPress site), would trigger learning")
+    print(f"    IP would likely be blocked after multiple similar requests")
+    print(f"    AI anomaly detection would flag the pattern")
     
     print(f"\n6. Common Attack Variations:")
     wordpress_attack_paths = [
@@ -72,11 +72,11 @@ def analyze_wordpress_attack_path():
     print(f"   WordPress attack paths commonly seen:")
     for path in wordpress_attack_paths:
         detected = any(kw in path.lower() for kw in STATIC_KW)
-        print(f"   {'✓' if detected else '✗'} {path}")
+        print(f"   {'' if detected else ''} {path}")
 
 def simulate_attack_scenario():
     """Simulate how this attack would appear in logs"""
-    print(f"\n🎯 Simulated Attack Scenario")
+    print(f"\n Simulated Attack Scenario")
     print("=" * 60)
     
     print(f"\n   Typical attack sequence from same IP:")
@@ -101,7 +101,7 @@ def simulate_attack_scenario():
     print(f"   4. Prevent further exploitation attempts")
 
 if __name__ == "__main__":
-    print("🛡️  AIWAF Analysis: WordPress Attack Path")
+    print("  AIWAF Analysis: WordPress Attack Path")
     print("   Path: /wp-admin/css/colors/midnight/colors.php")
     print("   Type: WordPress vulnerability exploitation attempt")
     print()
@@ -109,7 +109,7 @@ if __name__ == "__main__":
     analyze_wordpress_attack_path()
     simulate_attack_scenario()
     
-    print(f"\n📊 Summary:")
+    print(f"\n Summary:")
     print(f"   This path represents a WordPress vulnerability exploitation attempt.")
     print(f"   AIWAF would detect and block this due to 'wp-' and '.php' keywords.")
     print(f"   The attack targets a historical WordPress admin theme vulnerability.")

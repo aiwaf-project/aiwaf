@@ -1,868 +1,831 @@
+# AIWAF
 
-# AI‑WAF
+> A self-learning Web Application Firewall for Python web applications.
+> Framework-agnostic core with optional Django and Flask adapters.
 
-> A self‑learning, Django‑friendly Web Application Firewall  
-> with **enhanced context-aware protection**, rate‑limiting, anomaly detection, honeypots, UUID‑tamper protection, **smart keyword learning**, file‑extension probing detection, exempt path awareness, and daily retraining.
+AIWAF provides context-aware protection with rate limiting, anomaly detection, honeypots, UUID tamper protection, smart keyword learning, file-extension probing detection, exempt path/IP awareness, and scheduled retraining.
 
-**🆕 Latest Enhancements:**
-- ✅ **Smart Keyword Filtering** - Prevents blocking legitimate pages like `/profile/`
-- ✅ **Granular Reset Commands** - Clear specific data types (`--blacklist`, `--keywords`, `--exemptions`)
-- ✅ **Context-Aware Learning** - Only learns from suspicious requests, not legitimate site functionality
-- ✅ **Enhanced Configuration** - `AIWAF_ALLOWED_PATH_KEYWORDS` and `AIWAF_EXEMPT_KEYWORDS`
-- ✅ **Comprehensive HTTP Method Validation** - Blocks GET→POST-only, POST→GET-only, unsupported REST methods
-- ✅ **Enhanced Honeypot Protection** - POST validation & 4-minute page timeout with smart reload detection
-- ✅ **HTTP Header Validation** - Comprehensive bot detection via header analysis and quality scoring
+## Latest Enhancements
+
+- Smart keyword filtering to avoid blocking legitimate paths like `/profile/`
+- Granular reset controls for blacklist, keywords, and exemptions
+- Context-aware learning that prioritizes suspicious traffic over normal routes
+- Enhanced keyword controls via `AIWAF_ALLOWED_PATH_KEYWORDS` and `AIWAF_EXEMPT_KEYWORDS`
+- Comprehensive HTTP method validation in honeypot logic
+- Enhanced honeypot timing with page expiry/reload flow
+- Header validation with quality scoring and bot-pattern detection
 
 ---
 
-## 🚀 Quick Installation
+## Quick Installation
 
 ```bash
 pip install aiwaf
 ```
 
-**⚠️ Important:** Add `'aiwaf'` to your Django `INSTALLED_APPS` to avoid setup errors.
+Optional framework extras:
 
-**📋 Complete Setup Guide:** See [INSTALLATION.md](INSTALLATION.md) for detailed installation instructions and troubleshooting.
+```bash
+pip install "aiwaf[django]"
+pip install "aiwaf[flask]"
+```
+
+Important:
+- Use the adapter package for your framework (`aiwaf.django` or `aiwaf.flask`).
+- For Django setup and command details, see `INSTALLATION.md` and `REPO_GUIDE_DJANGO.md`.
 
 ---
 
 ## System Requirements
 
-No GPU needed—AI-WAF runs entirely on CPU with just Python 3.8+, Django 3.2+, a single vCPU and ~512 MB RAM for small sites; for moderate production traffic you can bump to 2–4 vCPUs and 2–4 GB RAM, offload the daily detect-and-train job to a worker, and rotate logs to keep memory use bounded.
+- Python 3.8+
+- CPU-only operation (no GPU required)
+- Small deployments: ~1 vCPU and ~512 MB RAM
+- Moderate deployments: 2 to 4 vCPU and 2 to 4 GB RAM recommended
+- For production, schedule detect/train jobs and rotate logs
 
-## 📁 Package Structure
+---
 
-```
+## Package Structure
+
+```text
 aiwaf/
-├── __init__.py
-├── blacklist_manager.py
-├── middleware.py
-├── trainer.py                   # exposes train()
-├── utils.py
-├── template_tags/
-│   └── aiwaf_tags.py
-├── resources/
-│   ├── model.pkl                # pre‑trained base model
-│   └── dynamic_keywords.json    # evolves daily
-├── management/
-│   └── commands/
-│       ├── detect_and_train.py      # `python manage.py detect_and_train`
-│       ├── add_ipexemption.py       # `python manage.py add_ipexemption`
-│       ├── aiwaf_reset.py           # `python manage.py aiwaf_reset`
-│       └── aiwaf_logging.py         # `python manage.py aiwaf_logging`
-└── LICENSE
+  core/                         # framework-agnostic helpers, training, storage abstractions
+  core/geolock/ipinfo_lite.mmdb # bundled GeoIP database
+  django/                       # Django adapter (middleware, models, trainer, commands)
+  flask/                        # Flask adapter (integration class, middleware, CLI helpers)
+```
+
+Framework entry points:
+
+```python
+# Django
+import aiwaf.django as aiwaf
+
+# Flask
+import aiwaf.flask as aiwaf
 ```
 
 ---
 
-## 🚀 Features
+## Features
 
-- **IP Blocklist**  
-  Instantly blocks suspicious IPs using Django models with real-time performance.
+- **IP blocklist**
+  - blocks known suspicious sources quickly
+  - supports runtime updates through adapter storage
 
-- **Rate Limiting**  
-  Sliding‑window blocks flooders (> `AIWAF_RATE_MAX` per `AIWAF_RATE_WINDOW`), then blacklists them.
+- **Rate limiting**
+  - sliding-window request control (`AIWAF_RATE_WINDOW`, `AIWAF_RATE_MAX`)
+  - flood threshold support (`AIWAF_RATE_FLOOD`) for aggressive abuse
 
-- **AI Anomaly Detection**  
-  IsolationForest trained on:
-  - Path length  
+- **AI anomaly detection**
+  - IsolationForest-based behavioral detection
+  - model training updates as traffic grows
 
-- **GeoIP Support**  
-  AIWAF supports optional geo-blocking and country-level traffic statistics using a local GeoIP database.
-  - Keyword hits (static + dynamic)  
-  - Response time  
-  - Status‑code index  
-  - Burst count  
-  - Total 404s  
+- **Dynamic keyword learning**
+  - learns suspicious path terms from attack-like traffic
+  - excludes exempt/allowed terms to reduce false positives
 
-- **Enhanced Dynamic Keyword Learning with Django Route Protection**  
-  - **Smart Context-Aware Learning**: Only learns keywords from suspicious requests on non-existent paths
-  - **Automatic Django Route Extraction**: Automatically excludes keywords from:
-    - Valid Django URL patterns (`/profile/`, `/admin/`, `/api/`, etc.)
-    - Django app names and model names (users, posts, categories)
-    - View function names and URL namespaces
-  - **Unified Logic**: Both trainer and middleware use identical legitimate keyword detection
-  - **Configuration Options**: 
-    - `AIWAF_ALLOWED_PATH_KEYWORDS` - Explicitly allow certain keywords in legitimate paths
-    - `AIWAF_EXEMPT_KEYWORDS` - Keywords that should never trigger blocking
-  - **Automatic Cleanup**: Keywords from `AIWAF_EXEMPT_PATHS` are automatically removed from the database
-  - **False Positive Prevention**: Stops learning legitimate site functionality as "malicious"
-  - **Inherent Malicious Detection**: Middleware also blocks obviously malicious keywords (`hack`, `exploit`, `attack`) even if not yet learned
+- **File-extension probing detection**
+  - detects repeated probes for extensions like `.php`, `.asp`, `.jsp`
 
-- **File‑Extension Probing Detection**  
-  Tracks repeated 404s on common extensions (e.g. `.php`, `.asp`) and blocks IPs.
+- **Header validation**
+  - missing required-header detection
+  - suspicious user-agent and header-combination checks
+  - header quality scoring
+  - static-asset exemption support
 
-- **🆕 HTTP Header Validation**
-  Advanced header analysis to detect bots and malicious requests:
-  - **Missing Required Headers** - Blocks requests without User-Agent or Accept headers
-  - **Suspicious User-Agents** - Detects curl, wget, python-requests, automated tools
-  - **Header Quality Scoring** - Calculates realism score based on browser-standard headers
-  - **Legitimate Bot Whitelist** - Allows Googlebot, Bingbot, and other search engines
-  - **Header Combination Analysis** - Detects impossible combinations (HTTP/2 + old browsers)
-  - **Static File Exemption** - Skips validation for CSS, JS, images
+- **Enhanced honeypot timing**
+  - GET to POST timing checks via `AIWAF_MIN_FORM_TIME`
+  - page-age validation via `AIWAF_MAX_PAGE_TIME`
+  - method-misuse checks (for example POST to read-only endpoints)
 
-## 🛡️ Header Validation Middleware Features
+- **UUID tamper protection**
+  - blocks invalid/guessed UUID access attempts
 
-The **HeaderValidationMiddleware** provides advanced bot detection through HTTP header analysis:
+- **GeoIP support**
+  - optional country-level allow/block behavior
+  - local bundled MMDB support by default
 
-### **What it detects:**
-- **Missing Headers**: Requests without standard browser headers
-- **Suspicious User-Agents**: WordPress scanners, exploit tools, basic scrapers
-- **Bot-like Patterns**: Low header diversity, missing Accept headers
-- **Quality Scoring**: 0-11 point system based on header completeness
+- **Built-in logging path**
+  - adapter-level request logging can feed training when primary access logs are unavailable
 
-### **What it allows:**
-- **Legitimate Browsers**: Chrome, Firefox, Safari, Edge with full headers
-- **Search Engine Bots**: Google, Bing, DuckDuckGo, Yandex crawlers
-- **API Clients**: Properly identified with good headers
-- **Static Files**: CSS, JS, images (automatically exempted)
-
-### **Real-world effectiveness:**
-```
-✅ Blocks: WordPress scanners, exploit bots, basic scrapers
-✅ Allows: Real browsers, legitimate bots, API clients
-✅ Quality Score: 10/11 = Legitimate, 2/11 = Suspicious bot
-```
-
-### **Testing header validation:**
-```bash
-# Test with curl (will be blocked - low quality headers)
-curl http://yoursite.com/
-
-# Test with browser (will be allowed - high quality headers)
-# Visit site normally in Chrome/Firefox
-
-# Check logs for header validation blocks
-python manage.py aiwaf_logging --recent
-```
-
-- **Enhanced Timing-Based Honeypot**  
-  Advanced GET→POST timing analysis with comprehensive HTTP method validation:
-  - Submit forms faster than `AIWAF_MIN_FORM_TIME` seconds (default: 1 second)
-  - **🆕 Smart HTTP Method Validation** - Comprehensive protection against method misuse:
-    - Blocks GET requests to POST-only views (form endpoints, API creates)
-    - Blocks POST requests to GET-only views (list pages, read-only content)
-    - Blocks unsupported REST methods (PUT/DELETE to non-REST views)
-    - Uses Django view analysis: class-based views, method handlers, URL patterns
-  - **🆕 Page expiration** after `AIWAF_MAX_PAGE_TIME` (4 minutes) with smart reload
-
-- **UUID Tampering Protection**  
-  Blocks guessed or invalid UUIDs that don't resolve to real models.
-
-- **Built-in Request Logger**  
-  Optional middleware logger that captures requests to Django models:
-  - **Automatic fallback** when main access logs unavailable
-  - **Real-time storage** in database for instant access
-  - **Captures response times** for better anomaly detection
-  - **Zero configuration** - works out of the box
-
-- **Blocked Request Debug Logging**  
-  Optional debug logs that explain why a request was blocked:
-  - **Reason included** (keyword, flood pattern, AI anomaly, header validation, etc.)
-  - **Request context** (IP, method, path, user agent)
-  - **Disabled by default** - enable via Django `LOGGING`
-  
-  Example `settings.py`:
-  ```python
-  LOGGING = {
-      "version": 1,
-      "disable_existing_loggers": False,
-      "handlers": {
-          "console": {"class": "logging.StreamHandler"},
-      },
-      "loggers": {
-          "aiwaf.middleware": {"handlers": ["console"], "level": "DEBUG"},
-      },
-  }
-  ```
-
-- **Blocked Request Responses**
-  By default, AI‑WAF raises `PermissionDenied("blocked")` when a request is blocked,
-  allowing Django to render a standard 403 page. For API clients that need JSON,
-  add `JsonExceptionMiddleware` near the top of your `MIDDLEWARE` list; it will
-  translate `PermissionDenied` into a JSON 403 response when
-  `request.content_type == "application/json"`.
-
-- **Smart Training System**  
-  AI trainer automatically uses the best available data source:
-  - **Primary**: Configured access log files (`AIWAF_ACCESS_LOG`)
-  - **Fallback**: Database RequestLog model when files unavailable
-  - **Seamless switching** between data sources
-  - **Enhanced compatibility** with exemption system
-  - **Minimum log thresholds**: AI training requires `AIWAF_MIN_AI_LOGS` (default 10,000); fewer logs falls back to keyword-only, which still requires `AIWAF_MIN_TRAIN_LOGS` (default 50)
-
-**Exempt Path & IP Awareness**
-
-**Exempt Paths:**
-AI‑WAF automatically exempts common login paths (`/admin/`, `/login/`, `/accounts/login/`, etc.) from all blocking mechanisms. You can add additional exempt paths in your Django `settings.py`:
-
-```python
-AIWAF_EXEMPT_PATHS = [
-    "/api/webhooks/",
-    "/health/",
-    "/special-endpoint/",
-]
-```
-
-You can also store exempt paths in the database (no deploy needed):
-
-```bash
-python manage.py aiwaf_pathshell
-```
-
-Or add directly:
-
-```bash
-python manage.py add_pathexemption /myapp/api/ --reason "API traffic"
-```
-
-**AIWAF Path Shell Commands:**
-```
-ls                     # list routes at current level
-cd <index|name>        # enter a route segment
-up / cd ..             # go up one level
-pwd                    # show current path prefix
-exempt <index|name|.>  # add exemption for selection or current path
-exit                   # quit
-```
-
-
-**Exempt Path & IP Awareness**
-
-**Exempt Paths:**
-AI‑WAF automatically exempts common login paths (`/admin/`, `/login/`, `/accounts/login/`, etc.) from all blocking mechanisms. You can add additional exempt paths in your Django `settings.py`:
-
-```python
-AIWAF_EXEMPT_PATHS = [
-    "/api/webhooks/",
-    "/health/",
-    "/special-endpoint/",
-]
-```
-
-You can also store exempt paths in the database (no deploy needed):
-
-```bash
-python manage.py aiwaf_pathshell
-```
-
-Or add directly:
-
-```bash
-python manage.py add_pathexemption /myapp/api/ --reason "API traffic"
-```
-
-**AIWAF Path Shell Commands:**
-```
-ls                     # list routes at current level
-cd <index|name>        # enter a route segment
-up / cd ..             # go up one level
-pwd                    # show current path prefix
-exempt <index|name|.>  # add exemption for selection or current path
-exit                   # quit
-```
-
-**Exempt Views (Decorator):**
-Use the `@aiwaf_exempt` decorator to exempt specific views from all AI-WAF protection:
-
-```python
-from aiwaf.decorators import aiwaf_exempt
-from django.http import JsonResponse
-
-@aiwaf_exempt
-def my_api_view(request):
-    """This view will be exempt from all AI-WAF protection"""
-    return JsonResponse({"status": "success"})
-
-# Works with class-based views too
-@aiwaf_exempt
-class MyAPIView(View):
-    def get(self, request):
-        return JsonResponse({"method": "GET"})
-```
-
-All exempt paths and views are:
-  - Skipped from keyword learning
-  - Immune to AI blocking
-  - Ignored in log training
-  - Cleaned from `DynamicKeyword` model automatically
-
-**Exempt IPs:**
-You can exempt specific IP addresses from all blocking and blacklisting logic. Exempted IPs will:
-  - Never be added to the blacklist (even if they trigger rules)
-  - Be automatically removed from the blacklist during retraining
-  - Bypass all block/deny logic in middleware
-
-### Managing Exempt IPs
-
-Add an IP to the exemption list using the management command:
-
-```bash
-python manage.py add_ipexemption <ip-address> --reason "optional reason"
-```
-
-### Resetting AI-WAF
-
-The `aiwaf_reset` command provides **granular control** for clearing different types of data:
-
-```bash
-# Clear everything (default - backward compatible)
-python manage.py aiwaf_reset
-
-# Clear everything without confirmation prompt
-python manage.py aiwaf_reset --confirm
-
-# 🆕 GRANULAR CONTROL - Clear specific data types
-python manage.py aiwaf_reset --blacklist      # Clear only blocked IPs
-python manage.py aiwaf_reset --exemptions     # Clear only exempted IPs  
-python manage.py aiwaf_reset --keywords       # Clear only learned keywords
-
-# 🔧 COMBINE OPTIONS - Mix and match as needed
-python manage.py aiwaf_reset --blacklist --keywords      # Keep exemptions
-python manage.py aiwaf_reset --exemptions --keywords     # Keep blacklist
-python manage.py aiwaf_reset --blacklist --exemptions    # Keep keywords
-
-# 🚀 COMMON USE CASES
-# Fix false positive keywords (like "profile" blocking legitimate pages)
-python manage.py aiwaf_reset --keywords --confirm
-python manage.py detect_and_train  # Retrain with enhanced filtering
-
-# Clear blocked IPs but preserve exemptions and learning
-python manage.py aiwaf_reset --blacklist --confirm
-
-# Legacy support (still works for backward compatibility)
-python manage.py aiwaf_reset --blacklist-only    # Legacy: blacklist only
-python manage.py aiwaf_reset --exemptions-only   # Legacy: exemptions only
-```
-
-**Enhanced Feedback:**
-```bash
-$ python manage.py aiwaf_reset --keywords
-🔧 AI-WAF Reset: Clear 15 learned keywords
-Are you sure you want to proceed? [y/N]: y
-✅ Reset complete: Deleted 15 learned keywords
-```
-
-This will ensure the IP is never blocked by AI‑WAF. You can also manage exemptions via the Django admin interface.
-
-- **Daily Retraining**  
-  Reads rotated logs, auto‑blocks 404 floods, retrains the IsolationForest, updates `model.pkl`, and evolves the keyword DB.
-  If GeoIP is enabled, it also prints a country summary for anomalous IPs.
+- **Blocked-request debug logging**
+  - captures reason, IP, method, path, and user-agent in debug mode
 
 ---
 
-## ⚙️ Configuration (`settings.py`)
+## Header Validation Details
 
-```python
-INSTALLED_APPS += ["aiwaf"]
-```
+What it detects:
+- missing core browser-like headers
+- low-diversity header sets typical of simple bots
+- suspicious or automation-focused user agents
+- unrealistic header combinations
 
-### Database Setup
+What it allows:
+- normal browser traffic with complete headers
+- well-identified clients and known legitimate bots
+- static file requests when exempt patterns are configured
 
-After adding `aiwaf` to your `INSTALLED_APPS`, run the following to create the necessary tables:
+Useful test pattern:
 
 ```bash
-python manage.py makemigrations aiwaf
-python manage.py migrate
+# often low-quality header profile
+curl http://your-app.example/
+
+# compare against normal browser traffic
 ```
 
 ---
 
-### Required
+## Exemptions and Safe Routing
+
+AIWAF supports:
+- exempt paths (`AIWAF_EXEMPT_PATHS`)
+- exempt IPs (adapter-managed allowlists)
+- exempt keywords (`AIWAF_EXEMPT_KEYWORDS`)
+- allowed route keywords (`AIWAF_ALLOWED_PATH_KEYWORDS`)
+
+Effects of exemption:
+- excluded from keyword learning
+- bypass of selected blocking paths
+- reduced false positives on trusted operational routes (webhooks, health, static assets)
+
+Decorator-based exemptions:
+- Django adapter and Flask adapter both expose exemption decorators in their adapter modules.
+
+---
+
+## Training and Retraining
+
+Training pipeline:
+1. Read configured access logs or adapter logger output
+2. Detect suspicious patterns (including heavy 404 probe behavior)
+3. Train/update IsolationForest when AI thresholds are met
+4. Refresh dynamic keywords from suspicious traffic
+5. Remove exempt/allowed noise from learned keyword set
+
+Thresholds:
+- `AIWAF_MIN_AI_LOGS` default 10,000 for full AI training
+- `AIWAF_MIN_TRAIN_LOGS` default 50 for keyword-focused fallback
+- `AIWAF_FORCE_AI_TRAINING` can override AI threshold gating
+
+Daily retraining is recommended for active internet-facing workloads.
+
+---
+
+## Configuration (`AIWAF_*`)
+
+AIWAF uses flat `AIWAF_*` settings/config keys.
+Some knobs are adapter-specific; core controls are shared.
+
+Required in most deployments:
 
 ```python
 AIWAF_ACCESS_LOG = "/var/log/nginx/access.log"
 ```
 
----
-
-### Database Models
-
-AI-WAF uses Django models for real-time, high-performance storage:
+Core defaults (examples):
 
 ```python
-# All data is stored in Django models - no configuration needed
-# Tables created automatically with migrations:
-# - aiwaf_blacklistentry     # Blocked IP addresses
-# - aiwaf_ipexemption        # Exempt IP addresses  
-# - aiwaf_exemptpath         # Exempt path prefixes
-# - aiwaf_dynamickeyword     # Dynamic keywords with counts
-# - aiwaf_featuresample      # Feature samples for ML training
-# - aiwaf_requestlog         # Request logs (if middleware logging enabled)
+AIWAF_DISABLE_AI = False
+AIWAF_MIN_AI_LOGS = 10000
+AIWAF_MIN_TRAIN_LOGS = 50
+AIWAF_FORCE_AI_TRAINING = False
+AIWAF_AI_CONTAMINATION = 0.05
+
+AIWAF_RATE_WINDOW = 10
+AIWAF_RATE_MAX = 20
+AIWAF_RATE_FLOOD = 10
+AIWAF_WINDOW_SECONDS = 60
+
+AIWAF_MIN_FORM_TIME = 1.0
+AIWAF_MAX_PAGE_TIME = 240
+AIWAF_FILE_EXTENSIONS = [".php", ".asp", ".jsp"]
+
+AIWAF_ALLOWED_PATH_KEYWORDS = ["profile", "user", "account", "dashboard"]
+AIWAF_EXEMPT_KEYWORDS = ["api", "webhook", "health", "static", "media"]
+AIWAF_EXEMPT_PATHS = ["/favicon.ico", "/robots.txt", "/static/", "/health/"]
 ```
 
-**Benefits of Django Models:**
-- ⚡ **Real-time performance** - No file I/O bottlenecks
-- 🔄 **Instant updates** - Changes visible immediately across all processes
-- 🚀 **Better concurrency** - No file locking issues
-- 📊 **Rich querying** - Use Django ORM for complex operations
-- 🔍 **Admin integration** - View/manage data through Django admin
-
-**Database Setup:**
-```bash
-# Create and apply migrations
-python manage.py makemigrations aiwaf
-python manage.py migrate aiwaf
-```
-
----
-
-### Built-in Request Logger (Optional)
-
-Enable AI-WAF's built-in request logger as a fallback when main access logs aren't available:
+Model storage:
 
 ```python
-# Enable middleware logging
-AIWAF_MIDDLEWARE_LOGGING = True                    # Enable/disable logging
-AIWAF_MIDDLEWARE_LOG = "aiwaf_requests.log"        # Optional log file name
-AIWAF_MIDDLEWARE_CSV = True                        # Write CSV log file (default: True)
-AIWAF_MIDDLEWARE_DB = True                         # Write RequestLog entries (default: True)
-AIWAF_USE_RUST = False                             # Use Rust backend for header validation
+AIWAF_MODEL_PATH = "aiwaf/resources/model.pkl"
+AIWAF_MODEL_STORAGE = "file"          # file | db | cache
+AIWAF_MODEL_CACHE_KEY = "aiwaf:model"
+AIWAF_MODEL_CACHE_TIMEOUT = None
+AIWAF_MODEL_STORAGE_FALLBACK = True
 ```
 
-**Then add middleware to MIDDLEWARE list:**
+Header controls:
 
 ```python
-MIDDLEWARE = [
-    # ... your existing middleware ...
-    'aiwaf.middleware_logger.AIWAFLoggerMiddleware',  # Add near the end
-]
+AIWAF_REQUIRED_HEADERS = None         # list or method->list mapping
+AIWAF_HEADER_QUALITY_MIN_SCORE = 3
 ```
 
-**Manage middleware logging:**
-
-```bash
-python manage.py aiwaf_logging --status    # Check logging status
-python manage.py aiwaf_logging --enable    # Show setup instructions  
-python manage.py aiwaf_logging --clear     # Clear log files
-```
-
-**Benefits:**
-- **Automatic fallback** when `AIWAF_ACCESS_LOG` unavailable
-- **CSV or database storage** with precise timestamps and response times
-- **Zero configuration** - trainer automatically detects and uses model logs
-- **Lightweight** - fails silently to avoid breaking your application
-
-If you want the trainer to use the CSV log file, point `AIWAF_ACCESS_LOG` at the CSV path (e.g., `aiwaf_requests.csv`).
-
----
-
-### Optional Rust Backend (Header Validation)
-
-When `AIWAF_USE_RUST = True`, AI-WAF uses a Rust
-backend (pyo3/maturin) for header validation, feature extraction, and
-behavior analysis. If the Rust module is not available, it automatically
-falls back to the Python implementation.
-
-Default install does not require Rust:
-```bash
-pip install aiwaf
-```
-
-Install the Rust extension from the separate package:
-```bash
-pip install "aiwaf[rust]"
-```
-
-This pulls the separately-released Rust extension package (`aiwaf-rust>=0.1.6`).
-
-**Enable in settings:**
-```python
-AIWAF_MIDDLEWARE_CSV = True
-AIWAF_USE_RUST = True
-```
-
----
-
-### Optional (defaults shown)
+GeoIP:
 
 ```python
-AIWAF_MODEL_PATH         = BASE_DIR / "aiwaf" / "resources" / "model.pkl"
-AIWAF_MODEL_STORAGE      = "file"    # file | db | cache
-AIWAF_MODEL_CACHE_KEY    = "aiwaf:model"
-AIWAF_MODEL_CACHE_TIMEOUT = None     # seconds; None for no expiry
-AIWAF_MODEL_STORAGE_FALLBACK = True  # fallback to file when db/cache unavailable
-AIWAF_MIN_FORM_TIME      = 1.0        # minimum seconds between GET and POST
-AIWAF_MAX_PAGE_TIME      = 240        # maximum page age before requiring reload (4 minutes)
-AIWAF_AI_CONTAMINATION   = 0.05       # AI anomaly detection sensitivity (5%)
-AIWAF_MIN_AI_LOGS        = 10000      # minimum log lines for AI training
-AIWAF_MIN_TRAIN_LOGS     = 50         # minimum log lines for keyword training
-AIWAF_FORCE_AI_TRAINING  = False      # override AIWAF_MIN_AI_LOGS gate
-AIWAF_RATE_WINDOW        = 10         # seconds
-AIWAF_RATE_MAX           = 20         # max requests per window
-AIWAF_RATE_FLOOD         = 10         # flood threshold
-AIWAF_WINDOW_SECONDS     = 60         # anomaly detection window
-AIWAF_FILE_EXTENSIONS    = [".php", ".asp", ".jsp"]
-
-# Geo-blocking (optional, requires aiwaf[geoblock])
-AIWAF_GEO_BLOCK_ENABLED  = False
-AIWAF_GEOIP_DB_PATH      = "aiwaf/geolock/ipinfo_lite.mmdb"
+AIWAF_GEO_BLOCK_ENABLED = False
+AIWAF_GEOIP_DB_PATH = "aiwaf/core/geolock/ipinfo_lite.mmdb"
 AIWAF_GEO_BLOCK_COUNTRIES = ["CN", "RU"]
-AIWAF_GEO_ALLOW_COUNTRIES = []        # If set, only these countries are allowed
-AIWAF_GEO_CACHE_SECONDS  = 3600
-AIWAF_GEO_CACHE_PREFIX   = "aiwaf:geo:"
-AIWAF_EXEMPT_PATHS = [          # optional but highly recommended
-    "/favicon.ico",
-    "/robots.txt",
-    "/static/",
-    "/media/",
-    "/health/",
-]
-
-# 🆕 ENHANCED KEYWORD FILTERING OPTIONS
-AIWAF_ALLOWED_PATH_KEYWORDS = [  # Keywords allowed in legitimate paths
-    "profile", "user", "account", "settings", "dashboard",
-    "admin", "api", "auth", "search", "contact", "about",
-    # Add your site-specific legitimate keywords
-    "buddycraft", "sc2", "starcraft",  # Example: gaming site keywords
-]
-
-AIWAF_EXEMPT_KEYWORDS = [        # Keywords that never trigger blocking
-    "api", "webhook", "health", "static", "media",
-    "upload", "download", "backup", "profile"
-]
-
-AIWAF_DYNAMIC_TOP_N = 10        # Number of dynamic keywords to learn (default: 10)
+AIWAF_GEO_ALLOW_COUNTRIES = []
+AIWAF_GEO_CACHE_SECONDS = 3600
+AIWAF_GEO_CACHE_PREFIX = "aiwaf:geo:"
 ```
 
-> **Note:** You no longer need to define `AIWAF_MALICIOUS_KEYWORDS` or `AIWAF_STATUS_CODES` — they evolve dynamically.
-
-**Model storage options:**
-- `file` (default) writes to `AIWAF_MODEL_PATH`
-- `db` stores the model in the `AIModelArtifact` table (run migrations)
-- `cache` stores the model in your Django cache backend
-
-### Installation Modes
-
-Full install (default) includes AI training and GeoIP support:
-
-```bash
-pip install aiwaf
-```
-
-Light install (manual deps only):
-
-```bash
-pip install aiwaf --no-deps
-pip install "Django>=3.2" "requests>=2.25.0"
-```
-
-Geo-blocking uses the bundled `.mmdb` file by default. Set `AIWAF_GEOIP_DB_PATH` to override.
-
-**GeoBlock Middleware:**
-Enable the middleware and the feature flag:
+Rust acceleration:
 
 ```python
-AIWAF_GEO_BLOCK_ENABLED = True
+AIWAF_USE_RUST = False
 ```
+
+When enabled, AIWAF attempts Rust-backed helpers and falls back to Python automatically.
+
+Legacy compatibility:
+- if you still use nested `AIWAF_SETTINGS`, AIWAF maps common keys into flat `AIWAF_*` values at startup.
+
+---
+
+## Middleware Setup
+
+Order matters in both adapters. Put protection middleware early and logging middleware near the end.
+
+Django example order:
 
 ```python
 MIDDLEWARE = [
-    "aiwaf.middleware.JsonExceptionMiddleware",   # Optional: JSON error responses for API clients
-    "aiwaf.middleware.GeoBlockMiddleware",
-    # ... other AI-WAF middleware ...
+    "aiwaf.django.middleware.JsonExceptionMiddleware",
+    "aiwaf.django.middleware.GeoBlockMiddleware",
+    "aiwaf.django.middleware.IPAndKeywordBlockMiddleware",
+    "aiwaf.django.middleware.RateLimitMiddleware",
+    "aiwaf.django.middleware.AIAnomalyMiddleware",
+    "aiwaf.django.middleware.HoneypotTimingMiddleware",
+    "aiwaf.django.middleware.UUIDTamperMiddleware",
+    "aiwaf.django.middleware.HeaderValidationMiddleware",
+    "aiwaf.django.middleware_logger.AIWAFLoggerMiddleware",
 ]
 ```
 
-### Acknowledgements
+If JSON API clients need JSON 403 bodies, keep `JsonExceptionMiddleware` near the top.
 
-Geo-blocking functionality in AIWAF relies on the IPinfo MMDB for IP-to-country mapping.  
-Thanks to IPinfo for providing a reliable GeoIP database.    
+---
 
-**Dynamic country blocking (database-backed):**
+## Operations
+
+Django adapter examples:
 
 ```bash
+python manage.py detect_and_train
+python manage.py regenerate_model
+python manage.py aiwaf_reset --keywords --confirm
+python manage.py add_ipexemption 203.0.113.10 --reason "trusted integration"
+python manage.py add_pathexemption /api/webhooks/ --reason "partner callbacks"
+python manage.py aiwaf_logging --status
 python manage.py geo_block_country list
 python manage.py geo_block_country add US
 python manage.py geo_block_country remove US
 ```
 
+Flask adapter:
+- use `aiwaf.flask.AIWAF` for middleware registration
+- use `aiwaf.flask.cli.AIWAFManager` for CSV-backed operational tasks
+
+### Django Command Reference
+
+Common management commands:
+
+```bash
+python manage.py detect_and_train
+python manage.py regenerate_model
+python manage.py aiwaf_reset --confirm
+python manage.py aiwaf_reset --blacklist --confirm
+python manage.py aiwaf_reset --keywords --confirm
+python manage.py aiwaf_reset --exemptions --confirm
+python manage.py add_ipexemption <ip> --reason "optional reason"
+python manage.py add_pathexemption /path/prefix/ --reason "optional reason"
+python manage.py aiwaf_pathshell
+python manage.py aiwaf_logging --status
+python manage.py geo_block_country list
+python manage.py geo_block_country add US
+python manage.py geo_block_country remove US
+python manage.py aiwaf_diagnose
+```
+
+`aiwaf_pathshell` helpers:
+
+```text
+ls                     # list path tree at current node
+cd <index|name>        # enter child path node
+up / cd ..             # move up
+pwd                    # current path prefix
+exempt <index|name|.>  # add exemption for selected/current path
+exit                   # quit shell
+```
+
+### Flask Adapter Reference
+
+Programmatic integration:
+
+```python
+from flask import Flask
+from aiwaf.flask import AIWAF
+
+app = Flask(__name__)
+app.config["AIWAF_USE_RUST"] = True
+app.config["AIWAF_GEO_BLOCK_ENABLED"] = False
+app.config["AIWAF_MIN_AI_LOGS"] = 10000
+
+aiwaf = AIWAF(
+    app,
+    middlewares=[
+        "logging",
+        "header_validation",
+        "ip_keyword_block",
+        "rate_limit",
+        "geo_block",
+        "ai_anomaly",
+        "uuid_tamper",
+    ],
+)
+```
+
+Optional Flask CLI manager:
+
+```bash
+python -m aiwaf.flask.cli list all
+python -m aiwaf.flask.cli add whitelist 203.0.113.10
+python -m aiwaf.flask.cli add blacklist 203.0.113.99 --reason "manual test"
+python -m aiwaf.flask.cli add keyword ../etc/passwd
+python -m aiwaf.flask.cli status
+```
+
 ### Path-Specific Rules
 
-Use path rules to selectively disable middleware or override settings without
-full exemptions:
+Use path rules to selectively disable middleware or override rate limits without globally weakening protection:
 
 ```python
 AIWAF_SETTINGS = {
-  "PATH_RULES": [
-    {
-      "PREFIX": "/myapp/api/",
-      "DISABLE": ["HeaderValidationMiddleware"],
-      "RATE_LIMIT": {"WINDOW": 60, "MAX": 2000},
-    },
-    {
-      "PREFIX": "/myapp/",
-      "RATE_LIMIT": {"WINDOW": 60, "MAX": 200},
-    },
-  ]
+    "PATH_RULES": [
+        {
+            "PREFIX": "/api/webhooks/",
+            "DISABLE": ["HeaderValidationMiddleware"],
+            "RATE_LIMIT": {"WINDOW": 60, "MAX": 2000},
+        },
+        {
+            "PREFIX": "/api/public/",
+            "RATE_LIMIT": {"WINDOW": 60, "MAX": 500},
+        },
+    ]
 }
 ```
 
-Each middleware checks `request.path`, computes the effective policy, then
-applies or skips accordingly.
+Rules are matched by path prefix, and the most specific matching rule applies.
 
-Define `PATH_RULES` in your Django settings file (e.g. `settings.py`) under
-`AIWAF_SETTINGS`.
+### Blocking Behavior
 
-### Legacy `AIWAF_SETTINGS` Compatibility
+- Default behavior: blocked requests raise `PermissionDenied("blocked")` and return `403`.
+- For JSON APIs (Django): `JsonExceptionMiddleware` converts blocked JSON requests into JSON `403` payloads.
+- Rate limiting can emit `429` for soft throttling paths while still escalating repeated abuse to blacklist flow.
 
-If you already use the nested `AIWAF_SETTINGS` dict, AI-WAF will map common keys into the flat `AIWAF_*` settings at startup (without overriding explicit `AIWAF_*` values). Supported mappings include `RATE_LIMITING`, `EXEMPTIONS.PATHS`, `IP_BLOCKING.ENABLED`, `KEYWORD_DETECTION` (custom patterns + sensitivity), and `LOGGING.ENABLED`.
+### Logging and Training Data Sources
 
----
+AIWAF trainer can pull from:
 
-## 🧱 Middleware Setup
+1. `AIWAF_ACCESS_LOG` (primary, supports rotated/gzipped parsing where applicable)
+2. middleware-captured logs (CSV/DB depending on adapter settings)
 
-Add in **this** order to your `MIDDLEWARE` list:
-
-```python
-MIDDLEWARE = [
-    "aiwaf.middleware.JsonExceptionMiddleware",   # Optional: JSON error responses for API clients
-    "aiwaf.middleware.GeoBlockMiddleware",
-    "aiwaf.middleware.IPAndKeywordBlockMiddleware",
-    "aiwaf.middleware.RateLimitMiddleware", 
-    "aiwaf.middleware.AIAnomalyMiddleware",
-    "aiwaf.middleware.HoneypotTimingMiddleware",
-    "aiwaf.middleware.UUIDTamperMiddleware",
-    # ... other middleware ...
-    "aiwaf.middleware_logger.AIWAFLoggerMiddleware",  # Optional: Add if using built-in logger
-]
-```
-
-> **⚠️ Order matters!** AI-WAF protection middleware should come early. The logger middleware should come near the end to capture final response data.
-> **JSON APIs:** If you want JSON error bodies on `PermissionDenied`, add `JsonExceptionMiddleware` near the top so it runs last during exception handling.
-
-**UUIDTamperMiddleware behavior:**
-- Only checks models in the view's app that have UUID primary keys or unique UUID fields.
-- If an app has no such models, the middleware is a no-op for that request.
-
-### **Troubleshooting Middleware Errors**
-
-**Error: `Module "aiwaf.middleware" does not define a "UUIDTamperMiddleware" attribute/class`**
-
-**Solutions:**
-1. **Update AI-WAF to latest version:**
-   ```bash
-   pip install --upgrade aiwaf
-   ```
-
-2. **Run diagnostic commands:**
-   ```bash
-   # Quick debug script (from AI-WAF directory)
-   python debug_aiwaf.py
-   
-   # Django management command  
-   python manage.py aiwaf_diagnose
-   ```
-
-3. **Check available middleware classes:**
-   ```python
-   # In Django shell: python manage.py shell
-   import aiwaf.middleware
-   print(dir(aiwaf.middleware))
-   ```
-
-4. **Verify AI-WAF is in INSTALLED_APPS:**
-   ```python
-   # In settings.py
-   INSTALLED_APPS = [
-       # ... other apps ...
-       'aiwaf',  # Must be included
-   ]
-   ```
-
-5. **Use minimal middleware setup if needed:**
-   ```python
-MIDDLEWARE = [
-    # ... your existing middleware ...
-    "aiwaf.middleware.JsonExceptionMiddleware",   # Optional: JSON error responses for API clients
-    "aiwaf.middleware.IPAndKeywordBlockMiddleware",  # Core protection
-    "aiwaf.middleware.RateLimitMiddleware",          # Rate limiting  
-    "aiwaf.middleware.AIAnomalyMiddleware",          # AI detection
-]
-   ```
-
-**Common Issues:**
-- **AppRegistryNotReady Error**: Fixed in v0.1.9.0.1 - update with `pip install --upgrade aiwaf`
-- **Scikit-learn Version Warnings**: Fixed in v0.1.9.0.3 - regenerate model with `python manage.py regenerate_model`
-- Missing Django: `pip install Django`
-- Old AI-WAF version: `pip install --upgrade aiwaf`
-- Missing migrations: `python manage.py migrate`
-- Import errors: Check `INSTALLED_APPS` includes `'aiwaf'`
-
+This enables training even when reverse proxy logs are unavailable.
 
 ---
 
-##  Running Detection & Training
+## Sandbox and Benchmarking
+
+The sandbox in `examples/sandbox/` provides:
+
+- `direct` (no AIWAF)
+- `protected_django`
+- `protected_flask`
+
+Run full benchmark:
 
 ```bash
-python manage.py detect_and_train
+cd examples/sandbox
+python run-and-compare.py -n 5
 ```
 
-### What happens:
-1. Read access logs (incl. rotated or gzipped) **OR** AI-WAF middleware model logs
-2. Auto‑block IPs with ≥ 6 total 404s
-3. Extract features & train IsolationForest
-4. Save `model.pkl` with current scikit-learn version
+Generated outputs:
 
-### Model Regeneration
+- `results_direct_*.json`
+- `results_protected_django_*.json`
+- `results_protected_flask_*.json`
+- `comparison_modes_*.json`
+- `comparison_aggregate_*.json`
 
-If you see scikit-learn version warnings, regenerate the model:
+Interpretation guidance:
 
-```bash
-# Quick model regeneration (recommended)
-python manage.py regenerate_model
-
-# Full retraining with fresh data
-python manage.py detect_and_train
-```
-
-**Benefits:**
-- ✅ Eliminates version compatibility warnings
-- ✅ Uses current scikit-learn optimizations
-- ✅ Maintains same protection level
-4. Save `model.pkl`
-5. Extract top 10 dynamic keywords from 4xx/5xx
-6. Remove any keywords associated with newly exempt paths
-
-**Note:** If main access log (`AIWAF_ACCESS_LOG`) is unavailable, trainer automatically falls back to AI-WAF middleware model logs.
+- `direct` should show low/zero block rate for attacks (baseline)
+- protected targets should keep normal traffic blocking near `0%`
+- compare attack blocked% and median latency across iterations, not single-run averages
 
 ---
 
-## 🧠 How It Works
-```
+## Publish Checklist
+
+Before publishing a new package version:
+
+1. run test suites for both adapters
+2. validate sandbox comparison (`run-and-compare.py -n 3` minimum)
+3. bump package version in `setup.py`
+4. build artifacts (`python -m build`)
+5. smoke-test wheel install in clean virtualenv
+6. verify `README.md` and extras (`django`, `flask`) match actual package behavior
 
 ---
 
-##  Running Detection & Training
+## Reset and Recovery
+
+Granular reset (Django adapter):
 
 ```bash
-python manage.py detect_and_train
-```
-
-### What happens:
-1. Read access logs (incl. rotated or gzipped)
-2. Auto‑block IPs with ≥ 6 total 404s
-3. Extract features & train IsolationForest
-4. Save `model.pkl`
-5. Extract top 10 dynamic keywords from 4xx/5xx
-6. Remove any keywords associated with newly exempt paths
-
----
-
-## 🔧 Troubleshooting
-
-### Legitimate Pages Being Blocked
-
-**Problem**: Users can't access legitimate pages like `/en/profile/` due to keyword blocking.
-
-**Cause**: AIWAF learned legitimate keywords (like "profile") as suspicious from previous traffic.
-
-**Solution**:
-```bash
-# 1. Clear problematic learned keywords
-python manage.py aiwaf_reset --keywords --confirm
-
-# 2. Add legitimate keywords to settings
-# In settings.py:
-AIWAF_ALLOWED_PATH_KEYWORDS = [
-    "profile", "user", "account", "dashboard",
-    # Add your site-specific keywords
-]
-
-# 3. Retrain with enhanced filtering (won't learn legitimate keywords)
-python manage.py detect_and_train
-
-# 4. Test - legitimate pages should now work!
-```
-
-### Preventing Future False Positives
-
-Configure AIWAF to recognize your site's legitimate keywords:
-
-```python
-# settings.py
-AIWAF_ALLOWED_PATH_KEYWORDS = [
-    # Common legitimate keywords
-    "profile", "user", "account", "settings", "dashboard",
-    "admin", "search", "contact", "about", "help",
-    
-    # Your site-specific keywords
-    "buddycraft", "sc2", "starcraft",  # Gaming site example
-    "shop", "cart", "checkout",        # E-commerce example  
-    "blog", "article", "news",         # Content site example
-]
-```
-
-### Reset Command Options
-
-```bash
-# Clear everything (safest for troubleshooting)
+python manage.py aiwaf_reset --blacklist
+python manage.py aiwaf_reset --keywords
+python manage.py aiwaf_reset --exemptions
+python manage.py aiwaf_reset --blacklist --keywords
 python manage.py aiwaf_reset --confirm
-
-# Clear only problematic keywords
-python manage.py aiwaf_reset --keywords --confirm
-
-# Clear blocked IPs but keep exemptions
-python manage.py aiwaf_reset --blacklist --confirm
 ```
+
+Common recovery path for false positives:
+1. clear learned keywords
+2. add legitimate route terms to `AIWAF_ALLOWED_PATH_KEYWORDS`
+3. add never-block terms to `AIWAF_EXEMPT_KEYWORDS`
+4. retrain
 
 ---
 
-## 🧠 How It Works
+## Troubleshooting
 
-| Middleware                         | Purpose                                                         |
-|------------------------------------|-----------------------------------------------------------------|
-| GeoBlockMiddleware                 | Blocks traffic by country based on GeoIP database               |
-| IPAndKeywordBlockMiddleware        | Blocks requests from known blacklisted IPs and Keywords         |
-| RateLimitMiddleware                | Enforces burst & flood thresholds                               |
-| AIAnomalyMiddleware                | ML‑driven behavior analysis + block on anomaly                  |
-| HoneypotTimingMiddleware           | Enhanced bot detection: GET→POST timing, POST validation, page timeouts |
-| UUIDTamperMiddleware               | Blocks guessed/nonexistent UUIDs across models with UUID PKs or unique UUID fields in an app (no-op if none) |
-| HeaderValidationMiddleware         | Blocks suspicious header patterns and low‑quality user agents   |
-| AIWAFLoggerMiddleware              | Optional request logger for model training and analysis         |
+### Legitimate pages blocked
 
-### 🍯 Enhanced Honeypot Protection
+Cause:
+- learned keywords included legitimate app vocabulary
 
-The **HoneypotTimingMiddleware** now includes advanced bot detection capabilities:
+Fix:
 
-#### 🚫 Smart POST Request Validation
-- **Analyzes Django views** to determine actual allowed HTTP methods
-- **Intelligent detection** of GET-only vs POST-capable views
-- **Example**: `POST` to view with `http_method_names = ['get']` → `PermissionDenied (403)`
+```bash
+python manage.py aiwaf_reset --keywords --confirm
+python manage.py detect_and_train
+```
 
-#### ⏰ Page Timeout with Smart Reload
-- **4-minute page expiration** prevents stale session attacks
-- **HTTP 409 response** with reload instructions instead of immediate blocking
-- **CSRF protection** by forcing fresh page loads for old sessions
+Then tune:
+- `AIWAF_ALLOWED_PATH_KEYWORDS`
+- `AIWAF_EXEMPT_KEYWORDS`
 
-#### 👥 Authenticated Session Exemption
-- **Skips timing checks** when the request belongs to an authenticated Django session
-- **Prevents false positives** for offices or VPNs where multiple users share an IP
-- **Still enforces** method validation and blacklist logic—only the timing rule is bypassed
+### AI model not training
+
+- verify log path and permissions
+- check volume vs `AIWAF_MIN_AI_LOGS` / `AIWAF_MIN_TRAIN_LOGS`
+- use `AIWAF_FORCE_AI_TRAINING=True` only when appropriate
+
+### Geo-blocking not active
+
+- verify `AIWAF_GEO_BLOCK_ENABLED=True`
+- verify `AIWAF_GEOIP_DB_PATH`
+- confirm geo middleware is enabled in your adapter chain
+
+### Rust mode appears inactive
+
+- set `AIWAF_USE_RUST=True`
+- verify environment can import Rust extension
+- fallback to Python is expected on Rust import/runtime failure
+
+---
+
+## How It Works
+
+| Layer | Purpose |
+|---|---|
+| Geo blocking | Country-level allow/block filtering |
+| IP/keyword block | Known-bad source and keyword defense |
+| Rate limiting | Burst/flood control in sliding windows |
+| AI anomaly | ML-based behavior outlier detection |
+| Honeypot timing | Automation/timing/method misuse checks |
+| UUID tamper | Invalid UUID access blocking |
+| Header validation | Bot-like header profile detection |
+| Request logger | Optional telemetry capture for analysis/training |
+
+---
+
+## Request Lifecycle (Detailed)
+
+For a typical protected request:
+
+1. Request enters adapter middleware chain.
+2. Path/view/IP exemption checks run first.
+3. Header validation evaluates required headers and quality score.
+4. IP/keyword checks apply static + learned rules.
+5. Rate limit checks apply window/flood logic.
+6. Geo checks apply country allow/block rules (if enabled).
+7. AI anomaly evaluates extracted behavior features (if enabled and model available).
+8. Honeypot timing/method checks evaluate form timing and method misuse.
+9. UUID tamper checks validate UUID lookup behavior where applicable.
+10. Optional logger records request/response metadata.
+
+If any blocking stage denies request:
+- status is typically `403` (`PermissionDenied("blocked")`)
+- JSON APIs can receive JSON-formatted `403` via JSON exception middleware
+- some throttle paths may return `429`
+
+---
+
+## Middleware Notes
+
+`IPAndKeywordBlockMiddleware`:
+- blocks already-blacklisted IPs quickly
+- checks static suspicious keywords and learned dynamic keywords
+- supports exempt keywords and allowed-path keyword logic
+
+`RateLimitMiddleware`:
+- enforces short-window max request budgets
+- can blacklist persistent flooders
+- supports path rule overrides
+
+`GeoBlockMiddleware`:
+- resolves country from source IP via MMDB
+- supports block-list mode and optional allow-list mode
+- can cache lookups for performance
+
+`AIAnomalyMiddleware`:
+- requires model load + thresholds
+- gracefully disables itself when model/deps are unavailable
+- can run Python path or Rust-assisted path depending on config/runtime
+
+`HoneypotTimingMiddleware`:
+- enforces minimum submit timing
+- enforces max page age semantics where enabled
+- includes method misuse detection logic
+
+`UUIDTamperMiddleware`:
+- guards UUID access patterns
+- usually no-op where no UUID model rules apply
+
+`HeaderValidationMiddleware`:
+- checks required headers by method
+- scores request realism and can block low-quality profiles
+- commonly tuned for API/webhook/socket endpoints via `PATH_RULES`
+
+---
+
+## Advanced Configuration Matrix
+
+Traffic controls:
 
 ```python
-# Configuration
-AIWAF_MIN_FORM_TIME = 1.0     # Minimum form submission time
-AIWAF_MAX_PAGE_TIME = 240     # Page timeout (4 minutes)
+AIWAF_RATE_WINDOW = 10
+AIWAF_RATE_MAX = 20
+AIWAF_RATE_FLOOD = 10
+AIWAF_WINDOW_SECONDS = 60
 ```
 
-**Timeline Example**:
+Header validation:
+
+```python
+AIWAF_REQUIRED_HEADERS = None
+AIWAF_HEADER_QUALITY_MIN_SCORE = 3
+AIWAF_MAX_ACCEPT_LENGTH = 4096
 ```
-12:00:00 - GET /contact/   ✅ Page loaded
-12:02:00 - POST /contact/  ✅ Valid submission (2 minutes)
-12:04:30 - POST /contact/  ❌ 409 Conflict (page expired, reload required)
+
+AI/model behavior:
+
+```python
+AIWAF_DISABLE_AI = False
+AIWAF_MIN_AI_LOGS = 10000
+AIWAF_MIN_TRAIN_LOGS = 50
+AIWAF_FORCE_AI_TRAINING = False
+AIWAF_AI_CONTAMINATION = 0.05
+```
+
+Model storage:
+
+```python
+AIWAF_MODEL_STORAGE = "file"      # file | db | cache
+AIWAF_MODEL_PATH = "aiwaf/resources/model.pkl"
+AIWAF_MODEL_CACHE_KEY = "aiwaf:model"
+AIWAF_MODEL_CACHE_TIMEOUT = None
+AIWAF_MODEL_STORAGE_FALLBACK = True
+```
+
+Keyword and false-positive controls:
+
+```python
+AIWAF_ALLOWED_PATH_KEYWORDS = ["profile", "user", "dashboard"]
+AIWAF_EXEMPT_KEYWORDS = ["api", "health", "static", "webhook"]
+AIWAF_DYNAMIC_TOP_N = 10
+```
+
+Exemptions:
+
+```python
+AIWAF_EXEMPT_PATHS = ["/health/", "/static/", "/favicon.ico"]
+AIWAF_EXEMPT_IPS = ["127.0.0.1", "::1"]
 ```
 
 ---
 
-## Sponsors
+## Tuning Playbooks
 
-This project is proudly supported by:
+Reduce false positives without globally weakening protection:
+1. reset learned keywords (`--keywords`)
+2. add legitimate domain terms to `AIWAF_ALLOWED_PATH_KEYWORDS`
+3. add operational terms to `AIWAF_EXEMPT_KEYWORDS`
+4. add route-level `PATH_RULES` for webhook/socket endpoints
+5. retrain and benchmark again
 
-<a href="https://www.digitalocean.com/">
-  <img src="https://opensource.nyc3.cdn.digitaloceanspaces.com/attribution/assets/SVG/DO_Logo_horizontal_blue.svg" width="201px">
-</a>
+Harden for sustained attack traffic:
+1. tune `AIWAF_RATE_WINDOW`, `AIWAF_RATE_MAX`, `AIWAF_RATE_FLOOD`
+2. keep header validation enabled for public paths
+3. keep geo rules explicit and minimal
+4. enable middleware logging + regular retraining
+5. review block reasons before adding broad keyword rules
+
+Stabilize real-time paths:
+1. keep global protections enabled
+2. disable only strict checks on `/socket.io/` or equivalent via `PATH_RULES`
+3. keep blacklist logic for non-realtime paths
+4. whitelist trusted internal integration IPs when needed
+
+---
+
+## Rust Verification
+
+Enable:
+
+```python
+AIWAF_USE_RUST = True
+```
+
+Runtime behavior:
+- Rust extension available: selected paths use Rust acceleration
+- Rust extension unavailable: automatic fallback to Python
+
+Verification checklist:
+1. start app with `AIWAF_USE_RUST=True`
+2. confirm startup/runtime logs show Rust availability or fallback path
+3. benchmark with multiple iterations and compare medians (`run-and-compare.py -n 5`)
+
+---
+
+## Troubleshooting Decision Tree
+
+Blank page but `/` is `200`:
+- inspect JS/CSS/API requests for `403`/`4xx`
+- check whether client IP was blacklisted
+- confirm `PATH_RULES` for socket/static/API paths
+
+Many `403` immediately after one blocked request:
+- likely blacklist cascade
+- clear blacklist and add targeted exemption/path rule
+- avoid disabling all middleware globally
+
+AI anomaly not active:
+- verify model is loadable
+- verify AI deps are installed
+- verify `AIWAF_DISABLE_AI=False`
+- verify thresholds (`AIWAF_MIN_AI_LOGS`, `AIWAF_MIN_TRAIN_LOGS`)
+
+Geo-blocking appears inactive:
+- confirm middleware enabled
+- confirm MMDB path valid
+- confirm allow/block lists are configured as intended
+
+---
+
+## Deployment Patterns
+
+### Reverse Proxy + App Server
+
+Typical production path:
+1. internet -> CDN/WAF edge (optional)
+2. reverse proxy (Nginx/Traefik/Caddy)
+3. application server (Django/Flask with AIWAF middleware)
+4. app database/cache + model/log storage
+
+Recommended:
+- preserve client IP forwarding correctly (`X-Forwarded-For`)
+- keep clock synchronization (NTP) for reliable log timing features
+- rotate logs and enforce retention limits
+- run periodic retraining as a scheduled job
+
+### Multi-Instance Deployments
+
+When running multiple app instances:
+- prefer shared storage mode for model artifacts (`db` or centralized cache)
+- ensure blacklist/exemption updates propagate consistently
+- avoid host-local-only model paths if instances autoscale
+
+### Blue/Green or Rolling Updates
+
+For safer rollout:
+1. deploy with conservative thresholds
+2. verify block metrics and false-positive ratio
+3. gradually tighten controls
+4. promote only after stable benchmark + production canary behavior
+
+---
+
+## Observability and KPIs
+
+Track these indicators per adapter:
+
+- **Normal traffic block rate**: target near `0%`
+- **Attack traffic block rate**: target high and stable under replay suite
+- **P95/P99 response latency**: compare before/after tuning
+- **Blacklist churn**: sudden spikes may indicate noisy rules
+- **Top block reasons**: helps tune headers/keywords/rate limits
+- **Retraining success/failure counts**: detect model pipeline regressions
+
+Minimum dashboard slices:
+- by endpoint family (`/api`, `/socket.io`, static assets)
+- by source ASN/country (if geo enabled)
+- by middleware reason code
+- by deployment version
+
+---
+
+## Security Boundaries and Caveats
+
+AIWAF improves application-layer protection but is not a complete security boundary.
+
+Important caveats:
+- does not replace secure coding, authz, secrets management, patching, or network controls
+- ML anomaly detection is probabilistic and can drift with traffic profile changes
+- aggressive keyword/rate settings can cause self-inflicted outages if not staged
+- websocket/realtime paths often require explicit path-rule tuning
+- allowlists/exemptions should be tightly scoped and periodically reviewed
+
+---
+
+## Contributor Test Strategy
+
+Recommended local validation flow for changes:
+
+1. unit and adapter tests
+2. sandbox startup validation (direct + protected targets)
+3. replay benchmark with multiple iterations
+4. review aggregate detection and latency medians
+5. inspect a sample of blocked and allowed requests for regressions
+
+Suggested benchmark command:
+
+```bash
+cd examples/sandbox
+python run-and-compare.py -n 5
+```
+
+Regression gates (example policy):
+- no increase in normal-traffic blocking
+- no meaningful drop in attack blocked%
+- no unexplained latency regressions beyond agreed budget
+
+---
+
+## FAQ
+
+**Why do I see `403` on `curl` but browser works?**  
+Header validation can classify low-quality client headers as automated traffic.
+
+**Why did everything start returning `403` suddenly?**  
+Likely blacklist cascade after an initial block event; clear blacklist and add targeted path/IP tuning.
+
+**Can I disable one middleware for a single route?**  
+Yes, use `AIWAF_SETTINGS["PATH_RULES"]` with `DISABLE` for that prefix.
+
+**Does Rust mode change detection outcomes?**  
+It should preserve behavior while improving some execution paths; verify with A/B multi-iteration benchmarks.
+
+**Do I need Django to use AIWAF?**  
+No. Core supports both Django and Flask adapters, but some operational commands are Django-specific.
+
+---
+
+## CLI Entry Point
+
+```bash
+aiwaf-detect
+```
+
+Current behavior:
+- dispatches to Django trainer (`aiwaf.django.trainer.train`)
+- requires Django adapter availability
+
+---
+
+## Acknowledgements
+
+GeoIP support uses the bundled IPinfo MMDB format for country mapping.
 
 [DigitalOcean](https://www.digitalocean.com/) provides the cloud infrastructure that powers AIWAF development.
 
@@ -870,6 +833,4 @@ This project is proudly supported by:
 
 ## License
 
-This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for details.
-
----
+MIT. See `LICENSE`.

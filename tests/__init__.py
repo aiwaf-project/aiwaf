@@ -1,1 +1,1 @@
-# AIWAF Tests Package
+# Make tests a package

@@ -27,10 +27,10 @@ try:
 except Exception:
     aiwaf_rust = None
 
-import aiwaf.middleware as middleware_module
-from aiwaf.middleware import HeaderValidationMiddleware, AIAnomalyMiddleware
-from aiwaf.middleware_logger import AIWAFLoggerMiddleware
-from aiwaf import trainer as trainer_module
+import aiwaf.django.middleware as middleware_module
+from aiwaf.django.middleware import HeaderValidationMiddleware, AIAnomalyMiddleware
+from aiwaf.django.middleware_logger import AIWAFLoggerMiddleware
+from aiwaf.django import trainer as trainer_module
 from django.conf import settings
 
 

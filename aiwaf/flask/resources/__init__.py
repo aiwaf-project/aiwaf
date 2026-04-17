@@ -1,0 +1,1 @@
+# This file ensures the resources directory is included in the package

@@ -158,7 +158,7 @@ class LogAnalyzer:
 def demo_log_analysis():
     """Demonstrate log analysis with the provided examples"""
     
-    print("🔍 AIWAF Log Analysis Tool")
+    print(" AIWAF Log Analysis Tool")
     print("=" * 50)
     
     # Sample log entries (including the real ones provided)
@@ -179,7 +179,7 @@ def demo_log_analysis():
     analyzer = LogAnalyzer()
     results = analyzer.analyze_logs(sample_logs)
     
-    print(f"📊 ANALYSIS RESULTS")
+    print(f" ANALYSIS RESULTS")
     print("-" * 30)
     print(f"Total Requests: {results['total_requests']}")
     print(f"Suspicious Requests: {results['suspicious_requests']} ({results['suspicious_requests']/results['total_requests']*100:.1f}%)")
@@ -187,15 +187,15 @@ def demo_log_analysis():
     print(f"Bot Requests: {results['bot_requests']}")
     print(f"Scanning Attempts: {results['scanning_attempts']}")
     
-    print(f"\n🚨 TOP SUSPICIOUS IPs:")
+    print(f"\n TOP SUSPICIOUS IPs:")
     for ip, count in results['top_suspicious_ips'].most_common(5):
         print(f"   {ip}: {count} suspicious requests")
     
-    print(f"\n🎯 TOP TARGETED PATHS:")
+    print(f"\n TOP TARGETED PATHS:")
     for path, count in results['top_suspicious_paths'].most_common(5):
         print(f"   {path}: {count} attempts")
     
-    print(f"\n🔍 DETAILED SUSPICIOUS ACTIVITY:")
+    print(f"\n DETAILED SUSPICIOUS ACTIVITY:")
     for detail in results['suspicious_details']:
         print(f"\n   IP: {detail['ip']}")
         print(f"   Path: {detail['path']}")
@@ -215,19 +215,19 @@ def demo_log_analysis():
             block_reason = "Suspicious User-Agent pattern"
         
         if would_block:
-            print(f"   🛡️ AIWAF Action: BLOCKED ({block_reason})")
+            print(f"    AIWAF Action: BLOCKED ({block_reason})")
         else:
-            print(f"   🛡️ AIWAF Action: Would require further analysis")
+            print(f"    AIWAF Action: Would require further analysis")
     
-    print(f"\n📈 PROTECTION EFFECTIVENESS:")
+    print(f"\n PROTECTION EFFECTIVENESS:")
     blocked_by_header_validation = 0
     for detail in results['suspicious_details']:
         if 'missing_user_agent' in detail['issues'] or 'bot_user_agent' in detail['issues']:
             blocked_by_header_validation += 1
     
-    print(f"• Header Validation would block: {blocked_by_header_validation}/{results['suspicious_requests']} suspicious requests")
-    print(f"• Protection rate: {blocked_by_header_validation/results['suspicious_requests']*100:.1f}% of suspicious traffic")
-    print(f"• False positives: 0 (legitimate browsers passed)")
+    print(f" Header Validation would block: {blocked_by_header_validation}/{results['suspicious_requests']} suspicious requests")
+    print(f" Protection rate: {blocked_by_header_validation/results['suspicious_requests']*100:.1f}% of suspicious traffic")
+    print(f" False positives: 0 (legitimate browsers passed)")
 
 def create_log_monitoring_script():
     """Create a script for ongoing log monitoring"""
@@ -290,7 +290,7 @@ if __name__ == "__main__":
     with open("monitor_headers.py", "w") as f:
         f.write(script_content)
     
-    print(f"\n🔧 CREATED: monitor_headers.py")
+    print(f"\n CREATED: monitor_headers.py")
     print("Usage: tail -f /var/log/nginx/access.log | python monitor_headers.py")
 
 if __name__ == "__main__":

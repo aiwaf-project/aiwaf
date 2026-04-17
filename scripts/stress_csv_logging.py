@@ -23,7 +23,7 @@ from django.test.client import RequestFactory
 
 
 def _worker(log_path, count):
-    from aiwaf.middleware_logger import AIWAFLoggerMiddleware
+    from aiwaf.django.middleware_logger import AIWAFLoggerMiddleware
 
     with override_settings(
         AIWAF_MIDDLEWARE_LOGGING=True,

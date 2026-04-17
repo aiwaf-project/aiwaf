@@ -30,7 +30,7 @@ AIWAF_MODEL_STORAGE_FALLBACK = True
 
 # Geo-blocking (optional, requires aiwaf[geoblock])
 AIWAF_GEO_BLOCK_ENABLED = False
-AIWAF_GEOIP_DB_PATH = "aiwaf/geolock/ipinfo_lite.mmdb"
+AIWAF_GEOIP_DB_PATH = "aiwaf/core/geolock/ipinfo_lite.mmdb"
 AIWAF_GEO_BLOCK_COUNTRIES = ["CN", "RU"]
 AIWAF_GEO_ALLOW_COUNTRIES = []
 AIWAF_GEO_CACHE_SECONDS = 3600
@@ -87,10 +87,10 @@ MIDDLEWARE = [
     'django.middleware.csrf.CsrfViewMiddleware',
     
     # AIWAF Middleware (add these)
-    'aiwaf.middleware.RateLimitMiddleware',           # Rate limiting & burst protection
-    'aiwaf.middleware.IPAndKeywordBlockMiddleware',    # Basic protection
-    'aiwaf.middleware.AIAnomalyMiddleware',            # AI anomaly detection
-    'aiwaf.middleware.KeywordLearningMiddleware',      # Learning middleware
+    'aiwaf.django.middleware.RateLimitMiddleware',           # Rate limiting & burst protection
+    'aiwaf.django.middleware.IPAndKeywordBlockMiddleware',    # Basic protection
+    'aiwaf.django.middleware.AIAnomalyMiddleware',            # AI anomaly detection
+    'aiwaf.django.middleware.KeywordLearningMiddleware',      # Learning middleware
     
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
@@ -102,7 +102,7 @@ MIDDLEWARE = [
 # =============================================================================
 
 # If you want to use database storage instead of JSON files,
-# make sure to include 'aiwaf' in your INSTALLED_APPS:
+# make sure to include 'aiwaf.django' in your INSTALLED_APPS:
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -112,7 +112,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     
     # Add AIWAF app
-    'aiwaf',
+    'aiwaf.django',
     
     # Your other apps...
 ]

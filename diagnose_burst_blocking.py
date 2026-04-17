@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def check_middleware_configuration():
     """Check if rate limiting middleware is properly configured"""
-    print("🔍 Checking Middleware Configuration...")
+    print(" Checking Middleware Configuration...")
     
     # Check middleware.py for available classes
     middleware_path = os.path.join(os.path.dirname(__file__), "aiwaf", "middleware.py")
@@ -31,21 +31,21 @@ def check_middleware_configuration():
         if 'class KeywordLearningMiddleware' in content:
             available_middleware.append('KeywordLearningMiddleware')
         
-        print(f"✅ Available middleware classes: {available_middleware}")
+        print(f" Available middleware classes: {available_middleware}")
         
         if 'RateLimitMiddleware' not in available_middleware:
-            print("❌ ISSUE: RateLimitMiddleware not found!")
+            print(" ISSUE: RateLimitMiddleware not found!")
             return False
         
         return True
         
     except Exception as e:
-        print(f"❌ Error checking middleware: {e}")
+        print(f" Error checking middleware: {e}")
         return False
 
 def check_rate_limiting_logic():
     """Check the rate limiting logic implementation"""
-    print("\n🔍 Checking Rate Limiting Logic...")
+    print("\n Checking Rate Limiting Logic...")
     
     middleware_path = os.path.join(os.path.dirname(__file__), "aiwaf", "middleware.py")
     try:
@@ -62,41 +62,41 @@ def check_rate_limiting_logic():
             rate_settings.append('AIWAF_RATE_FLOOD (hard limit, default: 40)')
         
         if rate_settings:
-            print("✅ Rate limiting settings found:")
+            print(" Rate limiting settings found:")
             for setting in rate_settings:
                 print(f"   - {setting}")
         else:
-            print("❌ ISSUE: No rate limiting settings found!")
+            print(" ISSUE: No rate limiting settings found!")
             return False
         
         # Check for blocking logic
         if 'BlacklistManager.block(ip, "Flood pattern")' in content:
-            print("✅ Flood pattern blocking logic found")
+            print(" Flood pattern blocking logic found")
         else:
-            print("❌ ISSUE: Flood pattern blocking logic missing!")
+            print(" ISSUE: Flood pattern blocking logic missing!")
             return False
         
         # Check for cache usage
         if 'cache.get(key, [])' in content and 'cache.set(key, timestamps' in content:
-            print("✅ Cache-based request tracking found")
+            print(" Cache-based request tracking found")
         else:
-            print("❌ ISSUE: Cache-based request tracking missing!")
+            print(" ISSUE: Cache-based request tracking missing!")
             return False
         
         return True
         
     except Exception as e:
-        print(f"❌ Error checking rate limiting logic: {e}")
+        print(f" Error checking rate limiting logic: {e}")
         return False
 
 def check_blacklist_manager():
     """Check if BlacklistManager is working correctly"""
-    print("\n🔍 Checking BlacklistManager...")
+    print("\n Checking BlacklistManager...")
     
     try:
         # Try to import BlacklistManager
-        from aiwaf.blacklist_manager import BlacklistManager
-        print("✅ BlacklistManager imported successfully")
+        from aiwaf.django.blacklist_manager import BlacklistManager
+        print(" BlacklistManager imported successfully")
         
         # Check if it has required methods
         required_methods = ['block', 'is_blocked', 'unblock']
@@ -107,20 +107,20 @@ def check_blacklist_manager():
                 missing_methods.append(method)
         
         if missing_methods:
-            print(f"❌ ISSUE: BlacklistManager missing methods: {missing_methods}")
+            print(f" ISSUE: BlacklistManager missing methods: {missing_methods}")
             return False
         else:
-            print("✅ BlacklistManager has all required methods")
+            print(" BlacklistManager has all required methods")
         
         return True
         
     except Exception as e:
-        print(f"❌ Error checking BlacklistManager: {e}")
+        print(f" Error checking BlacklistManager: {e}")
         return False
 
 def check_exemption_system():
     """Check if IP exemption system might be interfering"""
-    print("\n🔍 Checking Exemption System...")
+    print("\n Checking Exemption System...")
     
     try:
         # Check for exemption logic in middleware
@@ -137,22 +137,22 @@ def check_exemption_system():
             exemption_checks.append('is_exempt_path() - Enhanced path exemptions')
         
         if exemption_checks:
-            print("✅ Exemption checks found:")
+            print(" Exemption checks found:")
             for check in exemption_checks:
                 print(f"   - {check}")
-            print("⚠️  WARNING: If your IP is exempted, rate limiting won't work!")
+            print("  WARNING: If your IP is exempted, rate limiting won't work!")
         else:
-            print("❌ ISSUE: No exemption system found!")
+            print(" ISSUE: No exemption system found!")
         
         return True
         
     except Exception as e:
-        print(f"❌ Error checking exemption system: {e}")
+        print(f" Error checking exemption system: {e}")
         return False
 
 def generate_configuration_fix():
     """Generate the correct middleware configuration"""
-    print("\n🔧 Recommended Configuration Fix...")
+    print("\n Recommended Configuration Fix...")
     
     print("Add RateLimitMiddleware to your Django settings.py:")
     print()
@@ -163,10 +163,10 @@ def generate_configuration_fix():
     print("    'django.middleware.csrf.CsrfViewMiddleware',")
     print("    ")
     print("    # AIWAF Middleware (add these)")
-    print("    'aiwaf.middleware.RateLimitMiddleware',           # ⭐ ADD THIS for burst protection")
-    print("    'aiwaf.middleware.IPAndKeywordBlockMiddleware',    # Basic protection")
-    print("    'aiwaf.middleware.AIAnomalyMiddleware',            # AI anomaly detection")
-    print("    'aiwaf.middleware.KeywordLearningMiddleware',      # Learning middleware")
+    print("    'aiwaf.django.middleware.RateLimitMiddleware',           #  ADD THIS for burst protection")
+    print("    'aiwaf.django.middleware.IPAndKeywordBlockMiddleware',    # Basic protection")
+    print("    'aiwaf.django.middleware.AIAnomalyMiddleware',            # AI anomaly detection")
+    print("    'aiwaf.django.middleware.KeywordLearningMiddleware',      # Learning middleware")
     print("    ")
     print("    'django.contrib.auth.middleware.AuthenticationMiddleware',")
     print("    'django.contrib.messages.middleware.MessageMiddleware',")
@@ -181,9 +181,9 @@ def generate_configuration_fix():
 
 def check_cache_configuration():
     """Check if Django cache is properly configured"""
-    print("\n🔍 Checking Cache Configuration...")
+    print("\n Checking Cache Configuration...")
     
-    print("⚠️  RateLimitMiddleware requires Django cache to be configured.")
+    print("  RateLimitMiddleware requires Django cache to be configured.")
     print("Add this to your settings.py if not already present:")
     print()
     print("CACHES = {")
@@ -203,7 +203,7 @@ def check_cache_configuration():
 
 def main():
     """Run diagnostics for IP blocking burst protection"""
-    print("🧪 AIWAF IP Blocking Burst Protection Diagnostics")
+    print(" AIWAF IP Blocking Burst Protection Diagnostics")
     print("=" * 60)
     
     tests = [
@@ -221,13 +221,13 @@ def main():
             if test():
                 passed += 1
         except Exception as e:
-            print(f"❌ Test {test.__name__} failed with exception: {e}")
+            print(f" Test {test.__name__} failed with exception: {e}")
     
     print("\n" + "=" * 60)
-    print(f"📊 Diagnostic Results: {passed}/{total} checks passed")
+    print(f" Diagnostic Results: {passed}/{total} checks passed")
     
     if passed < total:
-        print("\n🚨 LIKELY ISSUES FOUND:")
+        print("\n LIKELY ISSUES FOUND:")
         if passed == 0:
             print("   - RateLimitMiddleware may not be included in MIDDLEWARE setting")
         print("   - Check that RateLimitMiddleware is in your Django MIDDLEWARE list")
@@ -237,7 +237,7 @@ def main():
         generate_configuration_fix()
         check_cache_configuration()
     else:
-        print("\n✅ All checks passed! Rate limiting should be working.")
+        print("\n All checks passed! Rate limiting should be working.")
         print("If bursts still aren't blocked, check:")
         print("   1. Your IP might be in exemption list")
         print("   2. Rate limits might be too high for your test")

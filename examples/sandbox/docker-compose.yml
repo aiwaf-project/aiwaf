@@ -1,0 +1,56 @@
+services:
+  aiwaf-django:
+    build:
+      context: ../..
+      dockerfile: examples/sandbox/aiwaf-django-proxy/Dockerfile
+    container_name: aiwaf-django-proxy
+    ports:
+      - "3009:3009"
+    environment:
+      TARGET_BASE_URL: http://juice:3000
+      PORT: 3009
+      AIWAF_GEO_BLOCK_ENABLED: "false"
+      AIWAF_CLEAR_STATE_ON_START: "true"
+      AIWAF_MIN_AI_LOGS: "10000"
+      AIWAF_DISABLE_AI: "true"
+      AIWAF_USE_RUST: "true"
+      AIWAF_MIDDLEWARE_LOGGING: "true"
+      AIWAF_MIDDLEWARE_LOG: /logs/aiwaf-requests.log
+      AIWAF_MIDDLEWARE_CSV: "true"
+      AIWAF_MIDDLEWARE_DB: "false"
+      AIWAF_WASM_HEADER_VALIDATION: "false"
+      AIWAF_DEBUG_WASM_HEADERS: "true"
+      AIWAF_DEBUG_HEADERS: "true"
+    depends_on:
+      - juice
+    volumes:
+      - aiwaf_logs:/logs
+
+  aiwaf-flask:
+    build:
+      context: ../..
+      dockerfile: examples/sandbox/aiwaf-flask-proxy/Dockerfile
+    container_name: aiwaf-flask-proxy
+    ports:
+      - "3010:3010"
+    environment:
+      TARGET_BASE_URL: http://juice:3000
+      PORT: 3010
+      AIWAF_LOG_DIR: /logs
+      AIWAF_LOG_FORMAT: json
+      AIWAF_MIN_AI_LOGS: "10000"
+      AIWAF_FORCE_AI: "false"
+      AIWAF_USE_RUST: "true"
+    depends_on:
+      - juice
+    volumes:
+      - aiwaf_logs:/logs
+
+  juice:
+    image: bkimminich/juice-shop
+    container_name: juice_shop
+    ports:
+      - "3001:3000"
+
+volumes:
+  aiwaf_logs:

@@ -1,0 +1,1629 @@
+# aiwaf/middleware.py
+
+import time
+import re
+import os
+import glob
+import gzip
+import warnings
+import logging
+from datetime import datetime, timedelta
+from collections import defaultdict
+from django.utils.deprecation import MiddlewareMixin
+from django.utils import timezone
+from django.http import JsonResponse
+from django.core.exceptions import PermissionDenied
+from django.conf import settings
+from django.core.cache import cache
+from django.db.models import F, UUIDField
+from django.apps import apps
+from django.urls import get_resolver
+
+# Optional dependencies with graceful fallbacks
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    np = None
+    NUMPY_AVAILABLE = False
+
+try:
+    import joblib
+    JOBLIB_AVAILABLE = True
+except ImportError:
+    joblib = None
+    JOBLIB_AVAILABLE = False
+
+from .geoip import lookup_country
+
+from .trainer import STATIC_KW, STATUS_IDX, path_exists_in_django
+from .blacklist_manager import BlacklistManager
+from .models import IPExemption
+from .utils import (
+    is_exempt,
+    get_ip,
+    is_ip_exempted,
+    is_exempt_path,
+    get_exempt_paths,
+    is_middleware_disabled,
+    get_rate_limit_overrides,
+)
+from .storage import get_keyword_store
+from .settings_compat import apply_legacy_settings
+from .model_store import load_model_data, _normalize_storage_mode
+from ..core.rust_backend import (
+    rust_available,
+    validate_headers as rust_validate_headers,
+    analyze_recent_behavior as rust_analyze_recent_behavior,
+    is_rust_isolation_forest,
+    rust_isolation_forest_from_json,
+)
+
+apply_legacy_settings()
+
+MODEL_PATH = getattr(
+    settings,
+    "AIWAF_MODEL_PATH",
+    os.path.join(os.path.dirname(__file__), "resources", "model.pkl")
+)
+
+logger = logging.getLogger("aiwaf.django.middleware")
+_UUID_MODEL_CACHE = {}
+
+def _log_block(request, reason, status_code=403):
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    logger.debug(
+        "AIWAF blocked request: reason=%s ip=%s method=%s path=%s status=%s user_agent=%s",
+        reason,
+        get_ip(request),
+        getattr(request, "method", "-"),
+        getattr(request, "path", "-"),
+        status_code,
+        request.META.get("HTTP_USER_AGENT", "-") if hasattr(request, "META") else "-",
+    )
+
+
+def _raise_blocked(request, reason, status_code=403):
+    _log_block(request, reason, status_code=status_code)
+    raise PermissionDenied("blocked")
+
+
+class JsonExceptionMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        return self.get_response(request)
+
+    def process_exception(self, request, exception):
+        if request.content_type == "application/json" and isinstance(exception, PermissionDenied):
+            message = str(exception) or "Access denied"
+            return JsonResponse({"error": message}, status=403)
+        return None
+
+
+def _get_uuid_model_fields(app_label):
+    """Return cached UUID model fields for an app (UUID PKs + unique UUID fields)."""
+    if app_label in _UUID_MODEL_CACHE:
+        return _UUID_MODEL_CACHE[app_label]
+    try:
+        app_cfg = apps.get_app_config(app_label)
+    except LookupError:
+        _UUID_MODEL_CACHE[app_label] = []
+        return _UUID_MODEL_CACHE[app_label]
+    uuid_fields = []
+    for Model in app_cfg.get_models():
+        pk_field = Model._meta.pk
+        if isinstance(pk_field, UUIDField):
+            uuid_fields.append((Model, "pk"))
+        for field in Model._meta.fields:
+            if field is pk_field:
+                continue
+            if isinstance(field, UUIDField) and getattr(field, "unique", False):
+                uuid_fields.append((Model, field.name))
+    _UUID_MODEL_CACHE[app_label] = uuid_fields
+    return uuid_fields
+
+def _describe_model_lookup():
+    storage_mode = _normalize_storage_mode(getattr(settings, "AIWAF_MODEL_STORAGE", "file"))
+    model_path = getattr(settings, "AIWAF_MODEL_PATH", None)
+    fallback = getattr(settings, "AIWAF_MODEL_STORAGE_FALLBACK", True)
+
+    if storage_mode == "db":
+        primary = "db table aiwaf_aimodelartifact (name='default')"
+        if fallback:
+            return f"{primary} (fallback file: {model_path})"
+        return primary
+
+    if storage_mode == "cache":
+        cache_key = getattr(settings, "AIWAF_MODEL_CACHE_KEY", "aiwaf:model")
+        primary = f"cache key '{cache_key}'"
+        if fallback:
+            return f"{primary} (fallback file: {model_path})"
+        return primary
+
+    return f"file path {model_path}"
+
+
+def load_model_safely():
+    """Load the AI model with version compatibility checking."""
+
+    # Check if AI is disabled globally
+    ai_disabled = getattr(settings, "AIWAF_DISABLE_AI", False)
+    if ai_disabled:
+        logger.info("AI functionality disabled via AIWAF_DISABLE_AI setting")
+        return None
+
+    # Check if required dependencies are available
+    if not JOBLIB_AVAILABLE:
+        logger.info("joblib not available, AI functionality disabled")
+        return None
+
+    try:
+        # Suppress sklearn version warnings temporarily
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.base")
+            model_data = load_model_data()
+            if model_data is None:
+                raise ValueError("no model data available")
+
+            # Handle both old format (direct model) and new format (with metadata)
+            if isinstance(model_data, dict) and model_data.get("model_backend") == "aiwaf_rust":
+                state = model_data.get("model_state")
+                if state is None:
+                    raise ValueError("missing rust model state")
+                model = rust_isolation_forest_from_json(state)
+                if model is None:
+                    raise ValueError("failed to restore rust model")
+                return model
+            if isinstance(model_data, dict) and "model" in model_data:
+                # New format with metadata
+                model = model_data["model"]
+                try:
+                    import sklearn
+                    stored_version = model_data.get("sklearn_version", "unknown")
+                    current_version = sklearn.__version__
+
+                    if stored_version != current_version:
+                        logger.warning(
+                            "Model was trained with sklearn v%s, current v%s",
+                            stored_version,
+                            current_version,
+                        )
+                        logger.info("Run 'python manage.py detect_and_train' to update the model if needed.")
+                except ImportError:
+                    logger.info("sklearn not available, AI functionality disabled")
+                    return None
+
+                return model
+            else:
+                # Old format - direct model object
+                logger.info("Using legacy model format. Consider retraining for better compatibility.")
+                return model_data
+
+    except Exception as e:
+        lookup = _describe_model_lookup()
+        logger.warning("Could not load AI model from %s: %s", lookup, e)
+        logger.info("AI anomaly detection will remain disabled until a model is retrained.")
+        logger.info("Run 'python manage.py detect_and_train' to regenerate the model.")
+        return None
+
+# Load model with safety checks
+MODEL = load_model_safely()
+
+STATIC_KW = getattr(
+    settings,
+    "AIWAF_MALICIOUS_KEYWORDS",
+    [
+        ".php", "xmlrpc", "wp-", ".env", ".git", ".bak",
+        "conflg", "shell", "filemanager"
+    ]
+)
+
+def get_ip(request):
+    xff = request.META.get("HTTP_X_FORWARDED_FOR")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.META.get("REMOTE_ADDR", "")
+
+
+def _normalize_header_name(meta_key):
+    if meta_key.startswith("HTTP_"):
+        return meta_key[5:].replace("_", "-").title()
+    if meta_key in {"CONTENT_TYPE", "CONTENT_LENGTH"}:
+        return meta_key.replace("_", "-").title()
+    return None
+
+
+def _collect_request_headers(request):
+    max_headers = getattr(settings, "AIWAF_BLACKLIST_MAX_HEADERS", 50)
+    max_value_len = getattr(settings, "AIWAF_BLACKLIST_MAX_HEADER_VALUE_LENGTH", 512)
+    redact = {
+        h.lower()
+        for h in getattr(
+            settings,
+            "AIWAF_BLACKLIST_REDACT_HEADERS",
+            ["Authorization", "Cookie", "Set-Cookie"],
+        )
+    }
+    headers = {}
+    for key, value in request.META.items():
+        name = _normalize_header_name(key)
+        if not name:
+            continue
+        if len(headers) >= max_headers:
+            break
+        value = str(value)
+        if name.lower() in redact:
+            headers[name] = "[redacted]"
+            continue
+        if max_value_len and len(value) > max_value_len:
+            value = value[:max_value_len] + "...(truncated)"
+        headers[name] = value
+    return headers
+
+
+def _get_blacklist_extended_info(request):
+    if not getattr(settings, "AIWAF_BLACKLIST_STORE_EXTENDED_INFO", False):
+        return None
+
+    cache_attr = "_aiwaf_blacklist_extended_info"
+    cached = getattr(request, cache_attr, None)
+    if cached is not None:
+        return cached
+
+    info = {
+        "method": getattr(request, "method", ""),
+        "path": getattr(request, "path", ""),
+    }
+    query_string = request.META.get("QUERY_STRING")
+    if query_string:
+        info["query_string"] = query_string
+    try:
+        info["url"] = request.build_absolute_uri()
+    except Exception:
+        info["url"] = info["path"]
+    try:
+        info["host"] = request.get_host()
+    except Exception:
+        pass
+    info["headers"] = _collect_request_headers(request)
+
+    setattr(request, cache_attr, info)
+    return info
+
+class IPAndKeywordBlockMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+        self.safe_prefixes = self._collect_safe_prefixes()
+        self.exempt_keywords = self._get_exempt_keywords()
+        self.legitimate_path_keywords = self._get_legitimate_path_keywords()
+        self.malicious_keywords = set(STATIC_KW)  # Initialize malicious keywords
+        self.keyword_learning_enabled = getattr(settings, "AIWAF_ENABLE_KEYWORD_LEARNING", True)
+
+    def _get_exempt_keywords(self):
+        """Get keywords that should be exempt from blocking"""
+        exempt_tokens = set()
+        
+        # Extract from exempt paths
+        for path in get_exempt_paths():
+            for seg in re.split(r"\W+", path.strip("/").lower()):
+                if len(seg) > 3:
+                    exempt_tokens.add(seg)
+        
+        # Add explicit exempt keywords from settings
+        exempt_keywords = getattr(settings, "AIWAF_EXEMPT_KEYWORDS", [])
+        exempt_tokens.update(exempt_keywords)
+        
+        return exempt_tokens
+
+    def _get_legitimate_path_keywords(self):
+        """Get keywords that are legitimate in URL paths - uses same logic as trainer"""
+        # Import the enhanced function from trainer to ensure consistency
+        try:
+            from .trainer import get_legitimate_keywords
+            return get_legitimate_keywords()
+        except ImportError:
+            # Fallback to local implementation if trainer import fails
+            return self._get_legitimate_keywords_fallback()
+    
+    def _get_legitimate_keywords_fallback(self):
+        """Fallback implementation matching trainer.py logic"""
+        legitimate = set()
+        
+        # Common legitimate path segments - matches trainer.py
+        default_legitimate = {
+            "profile", "user", "users", "account", "accounts", "settings", "dashboard", 
+            "home", "about", "contact", "help", "search", "list", "lists",
+            "view", "views", "edit", "create", "update", "delete", "detail", "details",
+            "api", "auth", "login", "logout", "register", "signup", "signin",
+            "reset", "confirm", "activate", "verify", "page", "pages",
+            "category", "categories", "tag", "tags", "post", "posts",
+            "article", "articles", "blog", "blogs", "news", "item", "items",
+            "admin", "administration", "manage", "manager", "control", "panel",
+            "config", "configuration", "option", "options", "preference", "preferences"
+        }
+        legitimate.update(default_legitimate)
+        
+        # Extract keywords from Django URL patterns and app names - matches trainer.py
+        legitimate.update(self._extract_django_route_keywords())
+        
+        # Add from Django settings
+        allowed_path_keywords = getattr(settings, "AIWAF_ALLOWED_PATH_KEYWORDS", [])
+        legitimate.update(allowed_path_keywords)
+        
+        # Add exempt keywords
+        exempt_keywords = getattr(settings, "AIWAF_EXEMPT_KEYWORDS", [])
+        legitimate.update(exempt_keywords)
+        
+        return legitimate
+
+    def _extract_django_route_keywords(self):
+        """Extract legitimate keywords from Django URL patterns, app names, and model names - matches trainer.py"""
+        keywords = set()
+        
+        try:
+            from django.urls.resolvers import URLResolver, URLPattern
+            
+            # Extract from app names and labels
+            for app_config in apps.get_app_configs():
+                # Add app name and label
+                if app_config.name:
+                    for segment in re.split(r'[._-]', app_config.name.lower()):
+                        if len(segment) > 2:
+                            keywords.add(segment)
+                
+                if app_config.label and app_config.label != app_config.name:
+                    for segment in re.split(r'[._-]', app_config.label.lower()):
+                        if len(segment) > 2:
+                            keywords.add(segment)
+                
+                # Extract from model names in the app
+                try:
+                    for model in app_config.get_models():
+                        model_name = model._meta.model_name.lower()
+                        if len(model_name) > 2:
+                            keywords.add(model_name)
+                        # Add plural form
+                        if not model_name.endswith('s'):
+                            keywords.add(f"{model_name}s")
+                except Exception:
+                    continue
+            
+            # Extract from URL patterns
+            def extract_from_pattern(pattern, prefix=""):
+                try:
+                    if isinstance(pattern, URLResolver):
+                        # Handle include() patterns - be permissive for URL prefixes that route to apps
+                        namespace = getattr(pattern, 'namespace', None)
+                        if namespace:
+                            for segment in re.split(r'[._-]', namespace.lower()):
+                                if len(segment) > 2:
+                                    keywords.add(segment)
+                        
+                        # Extract from the pattern itself - improved logic for include() patterns
+                        pattern_str = str(pattern.pattern)
+                        # Get literal path segments (not regex parts)
+                        literal_parts = re.findall(r'([a-zA-Z][a-zA-Z0-9_-]*)', pattern_str)
+                        
+                        # For include() patterns, be more permissive since they're routing to existing apps
+                        # The key insight: if someone includes an app's URLs, the prefix is legitimate by design
+                        for part in literal_parts:
+                            if len(part) > 2:
+                                part_lower = part.lower()
+                                # For URLResolver (include patterns), be more permissive
+                                # These are URL prefixes that route to actual app functionality
+                                keywords.add(part_lower)
+                        
+                        # Recurse into nested patterns
+                        for nested_pattern in pattern.url_patterns:
+                            extract_from_pattern(nested_pattern, prefix)
+                    
+                    elif isinstance(pattern, URLPattern):
+                        # Extract from URL pattern
+                        pattern_str = str(pattern.pattern)
+                        for segment in re.findall(r'([a-zA-Z]\w{2,})', pattern_str):
+                            keywords.add(segment.lower())
+                        
+                        # Extract from view name if available
+                        if hasattr(pattern.callback, '__name__'):
+                            view_name = pattern.callback.__name__.lower()
+                            for segment in re.split(r'[._-]', view_name):
+                                if len(segment) > 2 and segment != 'view':
+                                    keywords.add(segment)
+                
+                except Exception:
+                    pass
+            
+            # Process all URL patterns
+            root_resolver = get_resolver()
+            for pattern in root_resolver.url_patterns:
+                extract_from_pattern(pattern)
+                
+        except Exception as e:
+            # Silently continue if extraction fails
+            pass
+        
+        # Filter out very common/generic words that might be suspicious
+        filtered_keywords = set()
+        for keyword in keywords:
+            if (len(keyword) >= 3 and 
+                keyword not in ['www', 'com', 'org', 'net', 'int', 'str', 'obj', 'get', 'set', 'put', 'del']):
+                filtered_keywords.add(keyword)
+        
+        return filtered_keywords
+
+    def _is_malicious_context(self, request, segment):
+        """Determine if a keyword appears in a malicious context"""
+        path = request.path.lower()
+        
+        # Check if this is a query parameter attack
+        query_string = request.META.get('QUERY_STRING', '').lower()
+        if segment in query_string and any(attack_pattern in query_string for attack_pattern in [
+            'union', 'select', 'drop', 'insert', 'script', 'alert', 'eval'
+        ]):
+            return True
+        
+        # Check if this looks like a file extension attack
+        if segment.startswith('.') and not path_exists_in_django(request.path):
+            return True
+        
+        # Check if this looks like a directory traversal
+        if '../' in path or '..\\' in path:
+            return True
+        
+        # Check if accessing non-existent paths with suspicious extensions
+        if (not path_exists_in_django(request.path) and 
+            any(ext in segment for ext in ['.php', '.asp', '.jsp', '.cgi'])):
+            return True
+        
+        return False
+
+    def _collect_safe_prefixes(self):
+        resolver = get_resolver()
+        prefixes = set()
+
+        def extract(patterns_list, prefix=""):
+            for p in patterns_list:
+                if hasattr(p, "url_patterns"):  # include()
+                    full_prefix = (prefix + str(p.pattern)).strip("^/").split("/")[0]
+                    prefixes.add(full_prefix)
+                    extract(p.url_patterns, prefix + str(p.pattern))
+                else:
+                    pat = (prefix + str(p.pattern)).strip("^$")
+                    path_parts = pat.strip("/").split("/")
+                    if path_parts:
+                        prefixes.add(path_parts[0])
+        extract(resolver.url_patterns)
+        return prefixes
+
+    def __call__(self, request):
+        if is_middleware_disabled(request, self.__class__):
+            return self.get_response(request)
+        # First exemption check - early exit for exempt requests
+        if is_exempt(request):
+            return self.get_response(request)
+            
+        raw_path = request.path.lower()
+        ip = get_ip(request)
+        path = raw_path.lstrip("/")
+        
+        # Additional IP-level exemption check
+        if is_ip_exempted(ip):
+            return self.get_response(request)
+        
+        # BlacklistManager handles exemption checking internally
+        if BlacklistManager.is_blocked(ip):
+            _raise_blocked(request, "IP already blacklisted", status_code=403)
+        
+        # Check if path exists in Django - if yes, be more lenient
+        path_exists = path_exists_in_django(request.path)
+        
+        keyword_store = get_keyword_store()
+        segments = [seg for seg in re.split(r"\W+", path) if len(seg) > 3]
+        
+        # Smart learning: only learn from suspicious contexts, never from valid paths
+        if self.keyword_learning_enabled and not path_exists:  # Only learn from non-existent paths
+            for seg in segments:
+                # Only learn if it's not a legitimate keyword AND in a suspicious context
+                if (seg not in self.legitimate_path_keywords and 
+                    seg not in self.exempt_keywords and
+                    self._is_malicious_context(request, seg)):
+                    keyword_store.add_keyword(seg)
+        
+        if self.keyword_learning_enabled:
+            dynamic_top = keyword_store.get_top_keywords(getattr(settings, "AIWAF_DYNAMIC_TOP_N", 10))
+        else:
+            dynamic_top = []
+        all_kw = set(STATIC_KW) | set(dynamic_top)
+        
+        # Enhanced filtering logic
+        suspicious_kw = set()
+        for kw in all_kw:
+            # Skip if keyword is explicitly exempted
+            if kw in self.exempt_keywords:
+                continue
+            
+            # Skip if this is a legitimate path keyword and path exists in Django
+            if (kw in self.legitimate_path_keywords and 
+                path_exists and 
+                not self._is_malicious_context(request, kw)):
+                continue
+            
+            # Skip if path starts with safe prefix
+            if any(path.startswith(prefix) for prefix in self.safe_prefixes if prefix):
+                continue
+            
+            suspicious_kw.add(kw)
+        
+        # Check segments against suspicious keywords
+        for seg in segments:
+            is_suspicious = False
+            block_reason = ""
+            
+            # Check if segment is in learned suspicious keywords
+            if seg in suspicious_kw:
+                is_suspicious = True
+                block_reason = f"Learned keyword: {seg}"
+            
+            # Also check if segment appears to be inherently malicious
+            elif (not path_exists and 
+                  seg not in self.legitimate_path_keywords and 
+                  (self._is_malicious_context(request, seg) or 
+                   any(malicious_pattern in seg for malicious_pattern in 
+                       ['hack', 'exploit', 'attack', 'malicious', 'evil', 'backdoor', 'inject', 'xss']))):
+                is_suspicious = True
+                block_reason = f"Inherently suspicious: {seg}"
+            
+            if is_suspicious:
+                # Additional context check before blocking - be more conservative with valid paths
+                if path_exists:
+                    # For valid paths, only block if there are VERY strong malicious indicators
+                    very_strong_indicators = [
+                        # Multiple attack patterns in same request
+                        sum([
+                            '../' in request.path, '..\\' in request.path,
+                            any(param in request.GET for param in ['cmd', 'exec', 'system']),
+                            request.path.count('%') > 5,  # Heavy URL encoding
+                            len([s for s in segments if s in self.malicious_keywords]) > 2
+                        ]) >= 2,
+                        
+                        # Obvious attack attempts on valid paths
+                        any(attack in request.path.lower() for attack in [
+                            'union+select', 'drop+table', '<script', 'javascript:',
+                            'onload=', 'onerror=', '${', '{{', 'eval('
+                        ])
+                    ]
+                    
+                    if not any(very_strong_indicators):
+                        continue  # Skip blocking for valid paths without very strong indicators
+                
+                # For non-existent paths or paths with very strong indicators, proceed with blocking
+                if self._is_malicious_context(request, seg) or not path_exists:
+                    # Double-check exemption before blocking
+                    if not is_ip_exempted(ip):
+                        BlacklistManager.block(
+                            ip,
+                            f"Keyword block: {block_reason}",
+                            extended_request_info=_get_blacklist_extended_info(request),
+                        )
+                        # Check again after blocking attempt (exempted IPs won't be blocked)
+                        if BlacklistManager.is_blocked(ip):
+                            _raise_blocked(request, f"Keyword block: {block_reason}", status_code=403)
+        return self.get_response(request)
+
+
+class RateLimitMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+        # Make rate limiting configurable via Django settings
+        self.WINDOW = getattr(settings, "AIWAF_RATE_WINDOW", 10)  # seconds
+        self.MAX = getattr(settings, "AIWAF_RATE_MAX", 20)        # soft limit
+        self.FLOOD = getattr(settings, "AIWAF_RATE_FLOOD", 40)    # hard limit
+
+    def __call__(self, request):
+        if is_middleware_disabled(request, self.__class__):
+            return self.get_response(request)
+        # First exemption check - early exit for exempt requests
+        if is_exempt(request):
+            return self.get_response(request)
+
+        ip = get_ip(request)
+        
+        # Additional IP-level exemption check
+        if is_ip_exempted(ip):
+            return self.get_response(request)
+            
+        overrides = get_rate_limit_overrides(request)
+        window = overrides.get("WINDOW", self.WINDOW)
+        max_requests = overrides.get("MAX", self.MAX)
+        flood = overrides.get("FLOOD", self.FLOOD)
+
+        key = f"ratelimit:{ip}"
+        now = time.time()
+        timestamps = cache.get(key, [])
+        timestamps = [t for t in timestamps if now - t < window]
+        timestamps.append(now)
+        cache.set(key, timestamps, timeout=window)
+        
+        if len(timestamps) > flood:
+            # Double-check exemption before blocking
+            if not is_ip_exempted(ip):
+                BlacklistManager.block(
+                    ip,
+                    "Flood pattern",
+                    extended_request_info=_get_blacklist_extended_info(request),
+                )
+                # Check if actually blocked (exempted IPs won't be blocked)
+                if BlacklistManager.is_blocked(ip):
+                    _raise_blocked(request, "Flood pattern", status_code=403)
+        if len(timestamps) > max_requests:
+            return JsonResponse({"error": "too_many_requests"}, status=429)
+        return self.get_response(request)
+
+
+class GeoBlockMiddleware(MiddlewareMixin):
+    def __init__(self, get_response=None):
+        super().__init__(get_response)
+        self.enabled = getattr(settings, "AIWAF_GEO_BLOCK_ENABLED", False)
+        self.allow_countries = [
+            c.upper() for c in getattr(settings, "AIWAF_GEO_ALLOW_COUNTRIES", [])
+        ]
+        self.block_countries = [
+            c.upper() for c in getattr(settings, "AIWAF_GEO_BLOCK_COUNTRIES", [])
+        ]
+        self.db_path = getattr(settings, "AIWAF_GEOIP_DB_PATH", None)
+        self.cache_seconds = getattr(settings, "AIWAF_GEO_CACHE_SECONDS", 3600)
+        self.cache_prefix = getattr(settings, "AIWAF_GEO_CACHE_PREFIX", "aiwaf:geo:")
+
+    def process_request(self, request):
+        if is_middleware_disabled(request, self.__class__):
+            return None
+        if not self.enabled:
+            return None
+        if not (self.allow_countries or self.block_countries):
+            return None
+        if is_exempt(request):
+            return None
+
+        ip = get_ip(request)
+        if is_ip_exempted(ip):
+            return None
+
+        country = lookup_country(ip, cache_prefix=self.cache_prefix, cache_seconds=self.cache_seconds)
+        if not country:
+            return None
+
+        country = country.upper()
+        dynamic_block = []
+        try:
+            from .models import GeoBlockedCountry
+            dynamic_block = list(
+                GeoBlockedCountry.objects.values_list("country_code", flat=True)
+            )
+        except Exception:
+            dynamic_block = []
+        dynamic_block = [c.upper() for c in dynamic_block]
+
+        if self.allow_countries:
+            should_block = country not in self.allow_countries
+        else:
+            should_block = country in (self.block_countries + dynamic_block)
+
+        if should_block:
+            BlacklistManager.block(
+                ip,
+                f"Geo-blocked country: {country}",
+                extended_request_info=_get_blacklist_extended_info(request),
+            )
+            if BlacklistManager.is_blocked(ip):
+                _raise_blocked(request, f"Geo-blocked country: {country}", status_code=403)
+        return None
+
+
+class AIAnomalyMiddleware(MiddlewareMixin):
+    WINDOW = getattr(settings, "AIWAF_WINDOW_SECONDS", 60)
+    TOP_N  = getattr(settings, "AIWAF_DYNAMIC_TOP_N", 10)
+
+    def __init__(self, get_response=None):
+        super().__init__(get_response)
+        # Use the safely loaded global MODEL instead of loading again
+        self.model = MODEL
+        self.min_ai_logs = getattr(settings, "AIWAF_MIN_AI_LOGS", 10000)
+        self.ai_logs_sufficient, self.ai_log_count = self._check_ai_log_sufficiency()
+        if self.model is not None and not self.ai_logs_sufficient:
+            self.model = None
+            if logger.isEnabledFor(logging.INFO):
+                count_display = self.ai_log_count if self.ai_log_count is not None else "unknown"
+                logger.info(
+                    "AIWAF AI model disabled due to insufficient logs (%s/%s).",
+                    count_display,
+                    self.min_ai_logs,
+                )
+        self.malicious_keywords = set(STATIC_KW)  # Initialize malicious keywords
+        self.keyword_learning_enabled = getattr(settings, "AIWAF_ENABLE_KEYWORD_LEARNING", True)
+
+    def _count_log_lines(self, path, limit):
+        if limit <= 0:
+            return 0
+        opener = gzip.open if path.endswith(".gz") else open
+        count = 0
+        try:
+            with opener(path, "rt", errors="ignore") as f:
+                for _ in f:
+                    count += 1
+                    if count >= limit:
+                        break
+        except OSError:
+            return 0
+        return count
+
+    def _check_ai_log_sufficiency(self):
+        if self.min_ai_logs <= 0:
+            return True, None
+
+        count = 0
+        log_path = getattr(settings, "AIWAF_ACCESS_LOG", None)
+
+        if log_path and os.path.exists(log_path):
+            count += self._count_log_lines(log_path, self.min_ai_logs - count)
+            if count >= self.min_ai_logs:
+                return True, count
+
+            for path in sorted(glob.glob(f"{log_path}.*")):
+                count += self._count_log_lines(path, self.min_ai_logs - count)
+                if count >= self.min_ai_logs:
+                    return True, count
+
+        try:
+            from .models import RequestLog
+            cutoff_date = timezone.now() - timedelta(days=30)
+            db_count = RequestLog.objects.filter(timestamp__gte=cutoff_date).count()
+            count = max(count, db_count)
+        except Exception as exc:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("AIWAF log sufficiency check failed: %s", exc)
+
+        return count >= self.min_ai_logs, count
+
+    def _is_malicious_context(self, request, keyword):
+        """
+        Determine if a keyword appears in a malicious context.
+        Only learn keywords when we have strong indicators of malicious intent.
+        """
+        # Don't learn from valid Django paths
+        if path_exists_in_django(request.path):
+            return False
+            
+        # Strong malicious indicators
+        malicious_indicators = [
+            # Multiple consecutive suspicious segments
+            len([seg for seg in re.split(r"\W+", request.path) if seg in self.malicious_keywords]) > 1,
+            
+            # Common attack patterns
+            any(pattern in request.path.lower() for pattern in [
+                '../', '..\\', '.env', 'wp-admin', 'phpmyadmin', 'config',
+                'backup', 'database', 'mysql', 'passwd', 'shadow'
+            ]),
+            
+            # Suspicious query parameters
+            any(param in request.GET for param in ['cmd', 'exec', 'system', 'shell']),
+            
+            # Multiple directory traversal attempts
+            request.path.count('../') > 2 or request.path.count('..\\') > 2,
+            
+            # Encoded attack patterns
+            any(encoded in request.path for encoded in ['%2e%2e', '%252e', '%c0%ae']),
+        ]
+        
+        return any(malicious_indicators)
+
+    def _analyze_recent_behavior_python(self, recent_data):
+        recent_kw_hits = []
+        recent_404s = 0
+        recent_burst_counts = []
+
+        for entry_time, entry_path, entry_status, _ in recent_data:
+            entry_known_path = path_exists_in_django(entry_path)
+            entry_kw_hits = 0
+            if not entry_known_path and not is_exempt_path(entry_path):
+                entry_kw_hits = sum(1 for kw in STATIC_KW if kw in entry_path.lower())
+            recent_kw_hits.append(entry_kw_hits)
+
+            if entry_status == 404:
+                recent_404s += 1
+
+            entry_burst = sum(1 for (t, _, _, _) in recent_data if abs(entry_time - t) <= 10)
+            recent_burst_counts.append(entry_burst)
+
+        avg_kw_hits = sum(recent_kw_hits) / len(recent_kw_hits) if recent_kw_hits else 0
+        max_404s = recent_404s
+        avg_burst = sum(recent_burst_counts) / len(recent_burst_counts) if recent_burst_counts else 0
+        total_requests = len(recent_data)
+        from aiwaf.core.training_logic import is_scanning_path
+        scanning_404s = sum(
+            1 for (_, path, status, _) in recent_data if status == 404 and is_scanning_path(path)
+        )
+        legitimate_404s = max_404s - scanning_404s
+
+        should_block = True
+        if max_404s == 0 and avg_kw_hits == 0 and scanning_404s == 0:
+            should_block = False
+        elif (
+            avg_kw_hits < 3
+            and scanning_404s < 5
+            and legitimate_404s < 20
+            and avg_burst < 25
+            and total_requests < 150
+        ):
+            should_block = False
+
+        return {
+            "avg_kw_hits": avg_kw_hits,
+            "max_404s": max_404s,
+            "avg_burst": avg_burst,
+            "total_requests": total_requests,
+            "scanning_404s": scanning_404s,
+            "legitimate_404s": legitimate_404s,
+            "should_block": should_block,
+        }
+
+    def _analyze_recent_behavior(self, recent_data):
+        if not recent_data:
+            return None
+
+        stats = None
+        if getattr(settings, "AIWAF_USE_RUST", False) and rust_available():
+            rust_payload = []
+            for entry_time, entry_path, entry_status, _ in recent_data:
+                entry_known_path = path_exists_in_django(entry_path)
+                rust_payload.append({
+                    "path_lower": entry_path.lower(),
+                    "timestamp": entry_time,
+                    "status": int(entry_status),
+                    "kw_check": (not entry_known_path and not is_exempt_path(entry_path)),
+                })
+            rust_stats = rust_analyze_recent_behavior(rust_payload, STATIC_KW)
+            if rust_stats:
+                stats = rust_stats
+
+        if stats is None:
+            stats = self._analyze_recent_behavior_python(recent_data)
+
+        return stats
+
+    def process_request(self, request):
+        if is_middleware_disabled(request, self.__class__):
+            return None
+        # First exemption check - early exit for exempt requests
+        if is_exempt(request):
+            return None
+            
+        request._start_time = time.time()
+        ip = get_ip(request)
+        
+        # Additional IP-level exemption check
+        if is_ip_exempted(ip):
+            return None
+            
+        # BlacklistManager handles exemption checking internally
+        if BlacklistManager.is_blocked(ip):
+            _raise_blocked(request, "IP already blacklisted", status_code=403)
+        return None
+
+    def process_response(self, request, response):
+        if is_middleware_disabled(request, self.__class__):
+            return response
+        # First exemption check - early exit for exempt requests
+        if is_exempt(request):
+            return response
+            
+        ip = get_ip(request)
+        
+        # Additional IP-level exemption check
+        if is_ip_exempted(ip):
+            return response
+            
+        now = time.time()
+        key = f"aiwaf:{ip}"
+        data = cache.get(key, [])
+        path_len = len(request.path)
+        
+        # Use the same scoring logic as trainer.py
+        known_path = path_exists_in_django(request.path)
+        kw_hits = 0
+        if not known_path and not is_exempt_path(request.path):
+            kw_hits = sum(1 for kw in STATIC_KW if kw in request.path.lower())
+
+        resp_time = now - getattr(request, "_start_time", now)
+        status_code = str(response.status_code)
+        status_idx = STATUS_IDX.index(status_code) if status_code in STATUS_IDX else -1
+        burst_count = sum(1 for (t, _, _, _) in data if now - t <= 10)
+        total_404 = sum(1 for (_, _, st, _) in data if st == 404)
+        feats = [path_len, kw_hits, resp_time, status_idx, burst_count, total_404]
+        
+        # Only use AI model if it's available
+        if self.model is not None:
+            model_is_rust = is_rust_isolation_forest(self.model)
+            if model_is_rust:
+                prediction = self.model.predict([list(map(float, feats))])[0]
+            else:
+                if not NUMPY_AVAILABLE:
+                    prediction = None
+                else:
+                    X = np.array(feats, dtype=float).reshape(1, -1)
+                    prediction = self.model.predict(X)[0]
+
+            if prediction == -1:
+                # AI detected anomaly - but analyze patterns before blocking (like trainer.py)
+                
+                # Get recent behavior data for this IP to make intelligent blocking decision
+                recent_data = [d for d in data if now - d[0] <= 300]  # Last 5 minutes
+                stats = self._analyze_recent_behavior(recent_data)
+
+                if stats and stats.get("should_block"):
+                    max_404s = stats.get("max_404s", 0)
+                    scanning_404s = stats.get("scanning_404s", 0)
+                    avg_kw_hits = stats.get("avg_kw_hits", 0)
+                    avg_burst = stats.get("avg_burst", 0)
+                    # Double-check exemption before blocking
+                    if not is_ip_exempted(ip):
+                        BlacklistManager.block(
+                            ip,
+                            f"AI anomaly + scanning 404s (total:{max_404s}, scanning:{scanning_404s}, kw:{avg_kw_hits:.1f}, burst:{avg_burst:.1f})",
+                            extended_request_info=_get_blacklist_extended_info(request),
+                        )
+                        # Check if actually blocked (exempted IPs won't be blocked)
+                        if BlacklistManager.is_blocked(ip):
+                            _raise_blocked(
+                                request,
+                                f"AI anomaly + scanning 404s (total:{max_404s}, scanning:{scanning_404s}, kw:{avg_kw_hits:.1f}, burst:{avg_burst:.1f})",
+                                status_code=403,
+                            )
+            elif prediction is not None:
+                # No recent data to analyze - be more conservative
+                # Only block on multiple suspicious indicators, not single 404
+                from aiwaf.core.training_logic import is_scanning_path
+                current_scanning = is_scanning_path(request.path)
+                
+                if kw_hits >= 3 and current_scanning:  # Require both high keywords AND scanning pattern
+                    # Double-check exemption before blocking
+                    if not is_ip_exempted(ip):
+                        BlacklistManager.block(
+                            ip,
+                            f"AI anomaly + scanning behavior (kw:{kw_hits}, scanning_path:{request.path})",
+                            extended_request_info=_get_blacklist_extended_info(request),
+                        )
+                        if BlacklistManager.is_blocked(ip):
+                            _raise_blocked(
+                                request,
+                                f"AI anomaly + scanning behavior (kw:{kw_hits}, scanning_path:{request.path})",
+                                status_code=403,
+                            )
+
+        data.append((now, request.path, response.status_code, resp_time))
+        data = [d for d in data if now - d[0] < self.WINDOW]
+        cache.set(key, data, timeout=self.WINDOW)
+        
+        # Only learn keywords from 404 responses (not found) on non-existent paths
+        # This prevents learning from 403 (blocked IPs accessing legitimate paths) or other error codes
+        if (self.keyword_learning_enabled and response.status_code == 404 and
+            not known_path and not is_exempt_path(request.path)):
+            keyword_store = get_keyword_store()
+            # Get legitimate keywords to avoid learning them
+            from .trainer import get_legitimate_keywords
+            legitimate_keywords = get_legitimate_keywords()
+            
+            for seg in re.split(r"\W+", request.path.lower()):
+                if (len(seg) > 3 and 
+                    seg not in STATIC_KW and  # Don't re-learn static keywords
+                    seg not in legitimate_keywords and  # Don't learn legitimate keywords
+                    self._is_malicious_context(request, seg)):  # Only learn in malicious context
+                    keyword_store.add_keyword(seg)
+
+        return response
+
+
+class HoneypotTimingMiddleware(MiddlewareMixin):
+    MIN_FORM_TIME = getattr(settings, "AIWAF_MIN_FORM_TIME", 1.0)  # seconds
+    MAX_PAGE_TIME = getattr(settings, "AIWAF_MAX_PAGE_TIME", 240)  # 4 minutes default
+
+    def _is_authenticated_session(self, request):
+        """Best effort check that this request belongs to an authenticated session."""
+        user = getattr(request, "user", None)
+        if user is not None:
+            is_authenticated = getattr(user, "is_authenticated", False)
+            # Django's AnonymousUser.is_authenticated is a property returning False, but guard callable.
+            if callable(is_authenticated):
+                is_authenticated = is_authenticated()
+            if is_authenticated:
+                return True
+
+        session = getattr(request, "session", None)
+        if session is not None:
+            session_key = getattr(session, "session_key", None)
+            if session_key and bool(session.get("_auth_user_id")):
+                return True
+
+        return False
+    
+    def _view_accepts_method(self, request, method):
+        """
+        Check if the current view accepts the specified HTTP method.
+        Be very conservative - only block when we're absolutely certain.
+        Handle decorator issues by being permissive when detection fails.
+        """
+        try:
+            from django.urls import resolve
+            
+            # Resolve the current URL to get the view
+            resolved = resolve(request.path)
+            view_func = resolved.func
+            
+            # Handle class-based views
+            if hasattr(view_func, 'cls'):
+                view_class = view_func.cls
+                
+                # Check http_method_names attribute (most reliable for CBVs)
+                if hasattr(view_class, 'http_method_names'):
+                    allowed_methods = [m.upper() for m in view_class.http_method_names]
+                    return method.upper() in allowed_methods
+                
+                # For CBVs without http_method_names, check for method handlers
+                method_handlers = {
+                    'GET': ['get'],
+                    'POST': ['post', 'form_valid', 'form_invalid'],
+                    'PUT': ['put'],
+                    'PATCH': ['patch'],
+                    'DELETE': ['delete']
+                }
+                
+                if method.upper() in method_handlers:
+                    handlers = method_handlers[method.upper()]
+                    has_handler = any(hasattr(view_class, handler) for handler in handlers)
+                    return has_handler
+                
+                # Default for CBVs: be permissive
+                return True
+            
+            # Handle function-based views (including decorated ones)
+            else:
+                # Try to unwrap decorators to get the actual view function
+                actual_func = view_func
+                while hasattr(actual_func, '__wrapped__'):
+                    actual_func = actual_func.__wrapped__
+                
+                # Check if the actual function has explicit allowed methods
+                if hasattr(actual_func, 'http_method_names'):
+                    allowed_methods = [m.upper() for m in actual_func.http_method_names]
+                    return method.upper() in allowed_methods
+                
+                # For function-based views, be very conservative
+                # Most Django views accept both GET and POST, so default to allowing
+                return True
+                
+        except Exception as e:
+            # If anything fails (decorators, imports, etc.), be permissive
+            # Better to allow a legitimate request than block it
+            return True
+    
+    def process_request(self, request):
+        if is_middleware_disabled(request, self.__class__):
+            return None
+        if is_exempt(request):
+            return None
+            
+        ip = get_ip(request)
+        
+        # Additional IP-level exemption check
+        if is_ip_exempted(ip):
+            return None
+
+        # Authenticated sessions already proved they loaded the form legitimately; skip timing checks
+        if self._is_authenticated_session(request):
+            return None
+            
+        if request.method == "GET":
+            # CONSERVATIVE: Only block GET if we're absolutely certain it's POST-only
+            # Most Django views accept both GET and POST (forms show on GET, process on POST)
+            if not self._view_accepts_method(request, 'GET'):
+                # EXTRA CHECK: Only block if path looks like obvious POST-only API endpoint
+                path_lower = request.path.lower()
+                obvious_post_only = any(path_lower.endswith(pattern) for pattern in [
+                    '/create/', '/submit/', '/upload/', '/delete/', '/process/'
+                ])
+                
+                if obvious_post_only:
+                    # This is very likely a POST-only endpoint getting a GET
+                    if not is_ip_exempted(ip):
+                        BlacklistManager.block(
+                            ip,
+                            f"GET to obvious POST-only endpoint: {request.path}",
+                            extended_request_info=_get_blacklist_extended_info(request),
+                        )
+                        if BlacklistManager.is_blocked(ip):
+                            _log_block(request, f"GET to obvious POST-only endpoint: {request.path}", status_code=405)
+                            return JsonResponse({
+                                "error": "blocked", 
+                                "message": f"GET not allowed for {request.path}"
+                            }, status=405)  # Method Not Allowed
+                # Otherwise, don't block - could be a decorated view or complex form
+            
+            # Store timestamp for this IP's GET request  
+            # Use a general key for the IP, not path-specific
+            cache.set(f"honeypot_get:{ip}", time.time(), timeout=300)  # 5 min timeout
+        
+        elif request.method == "POST":
+            # ENHANCEMENT: Check if this view actually accepts POST requests
+            if not self._view_accepts_method(request, 'POST'):
+                # This view is GET-only, but received a POST - likely malicious
+                if not is_ip_exempted(ip):
+                    BlacklistManager.block(
+                        ip,
+                        f"POST to GET-only view: {request.path}",
+                        extended_request_info=_get_blacklist_extended_info(request),
+                    )
+                    if BlacklistManager.is_blocked(ip):
+                        _log_block(request, f"POST to GET-only view: {request.path}", status_code=405)
+                        return JsonResponse({
+                            "error": "blocked", 
+                            "message": f"POST not allowed for {request.path}"
+                        }, status=405)  # Method Not Allowed
+            
+            # Check if there was a preceding GET request for timing validation
+            get_time = cache.get(f"honeypot_get:{ip}")
+            
+            if get_time is not None:
+                # Check timing - be more lenient for login paths
+                time_diff = time.time() - get_time
+                min_time = self.MIN_FORM_TIME
+                
+                # ENHANCEMENT 2: Check for page timeout (4+ minutes)
+                if time_diff > self.MAX_PAGE_TIME:
+                    # Page has been open too long - suspicious or stale session
+                    # Don't block immediately, but require a fresh page load
+                    cache.delete(f"honeypot_get:{ip}")  # Force fresh GET
+                    return JsonResponse({
+                        "error": "page_expired", 
+                        "message": "Page has expired. Please reload and try again.",
+                        "reload_required": True
+                    }, status=409)  # 409 Conflict - client should reload
+                
+                # Use shorter time threshold for login paths (users can login quickly)
+                if any(request.path.lower().startswith(login_path) for login_path in [
+                    "/admin/login/", "/login/", "/accounts/login/", "/auth/login/", "/signin/"
+                ]):
+                    min_time = 0.1  # Very short threshold for login forms
+                
+                if time_diff < min_time:
+                    # Double-check exemption before blocking
+                    if not is_ip_exempted(ip):
+                        BlacklistManager.block(
+                            ip,
+                            f"Form submitted too quickly ({time_diff:.2f}s)",
+                            extended_request_info=_get_blacklist_extended_info(request),
+                        )
+                        # Check if actually blocked (exempted IPs won't be blocked)
+                        if BlacklistManager.is_blocked(ip):
+                            _raise_blocked(request, f"Form submitted too quickly ({time_diff:.2f}s)", status_code=403)
+        
+        else:
+            # Handle other HTTP methods (PUT, DELETE, PATCH, etc.)
+            if request.method not in ['GET', 'POST', 'HEAD', 'OPTIONS']:
+                # Check if this view supports the requested method
+                if not self._view_accepts_method(request, request.method):
+                    if not is_ip_exempted(ip):
+                        BlacklistManager.block(
+                            ip,
+                            f"{request.method} to view that doesn't support it: {request.path}",
+                            extended_request_info=_get_blacklist_extended_info(request),
+                        )
+                        if BlacklistManager.is_blocked(ip):
+                            _log_block(
+                                request,
+                                f"{request.method} to view that doesn't support it: {request.path}",
+                                status_code=405,
+                            )
+                            return JsonResponse({
+                                "error": "blocked", 
+                                "message": f"{request.method} not allowed for {request.path}"
+                            }, status=405)  # Method Not Allowed
+        
+        return None
+
+
+class UUIDTamperMiddleware(MiddlewareMixin):
+    def process_view(self, request, view_func, view_args, view_kwargs):
+        if is_middleware_disabled(request, self.__class__):
+            return None
+        if is_exempt(request):
+            return None
+            
+        uid = view_kwargs.get("uuid")
+        if not uid:
+            return None
+
+        ip = get_ip(request)
+        
+        # Additional IP-level exemption check
+        if is_ip_exempted(ip):
+            return None
+            
+        app_label = view_func.__module__.split(".")[0]
+        uuid_fields = _get_uuid_model_fields(app_label)
+        if not uuid_fields:
+            return None
+        for Model, field_name in uuid_fields:
+            try:
+                if field_name == "pk":
+                    if Model.objects.filter(pk=uid).exists():
+                        return None
+                else:
+                    if Model.objects.filter(**{field_name: uid}).exists():
+                        return None
+            except (ValueError, TypeError):
+                continue
+
+        # Double-check exemption before blocking
+        if not is_ip_exempted(ip):
+            BlacklistManager.block(
+                ip,
+                "UUID tampering",
+                extended_request_info=_get_blacklist_extended_info(request),
+            )
+            # Check if actually blocked (exempted IPs won't be blocked)
+            if BlacklistManager.is_blocked(ip):
+                _raise_blocked(request, "UUID tampering", status_code=403)
+
+
+class HeaderValidationMiddleware(MiddlewareMixin):
+    """
+    Validates HTTP headers to detect bots and malicious requests
+    """
+    def __init__(self, get_response):
+        super().__init__(get_response)
+        self.MAX_HEADER_BYTES = getattr(settings, "AIWAF_MAX_HEADER_BYTES", 32 * 1024)
+        self.MAX_HEADER_COUNT = getattr(settings, "AIWAF_MAX_HEADER_COUNT", 100)
+        self.MAX_USER_AGENT_LENGTH = getattr(settings, "AIWAF_MAX_USER_AGENT_LENGTH", 500)
+        self.MAX_ACCEPT_LENGTH = getattr(settings, "AIWAF_MAX_ACCEPT_LENGTH", 4096)
+    
+    # Standard browser headers that legitimate requests should have
+    REQUIRED_HEADERS = [
+        'HTTP_USER_AGENT',
+        'HTTP_ACCEPT',
+    ]
+    
+    # Headers that browsers typically send
+    BROWSER_HEADERS = [
+        'HTTP_ACCEPT_LANGUAGE',
+        'HTTP_ACCEPT_ENCODING',
+        'HTTP_CONNECTION', 
+        'HTTP_CACHE_CONTROL',
+    ]
+    
+    # Suspicious User-Agent patterns
+    SUSPICIOUS_USER_AGENTS = [
+        r'bot',
+        r'crawler',
+        r'spider',
+        r'scraper', 
+        r'curl',
+        r'wget',
+        r'python',
+        r'java',
+        r'node',
+        r'go-http',
+        r'axios',
+        r'okhttp',
+        r'libwww',
+        r'lwp-trivial',
+        r'mechanize',
+        r'requests',
+        r'urllib',
+        r'httpie',
+        r'postman',
+        r'insomnia',
+        r'^$',  # Empty user agent
+        r'mozilla/4\.0$',  # Fake old browser
+        # Note: exact "Mozilla/5.0" is common; avoid flagging it as suspicious.
+    ]
+    
+    # Known legitimate bot user agents to whitelist
+    LEGITIMATE_BOTS = [
+        r'googlebot',
+        r'bingbot', 
+        r'slurp',  # Yahoo
+        r'duckduckbot',
+        r'baiduspider',
+        r'yandexbot',
+        r'facebookexternalhit',
+        r'twitterbot',
+        r'linkedinbot',
+        r'whatsapp',
+        r'telegrambot',
+        r'applebot',
+        r'pingdom',
+        r'uptimerobot',
+        r'statuscake',
+        r'site24x7',
+    ]
+    
+    # Suspicious header combinations
+    SUSPICIOUS_COMBINATIONS = [
+        # High version HTTP with old user agent
+        {
+            'condition': lambda headers: (
+                headers.get('SERVER_PROTOCOL', '').startswith('HTTP/2') and
+                'mozilla/4.0' in headers.get('HTTP_USER_AGENT', '').lower()
+            ),
+            'reason': 'HTTP/2 with old browser user agent'
+        },
+        # No Accept header but has User-Agent
+        {
+            'condition': lambda headers: (
+                headers.get('HTTP_USER_AGENT') and 
+                not headers.get('HTTP_ACCEPT')
+            ),
+            'reason': 'User-Agent present but no Accept header'
+        },
+        # Accept */* only (very generic)
+        {
+            'condition': lambda headers: (
+                headers.get('HTTP_ACCEPT') == '*/*' and
+                not any(h in headers for h in ['HTTP_ACCEPT_LANGUAGE', 'HTTP_ACCEPT_ENCODING'])
+            ),
+            'reason': 'Generic Accept header without language/encoding'
+        },
+        # No browser-standard headers at all
+        {
+            'condition': lambda headers: (
+                headers.get('HTTP_USER_AGENT') and
+                not any(headers.get(h) for h in ['HTTP_ACCEPT_LANGUAGE', 'HTTP_ACCEPT_ENCODING', 'HTTP_CONNECTION'])
+            ),
+            'reason': 'Missing all browser-standard headers'
+        },
+        # Suspicious HTTP version patterns
+        {
+            'condition': lambda headers: (
+                'HTTP_USER_AGENT' in headers and
+                headers.get('SERVER_PROTOCOL') == 'HTTP/1.0' and
+                'chrome' in headers.get('HTTP_USER_AGENT', '').lower()
+            ),
+            'reason': 'Modern browser with HTTP/1.0'
+        }
+    ]
+
+    def process_request(self, request):
+        if is_middleware_disabled(request, self.__class__):
+            return None
+        # Skip if request is exempted
+        if is_exempt(request):
+            return None
+            
+        ip = get_ip(request)
+        
+        # Check IP-level exemption
+        if is_ip_exempted(ip):
+            return None
+            
+        # Skip for static files and common paths
+        if self._is_static_request(request):
+            return None
+        
+        # Get headers from request.META
+        headers = request.META
+
+        cap_reason = self._enforce_header_caps(headers)
+        if cap_reason:
+            return self._block_request(request, ip, cap_reason, request.path)
+
+        required_headers = self._get_required_headers(request)
+
+        if self._should_use_rust():
+            min_score = self._get_min_quality_score(required_headers)
+            reason = rust_validate_headers(headers, required_headers, min_score)
+            if reason:
+                return self._block_request(request, ip, reason, request.path)
+            return None
+        
+        # Check for missing required headers
+        missing_headers = self._check_missing_headers(headers, required_headers)
+        if missing_headers:
+            return self._block_request(request, ip, f"Missing required headers: {', '.join(missing_headers)}", request.path)
+        
+        # Check for suspicious user agent
+        suspicious_ua = self._check_user_agent(headers.get('HTTP_USER_AGENT', ''))
+        if suspicious_ua:
+            return self._block_request(request, ip, f"Suspicious user agent: {suspicious_ua}", request.path)
+        
+        # Check for suspicious header combinations
+        suspicious_combo = self._check_header_combinations(headers, required_headers)
+        if suspicious_combo:
+            return self._block_request(request, ip, f"Suspicious headers: {suspicious_combo}", request.path)
+        
+        # Check header quality score
+        quality_score = self._calculate_header_quality(headers)
+        min_score = self._get_min_quality_score(required_headers)
+        if min_score and quality_score < min_score:  # Threshold for suspicion
+            return self._block_request(request, ip, f"Low header quality score: {quality_score}", request.path)
+        
+        return None
+
+    def _should_use_rust(self) -> bool:
+        return (
+            getattr(settings, "AIWAF_USE_RUST", False)
+            and rust_available()
+        )
+    
+    def _is_static_request(self, request):
+        """Check if this is a request for static files"""
+        static_extensions = ['.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.svg', '.woff', '.woff2', '.ttf']
+        path = request.path.lower()
+        
+        # Check file extensions
+        if any(path.endswith(ext) for ext in static_extensions):
+            return True
+            
+        # Check static paths
+        static_paths = ['/static/', '/media/', '/assets/', '/favicon.ico']
+        if any(path.startswith(static_path) for static_path in static_paths):
+            return True
+            
+        return False
+    
+    def _get_required_headers(self, request):
+        override = getattr(settings, "AIWAF_REQUIRED_HEADERS", None)
+        if override is None:
+            return list(self.REQUIRED_HEADERS)
+        if isinstance(override, (list, tuple)):
+            return list(override)
+        if isinstance(override, dict):
+            method = getattr(request, "method", "").upper()
+            headers = override.get(method)
+            if headers is None:
+                headers = override.get("DEFAULT")
+            if headers is None:
+                return list(self.REQUIRED_HEADERS)
+            return list(headers)
+        return list(self.REQUIRED_HEADERS)
+
+    def _get_min_quality_score(self, required_headers):
+        default_min = getattr(settings, "AIWAF_HEADER_QUALITY_MIN_SCORE", 3)
+        if not required_headers:
+            return 0
+        return default_min
+
+    def _check_missing_headers(self, headers, required_headers):
+        """Check for missing required headers"""
+        missing = []
+        
+        for header in required_headers:
+            if not headers.get(header):
+                missing.append(header.replace('HTTP_', '').replace('_', '-').lower())
+                
+        return missing
+    
+    def _check_user_agent(self, user_agent):
+        """Check if user agent is suspicious"""
+        if not user_agent:
+            return "Empty user agent"
+            
+        if len(user_agent) > self.MAX_USER_AGENT_LENGTH:
+            return f"User-Agent longer than {self.MAX_USER_AGENT_LENGTH} chars"
+        
+        user_agent_lower = user_agent.lower()
+        
+        # Check if it's a legitimate bot first
+        for legitimate_pattern in self.LEGITIMATE_BOTS:
+            if re.search(legitimate_pattern, user_agent_lower):
+                return None  # Allow legitimate bots
+        
+        # Check for suspicious patterns
+        for suspicious_pattern in self.SUSPICIOUS_USER_AGENTS:
+            if re.search(suspicious_pattern, user_agent_lower, re.IGNORECASE):
+                return f"Pattern: {suspicious_pattern}"
+                
+        # Check for very short user agents (likely fake)
+        if len(user_agent) < 10:
+            return "Too short"
+            
+        # Check for very long user agents (possibly malicious)
+        if len(user_agent) > self.MAX_USER_AGENT_LENGTH:
+            return f"Too long (> {self.MAX_USER_AGENT_LENGTH})"
+            
+        return None
+
+    def _enforce_header_caps(self, headers):
+        """Fail fast for oversized header floods and malformed clients."""
+        total_bytes = 0
+        header_count = 0
+
+        for key, value in headers.items():
+            if not self._is_http_meta_key(key):
+                continue
+
+            header_count += 1
+            value_str = value if isinstance(value, str) else str(value)
+            total_bytes += len(key) + len(value_str)
+
+            if total_bytes > self.MAX_HEADER_BYTES:
+                return f"Header bytes exceed {self.MAX_HEADER_BYTES}"
+
+        if header_count > self.MAX_HEADER_COUNT:
+            return f"Header count exceeds {self.MAX_HEADER_COUNT}"
+
+        user_agent = headers.get('HTTP_USER_AGENT', '')
+        if user_agent and len(user_agent) > self.MAX_USER_AGENT_LENGTH:
+            return f"User-Agent longer than {self.MAX_USER_AGENT_LENGTH} chars"
+
+        accept_header = headers.get('HTTP_ACCEPT', '')
+        if accept_header and len(accept_header) > self.MAX_ACCEPT_LENGTH:
+            return f"Accept header longer than {self.MAX_ACCEPT_LENGTH} chars"
+
+        return None
+
+    def _is_http_meta_key(self, key: str) -> bool:
+        return key.startswith('HTTP_') or key in {'CONTENT_TYPE', 'CONTENT_LENGTH'}
+    
+    def _check_header_combinations(self, headers, required_headers):
+        """Check for suspicious header combinations"""
+        if not required_headers:
+            return None
+        required = set(required_headers)
+        for combo in self.SUSPICIOUS_COMBINATIONS:
+            try:
+                if combo.get('reason') == 'User-Agent present but no Accept header' and 'HTTP_ACCEPT' not in required:
+                    continue
+                if combo['condition'](headers):
+                    return combo['reason']
+            except Exception:
+                # If condition check fails, skip it
+                continue
+                
+        return None
+    
+    def _calculate_header_quality(self, headers):
+        """Calculate a quality score based on header completeness"""
+        score = 0
+        
+        # Basic required headers (2 points each)
+        if headers.get('HTTP_USER_AGENT'):
+            score += 2
+        if headers.get('HTTP_ACCEPT'):
+            score += 2
+            
+        # Browser-standard headers (1 point each)
+        for header in self.BROWSER_HEADERS:
+            if headers.get(header):
+                score += 1
+                
+        # Bonus points for realistic combinations
+        if headers.get('HTTP_ACCEPT_LANGUAGE') and headers.get('HTTP_ACCEPT_ENCODING'):
+            score += 1
+            
+        if headers.get('HTTP_CONNECTION') == 'keep-alive':
+            score += 1
+            
+        # Check for realistic Accept header
+        accept = headers.get('HTTP_ACCEPT', '')
+        if 'text/html' in accept and 'application/xml' in accept:
+            score += 1
+            
+        return score
+    
+    def _block_request(self, request, ip, reason, path):
+        """Block the request and raise PermissionDenied"""
+        # Double-check exemption before blocking
+        if not is_ip_exempted(ip):
+            BlacklistManager.block(
+                ip,
+                f"Header validation: {reason}",
+                extended_request_info=_get_blacklist_extended_info(request),
+            )
+            
+            # Check if actually blocked (exempted IPs won't be blocked)
+            if BlacklistManager.is_blocked(ip):
+                _raise_blocked(request, f"Header validation: {reason}", status_code=403)
+                
+        return None
