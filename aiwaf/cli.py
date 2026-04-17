@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import sys
 
 
@@ -18,36 +17,36 @@ def aiwaf_detect() -> None:
 
 
 def main() -> None:
-    """Top-level AIWAF CLI entrypoint."""
-    parser = argparse.ArgumentParser(
-        prog="aiwaf",
-        description="AIWAF CLI",
-    )
-    parser.add_argument(
-        "framework",
-        choices=["django", "flask", "fast"],
-        help="Framework integration CLI to run",
-    )
-    parser.add_argument(
-        "framework_args",
-        nargs=argparse.REMAINDER,
-        help="Arguments forwarded to framework CLI",
-    )
-    args = parser.parse_args()
+    """Top-level AIWAF CLI entrypoint.
 
-    if args.framework == "flask":
+    Supports both styles:
+    - `aiwaf <command> ...` (unified default command set)
+    - `aiwaf <framework> <command> ...` where framework is flask|fast|django
+    """
+    frameworks = {"django", "flask", "fast"}
+    argv = list(sys.argv[1:])
+
+    if argv and argv[0] in frameworks:
+        framework = argv[0]
+        framework_args = argv[1:]
+    else:
+        # Unified shorthand: route bare commands through the shared Fast/Flask CLI.
+        framework = "fast"
+        framework_args = argv
+
+    if framework == "flask":
         from aiwaf.flask.cli import main as flask_main
 
-        sys.argv = ["aiwaf flask"] + list(args.framework_args)
+        sys.argv = ["aiwaf flask"] + list(framework_args)
         flask_main()
         return
-    if args.framework == "fast":
+    if framework == "fast":
         from aiwaf.fast.cli import main as fast_main
 
-        sys.argv = ["aiwaf fast"] + list(args.framework_args)
+        sys.argv = ["aiwaf fast"] + list(framework_args)
         fast_main()
         return
-    if args.framework == "django":
+    if framework == "django":
         try:
             from django.core.management import execute_from_command_line
         except Exception as exc:
@@ -57,14 +56,14 @@ def main() -> None:
             )
             raise SystemExit(1) from exc
 
-        if not args.framework_args:
+        if not framework_args:
             sys.stderr.write(
                 "Usage: aiwaf django <management-command> [args]\n"
                 "Example: aiwaf django aiwaf_list --all\n"
             )
             raise SystemExit(2)
 
-        execute_from_command_line(["aiwaf django"] + list(args.framework_args))
+        execute_from_command_line(["aiwaf django"] + list(framework_args))
         return
 
 
