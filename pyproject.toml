@@ -1,6 +1,6 @@
 [project]
 name = "aiwaf"
-version = "0.1.9.7.0"
+version = "0.1.9.7.1"
 description = "AIdriven, selflearning Web Application Firewall for Python web applications"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -12,7 +12,6 @@ dependencies = [
     "scikit-learn>=1.0,<2.0",
     "joblib>=1.1",
     "geoip2>=4.0",
-    "aiwaf-rust>=0.1.6",
     "packaging>=21.0",
     "requests>=2.25.0",
     "python-whois>=0.9.0"
@@ -25,6 +24,9 @@ django = [
 flask = [
     "Flask>=2.3",
     "Flask-SQLAlchemy>=3.0"
+]
+rust = [
+    "aiwaf-rust>=0.1.6"
 ]
 
 [build-system]

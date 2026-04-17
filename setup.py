@@ -7,7 +7,7 @@ README_PATH = HERE / "README.md"
 
 setup(
     name="aiwaf",
-    version="0.1.9.7.0",
+    version="0.1.9.7.1",
     description="AIdriven, selflearning Web Application Firewall for Python web applications",
     long_description=README_PATH.read_text(encoding="utf-8") if README_PATH.exists() else "AIWAF",
     long_description_content_type="text/markdown",
@@ -22,7 +22,6 @@ setup(
         "scikit-learn>=1.0,<2.0",
         "joblib>=1.1",
         "geoip2>=4.0",
-        "aiwaf-rust>=0.1.6",
         "packaging>=21.0",
         "requests>=2.25.0",
         "python-whois>=0.9.0",
@@ -34,6 +33,9 @@ setup(
         "flask": [
             "Flask>=2.3",
             "Flask-SQLAlchemy>=3.0",
+        ],
+        "rust": [
+            "aiwaf-rust>=0.1.6",
         ],
     },
     include_package_data=True,
