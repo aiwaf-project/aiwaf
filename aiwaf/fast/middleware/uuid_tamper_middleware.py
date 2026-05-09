@@ -1,15 +1,11 @@
 """FastAPI UUID tamper middleware."""
-
-import re
 from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.responses import JSONResponse
 
 from ..blacklist import BlacklistManager
 from ..decorators import should_apply_middleware
-from ..utils import get_ip
-
-
-UUID_RE = re.compile(r"^[a-f0-9\-]{36}$")
+from ..utils import get_blacklist_extended_info, get_ip
+from ...core.uuid_tamper import is_malformed_uuid
 
 
 class UUIDTamperMiddleware(BaseHTTPMiddleware):
@@ -23,8 +19,8 @@ class UUIDTamperMiddleware(BaseHTTPMiddleware):
 
         ip = get_ip(request)
         uuid_val = request.query_params.get("uuid")
-        if uuid_val and not UUID_RE.match(uuid_val):
-            BlacklistManager.block(ip, "UUID tampering")
+        if is_malformed_uuid(uuid_val):
+            BlacklistManager.block(ip, "UUID tampering", extended_request_info=get_blacklist_extended_info(request))
             request.state.aiwaf_blocked = True
             request.state.aiwaf_block_reason = "UUID tampering"
             return JSONResponse({"error": "blocked"}, status_code=403)

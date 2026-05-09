@@ -29,7 +29,10 @@ Optional framework extras:
 pip install "aiwaf[django]"
 pip install "aiwaf[flask]"
 pip install "aiwaf[fastapi]"
+pip install "aiwaf[rust]"
 ```
+
+Rust extra installs the optional `aiwaf-rust` acceleration package.
 
 Important:
 - Use the adapter package for your framework (`aiwaf.django`, `aiwaf.flask`, or `aiwaf.fast`).

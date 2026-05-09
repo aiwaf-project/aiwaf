@@ -72,6 +72,8 @@ class AIWAFConfig:
                 'max_requests': 20,
                 'window_seconds': 10,
                 'flood_threshold': 40,
+                'key_mode': 'ip_path',
+                'soft_block_blacklist': False,
                 'exempt_ips': [],
             },
             'ip_keyword_block': {
@@ -83,6 +85,7 @@ class AIWAFConfig:
             'honeypot': {
                 'enabled': True,
                 'min_form_time': 1.0,
+                'max_page_time': 240,
             },
             'geo_block': {
                 'enabled': False,
@@ -187,6 +190,8 @@ class AIWAFConfig:
             'AIWAF_RATE_LIMITING_ENABLED': ('rate_limiting', 'enabled', bool),
             'AIWAF_RATE_MAX_REQUESTS': ('rate_limiting', 'max_requests', int),
             'AIWAF_RATE_WINDOW_SECONDS': ('rate_limiting', 'window_seconds', int),
+            'AIWAF_RATE_KEY_MODE': ('rate_limiting', 'key_mode', str),
+            'AIWAF_RATE_SOFT_BLOCK_BLACKLIST': ('rate_limiting', 'soft_block_blacklist', bool),
             
             # Blacklist
             'AIWAF_BLACKLIST_DEFAULT_DURATION': ('blacklist', 'default_block_duration', int),

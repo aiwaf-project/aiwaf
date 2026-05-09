@@ -53,8 +53,34 @@ class RateLimitingPureLogicTestCase(AIWAFMiddlewareTestCase):
             # At t=15, older than window=10 should be dropped.
             middleware(request)
 
-        timestamps = cache.get(f"ratelimit:{ip}")
+        timestamps = cache.get(f"ratelimit:{ip}:/rl-logic/")
         self.assertEqual(len(timestamps), 1)
+
+    @override_settings(
+        AIWAF_RATE_WINDOW=10,
+        AIWAF_RATE_MAX=100,
+        AIWAF_RATE_FLOOD=100,
+        AIWAF_RATE_KEY_MODE="ip",
+    )
+    def test_legacy_ip_key_mode_uses_ip_only_cache_key(self):
+        """Legacy mode keeps IP-only rate-limit cache key shape."""
+        from django.core.cache import cache
+
+        ip = "203.0.113.252"
+        request = self.create_request("/rl-legacy-key/", headers={"REMOTE_ADDR": ip})
+        middleware = RateLimitMiddleware(self.mock_get_response)
+        ticks = iter([0])
+        fake_time = types.SimpleNamespace(time=lambda: next(ticks))
+
+        with patch("aiwaf.django.middleware.is_middleware_disabled", return_value=False), \
+             patch("aiwaf.django.middleware.is_exempt", return_value=False), \
+             patch("aiwaf.django.middleware.is_ip_exempted", return_value=False), \
+             patch("aiwaf.django.middleware.get_rate_limit_overrides", return_value={}), \
+             patch("aiwaf.django.middleware.time", new=fake_time):
+            middleware(request)
+
+        self.assertIsNotNone(cache.get(f"ratelimit:{ip}"))
+        self.assertIsNone(cache.get(f"ratelimit:{ip}:/rl-legacy-key/"))
     
 
 

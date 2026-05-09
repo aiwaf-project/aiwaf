@@ -7,21 +7,12 @@ from ..blacklist import BlacklistManager
 from ..decorators import should_apply_middleware
 from ..geoip import get_country_for_ip
 from ..storage import get_geo_block_store
-from ..utils import get_ip, is_exempt
+from ..utils import get_blacklist_extended_info, get_ip, is_exempt
+from aiwaf.core.geo_policy import evaluate_geo_policy, normalize_country_list
 
 
 def _normalize_country_list(value):
-    if not value:
-        return set()
-    if isinstance(value, str):
-        values = [value]
-    else:
-        values = list(value)
-    normalized = set()
-    for item in values:
-        if item:
-            normalized.add(str(item).strip().upper())
-    return normalized
+    return normalize_country_list(value)
 
 
 class GeoBlockMiddleware(BaseHTTPMiddleware):
@@ -48,18 +39,19 @@ class GeoBlockMiddleware(BaseHTTPMiddleware):
         if not ip:
             return await call_next(request)
         country = get_country_for_ip(ip) or ""
-        country = country.strip().upper()
         if not country:
             return await call_next(request)
 
-        if self.allow_countries:
-            blocked = country not in self.allow_countries
-        else:
-            blocked = country in self.block_countries or country in dynamic_blocked
+        decision = evaluate_geo_policy(
+            country=country,
+            allow_countries=self.allow_countries,
+            block_countries=self.block_countries,
+            dynamic_blocked=dynamic_blocked,
+        )
 
-        if blocked:
-            reason = f"Geo blocked: {country}"
-            BlacklistManager.block(ip, reason)
+        if decision.should_block:
+            reason = decision.reason
+            BlacklistManager.block(ip, reason, extended_request_info=get_blacklist_extended_info(request))
             request.state.aiwaf_blocked = True
             request.state.aiwaf_block_reason = reason
             return JSONResponse({"error": "blocked"}, status_code=403)

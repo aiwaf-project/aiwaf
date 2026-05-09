@@ -9,6 +9,7 @@ This script simulates burst requests to test the RateLimitMiddleware.
 import os
 import sys
 import types
+from django.http import JsonResponse
 from unittest.mock import MagicMock, patch
 
 # Setup Django
@@ -54,6 +55,62 @@ class RateLimitingTestCase(AIWAFMiddlewareTestCase):
             with self.assertRaises(PermissionDenied):
                 middleware(request)
         mock_block.assert_called_once()
+
+    @override_settings(
+        AIWAF_RATE_WINDOW=10,
+        AIWAF_RATE_MAX=1,
+        AIWAF_RATE_FLOOD=100,
+        AIWAF_RATE_SOFT_BLOCK_BLACKLIST=False,
+    )
+    def test_soft_limit_default_does_not_blacklist(self):
+        """Default behavior: 429 on soft limit without blacklisting."""
+        request = self.create_request("/rl-soft-default/", headers={"REMOTE_ADDR": "203.0.113.210"})
+        middleware = RateLimitMiddleware(self.mock_get_response)
+        ticks = iter([0, 1])
+        fake_time = types.SimpleNamespace(time=lambda: next(ticks))
+
+        with patch("aiwaf.django.middleware.is_middleware_disabled", return_value=False), \
+             patch("aiwaf.django.middleware.is_exempt", return_value=False), \
+             patch("aiwaf.django.middleware.is_ip_exempted", return_value=False), \
+             patch("aiwaf.django.middleware.get_rate_limit_overrides", return_value={}), \
+             patch("aiwaf.django.middleware.BlacklistManager.block") as mock_block, \
+             patch("aiwaf.django.middleware.time", new=fake_time):
+            first = middleware(request)
+            second = middleware(request)
+
+        self.assertIsNotNone(first)
+        self.assertIsInstance(second, JsonResponse)
+        self.assertEqual(second.status_code, 429)
+        mock_block.assert_not_called()
+
+    @override_settings(
+        AIWAF_RATE_WINDOW=10,
+        AIWAF_RATE_MAX=1,
+        AIWAF_RATE_FLOOD=100,
+        AIWAF_RATE_SOFT_BLOCK_BLACKLIST=True,
+    )
+    def test_soft_limit_legacy_blacklists_when_enabled(self):
+        """Legacy mode: soft-limit 429 also triggers blacklist call."""
+        request = self.create_request("/rl-soft-legacy/", headers={"REMOTE_ADDR": "203.0.113.211"})
+        middleware = RateLimitMiddleware(self.mock_get_response)
+        ticks = iter([0, 1])
+        fake_time = types.SimpleNamespace(time=lambda: next(ticks))
+
+        with patch("aiwaf.django.middleware.is_middleware_disabled", return_value=False), \
+             patch("aiwaf.django.middleware.is_exempt", return_value=False), \
+             patch("aiwaf.django.middleware.is_ip_exempted", return_value=False), \
+             patch("aiwaf.django.middleware.get_rate_limit_overrides", return_value={}), \
+             patch("aiwaf.django.middleware.BlacklistManager.block") as mock_block, \
+             patch("aiwaf.django.middleware.time", new=fake_time):
+            _ = middleware(request)
+            second = middleware(request)
+
+        self.assertIsInstance(second, JsonResponse)
+        self.assertEqual(second.status_code, 429)
+        mock_block.assert_called_once()
+        args, _ = mock_block.call_args
+        self.assertEqual(args[0], "203.0.113.211")
+        self.assertEqual(args[1], "Rate limit exceeded")
     
 
 

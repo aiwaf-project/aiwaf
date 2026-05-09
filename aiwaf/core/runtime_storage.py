@@ -486,7 +486,13 @@ class BlacklistStore:
     def __init__(self, storage: StorageBackend):
         self.storage = storage
     
-    def block_ip(self, ip: str, reason: str, duration: Optional[int] = None):
+    def block_ip(
+        self,
+        ip: str,
+        reason: str,
+        duration: Optional[int] = None,
+        extended_request_info: Optional[Dict[str, Any]] = None,
+    ):
         """
         Block an IP address.
         
@@ -502,6 +508,8 @@ class BlacklistStore:
             'duration': duration,
             'permanent': duration is None
         }
+        if extended_request_info is not None:
+            block_data["extended_request_info"] = extended_request_info
         
         # Store the block
         self.storage.set(f"blocked:{ip}", block_data, ttl=duration)

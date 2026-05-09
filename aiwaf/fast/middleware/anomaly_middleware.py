@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from ..blacklist import BlacklistManager
 from ..decorators import should_apply_middleware
 from ..storage import get_keyword_store
-from ..utils import get_ip, is_exempt
+from ..utils import get_blacklist_extended_info, get_ip, is_exempt
 
 STATIC_KEYWORDS = {
     "admin",
@@ -71,7 +71,7 @@ class AIAnomalyMiddleware(BaseHTTPMiddleware):
 
         if found:
             reason = f"AI anomaly keyword detection: {found[0]}"
-            BlacklistManager.block(ip, reason)
+            BlacklistManager.block(ip, reason, extended_request_info=get_blacklist_extended_info(request))
             request.state.aiwaf_blocked = True
             request.state.aiwaf_block_reason = reason
             return JSONResponse({"error": "blocked"}, status_code=403)

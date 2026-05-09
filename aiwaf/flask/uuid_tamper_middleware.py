@@ -3,7 +3,7 @@ from flask import request, jsonify
 from .utils import get_ip
 from .blacklist_manager import BlacklistManager
 from .exemption_decorators import should_apply_middleware
-import re
+from aiwaf.core.uuid_tamper import is_malformed_uuid
 
 class UUIDTamperMiddleware:
     def __init__(self, app=None):
@@ -20,6 +20,6 @@ class UUIDTamperMiddleware:
             
             ip = get_ip()
             uuid_val = request.args.get("uuid")
-            if uuid_val and not re.match(r"^[a-f0-9\-]{36}$", uuid_val):
+            if is_malformed_uuid(uuid_val):
                 BlacklistManager.block(ip, "UUID tampering")
                 return jsonify({"error": "blocked"}), 403

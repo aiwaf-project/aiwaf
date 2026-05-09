@@ -5,20 +5,10 @@ from .blacklist_manager import BlacklistManager
 from .exemption_decorators import should_apply_middleware
 from .geoip import get_country_for_ip
 from .storage import get_geo_blocked_countries
-
+from aiwaf.core.geo_policy import evaluate_geo_policy, normalize_country_list
 
 def _normalize_country_list(value):
-    if not value:
-        return set()
-    if isinstance(value, str):
-        values = [value]
-    else:
-        values = list(value)
-    normalized = set()
-    for item in values:
-        if item:
-            normalized.add(str(item).strip().upper())
-    return normalized
+    return normalize_country_list(value)
 
 
 class GeoBlockMiddleware:
@@ -58,16 +48,15 @@ class GeoBlockMiddleware:
             if not country:
                 return None
 
-            country = country.strip().upper()
-            blocked = False
+            decision = evaluate_geo_policy(
+                country=country,
+                allow_countries=allow_countries,
+                block_countries=block_countries,
+                dynamic_blocked=dynamic_blocked,
+            )
 
-            if allow_countries:
-                blocked = country not in allow_countries
-            else:
-                blocked = country in block_countries or country in dynamic_blocked
-
-            if blocked:
-                reason = f"Geo blocked: {country}"
+            if decision.should_block:
+                reason = decision.reason
                 BlacklistManager.block(ip, reason)
 
                 logger = getattr(app, 'aiwaf_logger', None)

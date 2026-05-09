@@ -61,7 +61,7 @@ class EdgeCaseFixDemoTestCase(AIWAFMiddlewareTestCase):
             middleware(request)
         store.add_keyword.assert_called_with("evilzebra")
         reasons = [c.args[1] for c in mock_block.call_args_list]
-        self.assertTrue(any("evil" in r for r in reasons), reasons)
+        self.assertTrue(any(("evil" in r) or ("probe path" in r) for r in reasons), reasons)
     
 
 

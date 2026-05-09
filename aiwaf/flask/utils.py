@@ -2,10 +2,10 @@ from flask import request
 from .storage import is_ip_whitelisted, get_path_exemptions
 from aiwaf.core.defaults import DEFAULT_EXEMPT_PATHS_FLASK
 from aiwaf.core.exemptions import is_path_exempt as core_is_path_exempt
-from aiwaf.core.utils import get_ip_from_headers
+from aiwaf.core.request_context import extract_ip_from_flask_request
 
 def get_ip():
-    return get_ip_from_headers(request.headers, request.remote_addr)
+    return extract_ip_from_flask_request(request)
 
 def is_exempt(request):
     """Check if request should be exempt from AIWAF protection."""

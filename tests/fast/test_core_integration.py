@@ -47,7 +47,7 @@ def test_aiwaf_integrates_with_fastapi_and_allows_valid_request(monkeypatch):
     assert response.json() == {"ok": True}
 
 
-def test_rate_limiting_blocks_and_blacklists_ip():
+def test_rate_limiting_blocks_without_blacklisting_by_default():
     app = _build_app()
     AIWAF(
         app,
@@ -62,7 +62,7 @@ def test_rate_limiting_blocks_and_blacklists_ip():
 
     assert first.status_code == 200
     assert second.status_code == 429
-    assert BlacklistManager.is_blocked("testclient")
+    assert not BlacklistManager.is_blocked("testclient")
 
 
 def test_lifespan_registration_skips_if_already_present():

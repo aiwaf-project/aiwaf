@@ -10,6 +10,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from ..decorators import should_apply_middleware
 from ..utils import get_ip
+from ...core.request_context import extract_logging_context_from_fastapi_request
 
 
 class AIWAFLoggingMiddleware(BaseHTTPMiddleware):
@@ -50,14 +51,13 @@ class AIWAFLoggingMiddleware(BaseHTTPMiddleware):
     def _log_access_combined(self, request, response, start_time):
         response_time_ms = int((time.time() - start_time) * 1000)
         ip = get_ip(request)
+        ctx = extract_logging_context_from_fastapi_request(request, ip=ip)
         timestamp = datetime.now().strftime("[%d/%b/%Y:%H:%M:%S +0000]")
-        path = request.url.path
-        if request.url.query:
-            path = f"{path}?{request.url.query}"
-        protocol = f"HTTP/{request.scope.get('http_version', '1.1')}"
+        path = ctx["path_with_query"]
+        protocol = ctx["protocol"]
         content_length = response.headers.get("content-length", "-")
-        referer = request.headers.get("referer", "-")
-        user_agent = request.headers.get("user-agent", "-")
+        referer = ctx["referer"] or "-"
+        user_agent = ctx["user_agent"] or "-"
         blocked = "BLOCKED" if getattr(request.state, "aiwaf_blocked", False) else "-"
         block_reason = getattr(request.state, "aiwaf_block_reason", "-")
         log_line = (
@@ -86,19 +86,14 @@ class AIWAFLoggingMiddleware(BaseHTTPMiddleware):
         ]
         row = {
             "timestamp": datetime.now().isoformat(),
-            "ip": get_ip(request),
-            "method": request.method,
-            "path": request.url.path,
-            "query_string": request.url.query,
-            "protocol": f"HTTP/{request.scope.get('http_version', '1.1')}",
+            **extract_logging_context_from_fastapi_request(request, ip=get_ip(request)),
             "status_code": response.status_code,
             "content_length": response.headers.get("content-length", 0),
             "response_time_ms": int((time.time() - start_time) * 1000),
-            "referer": request.headers.get("referer", ""),
-            "user_agent": request.headers.get("user-agent", ""),
             "blocked": getattr(request.state, "aiwaf_blocked", False),
             "block_reason": getattr(request.state, "aiwaf_block_reason", ""),
         }
+        row.pop("path_with_query", None)
         if not self.access_log_file.exists():
             with open(self.access_log_file, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
@@ -110,27 +105,23 @@ class AIWAFLoggingMiddleware(BaseHTTPMiddleware):
     def _log_access_json(self, request, response, start_time):
         log_data = {
             "timestamp": datetime.now().isoformat(),
-            "ip": get_ip(request),
-            "method": request.method,
-            "path": request.url.path,
-            "query_string": request.url.query,
-            "protocol": f"HTTP/{request.scope.get('http_version', '1.1')}",
+            **extract_logging_context_from_fastapi_request(request, ip=get_ip(request)),
             "status_code": response.status_code,
             "content_length": response.headers.get("content-length", 0),
             "response_time_ms": int((time.time() - start_time) * 1000),
-            "referer": request.headers.get("referer", ""),
-            "user_agent": request.headers.get("user-agent", ""),
             "blocked": getattr(request.state, "aiwaf_blocked", False),
             "block_reason": getattr(request.state, "aiwaf_block_reason", ""),
         }
+        log_data.pop("path_with_query", None)
         with open(self.access_log_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(log_data) + "\n")
 
     def _log_error(self, request, response):
         timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+        ctx = extract_logging_context_from_fastapi_request(request, ip=get_ip(request))
         line = (
-            f"{timestamp} [error] {response.status_code} from {get_ip(request)}: "
-            f'{request.method} {request.url.path} "{request.headers.get("user-agent", "-")}"'
+            f"{timestamp} [error] {response.status_code} from {ctx['ip']}: "
+            f'{ctx["method"]} {ctx["path"]} "{ctx["user_agent"] or "-"}"'
         )
         with open(self.error_log_file, "a", encoding="utf-8") as f:
             f.write(line + "\n")
@@ -138,9 +129,10 @@ class AIWAFLoggingMiddleware(BaseHTTPMiddleware):
     def _log_aiwaf_event(self, request):
         timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
         reason = getattr(request.state, "aiwaf_block_reason", "unknown")
+        ctx = extract_logging_context_from_fastapi_request(request, ip=get_ip(request))
         line = (
-            f"{timestamp} [AIWAF] BLOCKED {get_ip(request)} - {reason} - "
-            f'{request.method} {request.url.path} "{request.headers.get("user-agent", "-")}"'
+            f"{timestamp} [AIWAF] BLOCKED {ctx['ip']} - {reason} - "
+            f'{ctx["method"]} {ctx["path"]} "{ctx["user_agent"] or "-"}"'
         )
         with open(self.aiwaf_log_file, "a", encoding="utf-8") as f:
             f.write(line + "\n")

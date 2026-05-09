@@ -4,7 +4,11 @@ import inspect
 from functools import wraps
 from typing import Any, Dict, Iterable, Optional, Set
 
-from aiwaf.core.exemptions import get_path_rule_for_path as core_get_path_rule_for_path
+from aiwaf.core.exemptions import (
+    get_path_rule_overrides_for_path as core_get_path_rule_overrides_for_path,
+    is_middleware_disabled_for_path as core_is_middleware_disabled_for_path,
+    should_apply_middleware_for_path as core_should_apply_middleware_for_path,
+)
 
 ALL_MIDDLEWARES = {
     "ip_keyword_block",
@@ -97,14 +101,7 @@ def _is_path_rule_disabled(request, middleware_name: str, path_rules: Optional[I
     if not path_rules:
         return False
     path = getattr(request.url, "path", "")
-    rule = core_get_path_rule_for_path(path, path_rules)
-    if not rule:
-        return False
-    disabled = rule.get("DISABLE", []) or []
-    if not isinstance(disabled, (list, tuple, set)):
-        return False
-    target = middleware_name.lower()
-    return any(str(item).strip().lower() == target for item in disabled if item)
+    return core_is_middleware_disabled_for_path(path, path_rules, middleware_name)
 
 
 def get_path_rule_overrides(request, key: str, path_rules: Optional[Iterable[Dict[str, Any]]] = None) -> Dict[str, Any]:
@@ -112,32 +109,29 @@ def get_path_rule_overrides(request, key: str, path_rules: Optional[Iterable[Dic
     if not path_rules:
         return {}
     path = getattr(request.url, "path", "")
-    rule = core_get_path_rule_for_path(path, path_rules)
-    if not rule:
-        return {}
-    value = rule.get(key, {}) or rule.get(key.lower(), {}) or {}
-    return value if isinstance(value, dict) else {}
+    return core_get_path_rule_overrides_for_path(path, path_rules, key)
 
 
 def should_apply_middleware(request, middleware_name: str, path_rules: Optional[Iterable[Dict[str, Any]]] = None) -> bool:
     """Decide whether middleware should run for this request."""
     middleware_name = (middleware_name or "").strip().lower()
     endpoint = _endpoint_from_request(request)
+    path = getattr(request.url, "path", "")
+    rules = path_rules or []
 
+    required = set()
+    fully_exempt = False
+    exempt_middlewares = set()
     if endpoint is not None:
         required = getattr(endpoint, "_aiwaf_required_middlewares", set()) or set()
-        if middleware_name in {str(item).strip().lower() for item in required if item}:
-            return True
-
-    if _is_path_rule_disabled(request, middleware_name, path_rules):
-        return False
-
-    if endpoint is not None:
-        if getattr(endpoint, "aiwaf_exempt", False) or getattr(endpoint, "_aiwaf_exempt", False):
-            return False
+        fully_exempt = bool(getattr(endpoint, "aiwaf_exempt", False) or getattr(endpoint, "_aiwaf_exempt", False))
         exempt_middlewares = getattr(endpoint, "_aiwaf_exempt_middlewares", set()) or set()
-        normalized = {str(item).strip().lower() for item in exempt_middlewares if item}
-        if middleware_name in normalized:
-            return False
 
-    return True
+    return core_should_apply_middleware_for_path(
+        path,
+        rules,
+        middleware_name,
+        fully_exempt=fully_exempt,
+        exempt_middlewares=exempt_middlewares,
+        required_middlewares=required,
+    )

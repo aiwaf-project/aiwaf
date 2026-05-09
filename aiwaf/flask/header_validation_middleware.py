@@ -50,7 +50,7 @@ class HeaderValidationMiddleware:
                     request.environ, effective_required_headers, min_score
                 )
             else:
-                reason = header_validation.validate_headers_python(
+                reason = header_validation.evaluate_header_policy(
                     request.environ,
                     method=req_method,
                     config_required_headers=configured_required,

@@ -2,6 +2,7 @@
 
 from aiwaf.core.runtime_utils import (
     RateLimiter,
+    get_blacklist_extended_info,
     get_ip,
     get_request_fingerprint,
     ip_in_allowlist,
@@ -15,6 +16,7 @@ from aiwaf.core.runtime_utils import (
 
 __all__ = [
     "get_ip",
+    "get_blacklist_extended_info",
     "is_private_ip",
     "is_exempt",
     "is_view_exempt",

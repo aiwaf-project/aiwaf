@@ -1,4 +1,5 @@
 import re
+from typing import Iterable, Optional, Sequence
 
 MAX_HEADER_BYTES = 32 * 1024
 MAX_HEADER_COUNT = 100
@@ -84,20 +85,22 @@ def resolve_required_headers(config_required_headers, method=None):
             return list(headers)
     return list(REQUIRED_HEADERS)
 
-def _check_user_agent(user_agent):
+def _check_user_agent(user_agent, *, suspicious_user_agents=None, legitimate_bots=None, max_user_agent_length=MAX_USER_AGENT_LENGTH):
     if not user_agent:
         return None
         
-    if len(user_agent) > MAX_USER_AGENT_LENGTH:
-        return f"User-Agent longer than {MAX_USER_AGENT_LENGTH} chars"
+    if len(user_agent) > max_user_agent_length:
+        return f"User-Agent longer than {max_user_agent_length} chars"
     
     user_agent_lower = user_agent.lower()
     
-    for legitimate_pattern in LEGITIMATE_BOTS:
+    legitimate = legitimate_bots if legitimate_bots is not None else LEGITIMATE_BOTS
+    for legitimate_pattern in legitimate:
         if re.search(legitimate_pattern, user_agent_lower):
             return None
             
-    for suspicious_pattern in SUSPICIOUS_USER_AGENTS:
+    suspicious = suspicious_user_agents if suspicious_user_agents is not None else SUSPICIOUS_USER_AGENTS
+    for suspicious_pattern in suspicious:
         if re.search(suspicious_pattern, user_agent_lower, re.IGNORECASE):
             return f"Pattern: {suspicious_pattern}"
             
@@ -106,11 +109,12 @@ def _check_user_agent(user_agent):
         
     return None
 
-def _check_header_combinations(headers, required_headers):
+def _check_header_combinations(headers, required_headers, *, suspicious_combinations=None):
     if not required_headers:
         return None
     required = set(required_headers)
-    for combo in SUSPICIOUS_COMBINATIONS:
+    combos = suspicious_combinations if suspicious_combinations is not None else SUSPICIOUS_COMBINATIONS
+    for combo in combos:
         try:
             if combo.get('reason') == 'User-Agent present but no Accept header' and 'HTTP_ACCEPT' not in required:
                 continue
@@ -120,13 +124,14 @@ def _check_header_combinations(headers, required_headers):
             continue
     return None
 
-def _calculate_header_quality(headers):
+def _calculate_header_quality(headers, *, browser_headers=None):
     score = 0
     if headers.get('HTTP_USER_AGENT'):
         score += 2
     if headers.get('HTTP_ACCEPT'):
         score += 2
-    for header in BROWSER_HEADERS:
+    effective_browser_headers = browser_headers if browser_headers is not None else BROWSER_HEADERS
+    for header in effective_browser_headers:
         if headers.get(header):
             score += 1
     if headers.get('HTTP_ACCEPT_LANGUAGE') and headers.get('HTTP_ACCEPT_ENCODING'):
@@ -139,6 +144,28 @@ def _calculate_header_quality(headers):
     return score
 
 def validate_headers_python(environ, method=None, config_required_headers=None, min_score=None):
+    return evaluate_header_policy(
+        environ,
+        method=method,
+        config_required_headers=config_required_headers,
+        min_score=min_score,
+    )
+
+def evaluate_header_policy(
+    environ,
+    *,
+    method=None,
+    config_required_headers=None,
+    min_score=None,
+    max_header_bytes=MAX_HEADER_BYTES,
+    max_header_count=MAX_HEADER_COUNT,
+    max_user_agent_length=MAX_USER_AGENT_LENGTH,
+    max_accept_length=MAX_ACCEPT_LENGTH,
+    suspicious_user_agents=None,
+    legitimate_bots=None,
+    suspicious_combinations=None,
+    browser_headers=None,
+):
     total_bytes = 0
     header_count = 0
     for key, value in environ.items():
@@ -149,19 +176,19 @@ def validate_headers_python(environ, method=None, config_required_headers=None, 
         value_str = value if isinstance(value, str) else str(value)
         total_bytes += len(key) + len(value_str)
 
-        if total_bytes > MAX_HEADER_BYTES:
-            return f"Header bytes exceed {MAX_HEADER_BYTES}"
+        if total_bytes > max_header_bytes:
+            return f"Header bytes exceed {max_header_bytes}"
 
-    if header_count > MAX_HEADER_COUNT:
-        return f"Header count exceeds {MAX_HEADER_COUNT}"
+    if header_count > max_header_count:
+        return f"Header count exceeds {max_header_count}"
 
     user_agent = environ.get('HTTP_USER_AGENT', '')
-    if user_agent and len(user_agent) > MAX_USER_AGENT_LENGTH:
-        return f"User-Agent longer than {MAX_USER_AGENT_LENGTH} chars"
+    if user_agent and len(user_agent) > max_user_agent_length:
+        return f"User-Agent longer than {max_user_agent_length} chars"
 
     accept_header = environ.get('HTTP_ACCEPT', '')
-    if accept_header and len(accept_header) > MAX_ACCEPT_LENGTH:
-        return f"Accept header longer than {MAX_ACCEPT_LENGTH} chars"
+    if accept_header and len(accept_header) > max_accept_length:
+        return f"Accept header longer than {max_accept_length} chars"
 
     required_headers = resolve_required_headers(config_required_headers, method)
     
@@ -172,15 +199,24 @@ def validate_headers_python(environ, method=None, config_required_headers=None, 
     if missing:
         return f"Missing required headers: {', '.join(missing)}"
 
-    suspicious_ua = _check_user_agent(user_agent)
+    suspicious_ua = _check_user_agent(
+        user_agent,
+        suspicious_user_agents=suspicious_user_agents,
+        legitimate_bots=legitimate_bots,
+        max_user_agent_length=max_user_agent_length,
+    )
     if suspicious_ua:
         return f"Suspicious user agent: {suspicious_ua}"
 
-    suspicious_combo = _check_header_combinations(environ, required_headers)
+    suspicious_combo = _check_header_combinations(
+        environ,
+        required_headers,
+        suspicious_combinations=suspicious_combinations,
+    )
     if suspicious_combo:
         return f"Suspicious headers: {suspicious_combo}"
 
-    quality_score = _calculate_header_quality(environ)
+    quality_score = _calculate_header_quality(environ, browser_headers=browser_headers)
     actual_min_score = min_score if min_score is not None else 3
     if required_headers and quality_score < actual_min_score:
         return f"Low header quality score: {quality_score}"

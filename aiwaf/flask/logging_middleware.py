@@ -13,6 +13,7 @@ from pathlib import Path
 from flask import request, g
 from .exemption_decorators import should_apply_middleware
 import time
+from aiwaf.core.request_context import extract_logging_context_from_flask_request
 
 logger = logging.getLogger(__name__)
 
@@ -99,16 +100,17 @@ class AIWAFLoggingMiddleware:
         response_time_ms = int((time.time() - start_time) * 1000)
         
         ip = self._get_client_ip()
+        ctx = extract_logging_context_from_flask_request(request, ip=ip)
         # Use a timezone-safe timestamp format for cross-platform compatibility
         now = datetime.now()
         timestamp = now.strftime('[%d/%b/%Y:%H:%M:%S +0000]')
-        method = request.method
-        path = request.full_path if request.query_string else request.path
-        protocol = request.environ.get('SERVER_PROTOCOL', 'HTTP/1.1')
+        method = ctx["method"]
+        path = ctx["path_with_query"]
+        protocol = ctx["protocol"]
         status_code = response.status_code
         content_length = response.content_length or '-'
-        referer = request.headers.get('Referer', '-')
-        user_agent = request.headers.get('User-Agent', '-')
+        referer = ctx["referer"] or '-'
+        user_agent = ctx["user_agent"] or '-'
         
         # Add AIWAF specific fields
         blocked = 'BLOCKED' if getattr(g, 'aiwaf_blocked', False) else '-'
@@ -143,19 +145,14 @@ class AIWAFLoggingMiddleware:
 
         row = {
             'timestamp': datetime.now().isoformat(),
-            'ip': self._get_client_ip(),
-            'method': request.method,
-            'path': request.path,
-            'query_string': request.query_string.decode('utf-8', errors='ignore'),
-            'protocol': request.environ.get('SERVER_PROTOCOL', 'HTTP/1.1'),
+            **extract_logging_context_from_flask_request(request, ip=self._get_client_ip()),
             'status_code': response.status_code,
             'content_length': response.content_length or 0,
             'response_time_ms': response_time_ms,
-            'referer': request.headers.get('Referer', ''),
-            'user_agent': request.headers.get('User-Agent', ''),
             'blocked': getattr(g, 'aiwaf_blocked', False),
             'block_reason': getattr(g, 'aiwaf_block_reason', ''),
         }
+        row.pop("path_with_query", None)
 
         # Python fallback
         if not self.access_log_file.exists():
@@ -176,19 +173,14 @@ class AIWAFLoggingMiddleware:
         
         log_data = {
             'timestamp': datetime.now().isoformat(),
-            'ip': self._get_client_ip(),
-            'method': request.method,
-            'path': request.path,
-            'query_string': request.query_string.decode('utf-8', errors='ignore'),
-            'protocol': request.environ.get('SERVER_PROTOCOL', 'HTTP/1.1'),
+            **extract_logging_context_from_flask_request(request, ip=self._get_client_ip()),
             'status_code': response.status_code,
             'content_length': response.content_length or 0,
             'response_time_ms': response_time_ms,
-            'referer': request.headers.get('Referer', ''),
-            'user_agent': request.headers.get('User-Agent', ''),
             'blocked': getattr(g, 'aiwaf_blocked', False),
             'block_reason': getattr(g, 'aiwaf_block_reason', '')
         }
+        log_data.pop("path_with_query", None)
         
         with open(self.access_log_file, 'a', encoding='utf-8') as f:
             f.write(json.dumps(log_data) + '\n')
@@ -196,15 +188,13 @@ class AIWAFLoggingMiddleware:
     def _log_error(self, response):
         """Log errors in standard error log format."""
         timestamp = datetime.now().strftime('[%Y-%m-%d %H:%M:%S]')
-        ip = self._get_client_ip()
-        method = request.method
-        path = request.path
+        ctx = extract_logging_context_from_flask_request(request, ip=self._get_client_ip())
         status_code = response.status_code
-        user_agent = request.headers.get('User-Agent', '-')
+        user_agent = ctx["user_agent"] or '-'
         
         error_line = (
-            f'{timestamp} [error] {status_code} from {ip}: '
-            f'{method} {path} "{user_agent}"'
+            f'{timestamp} [error] {status_code} from {ctx["ip"]}: '
+            f'{ctx["method"]} {ctx["path"]} "{user_agent}"'
         )
         
         with open(self.error_log_file, 'a', encoding='utf-8') as f:
@@ -213,15 +203,13 @@ class AIWAFLoggingMiddleware:
     def _log_aiwaf_event(self, response):
         """Log AIWAF specific security events."""
         timestamp = datetime.now().strftime('[%Y-%m-%d %H:%M:%S]')
-        ip = self._get_client_ip()
-        method = request.method
-        path = request.path
+        ctx = extract_logging_context_from_flask_request(request, ip=self._get_client_ip())
         block_reason = getattr(g, 'aiwaf_block_reason', 'unknown')
-        user_agent = request.headers.get('User-Agent', '-')
+        user_agent = ctx["user_agent"] or '-'
         
         aiwaf_line = (
-            f'{timestamp} [AIWAF] BLOCKED {ip} - {block_reason} - '
-            f'{method} {path} "{user_agent}"'
+            f'{timestamp} [AIWAF] BLOCKED {ctx["ip"]} - {block_reason} - '
+            f'{ctx["method"]} {ctx["path"]} "{user_agent}"'
         )
         
         with open(self.aiwaf_log_file, 'a', encoding='utf-8') as f:

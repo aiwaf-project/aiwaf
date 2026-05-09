@@ -1,16 +1,16 @@
 """
 Core utility functions for AIWAF
 """
-import ipaddress
 from typing import Optional, Set, List
 from fastapi import Request
 import logging
 from aiwaf.core.defaults import DEFAULT_EXEMPT_PATHS_FLASK
 from aiwaf.core.exemptions import is_path_exempt as core_is_path_exempt
 from aiwaf.core.utils import (
-    get_ip_from_headers as core_get_ip_from_headers,
     ip_in_allowlist as core_ip_in_allowlist,
 )
+from aiwaf.core.request_context import resolve_ip_from_fastapi_request
+from aiwaf.core.request_context import extract_blacklist_extended_info_from_fastapi_request
 
 logger = logging.getLogger(__name__)
 
@@ -19,56 +19,7 @@ def get_ip(request: Request) -> str:
     """
     Extract the real IP address from the request, considering proxy headers.
     """
-    # Prefer direct client IP; only trust forwarded headers when the peer looks like a proxy.
-    client_ip = request.client.host if hasattr(request, 'client') and request.client else None
-    if client_ip and _is_valid_ip(client_ip) and not _is_proxy_like_ip(client_ip):
-        return client_ip
-
-    # Use forwarded headers when request appears proxied/internal.
-    if client_ip is None or _is_proxy_like_ip(client_ip):
-        request_headers = dict(request.headers)
-        headers_lower = {str(k).lower(): v for k, v in request_headers.items()}
-
-        xff = headers_lower.get("x-forwarded-for")
-        if xff:
-            candidate = xff.split(",")[0].strip()
-            if _is_valid_ip(candidate):
-                return candidate
-
-        extracted = core_get_ip_from_headers(request_headers, client_ip)
-        if extracted and _is_valid_ip(extracted):
-            return extracted
-
-        # Fall back to additional common reverse-proxy headers.
-        forwarded_headers = [
-            'x-forwarded-for',
-            'x-real-ip',
-            'x-client-ip',
-            'cf-connecting-ip',  # Cloudflare
-            'x-forwarded',
-            'forwarded-for',
-            'forwarded',
-        ]
-        for header in forwarded_headers:
-            if header in headers_lower:
-                ip = headers_lower[header].split(',')[0].strip()
-                if _is_valid_ip(ip):
-                    return ip
-    
-    # Fall back to client IP
-    if client_ip:
-        return client_ip
-    
-    return "unknown"
-
-
-def _is_valid_ip(ip: str) -> bool:
-    """Check if the provided string is a valid IP address."""
-    try:
-        ipaddress.ip_address(ip)
-        return True
-    except ValueError:
-        return False
+    return resolve_ip_from_fastapi_request(request)
 
 
 def is_private_ip(ip: str) -> bool:
@@ -76,22 +27,6 @@ def is_private_ip(ip: str) -> bool:
     try:
         ip_obj = ipaddress.ip_address(ip)
         return ip_obj.is_private
-    except ValueError:
-        return False
-
-
-def _is_proxy_like_ip(ip: str) -> bool:
-    """
-    Treat non-public peer addresses as proxy/front-end hops.
-    """
-    try:
-        ip_obj = ipaddress.ip_address(ip)
-        return (
-            ip_obj.is_private
-            or ip_obj.is_loopback
-            or ip_obj.is_link_local
-            or ip_obj.is_reserved
-        )
     except ValueError:
         return False
 
@@ -197,6 +132,37 @@ def sanitize_header_value(value: str, max_length: int = 500) -> str:
 def ip_in_allowlist(ip: str, allowlist) -> bool:
     """Compatibility wrapper around shared allowlist helper."""
     return core_ip_in_allowlist(ip, allowlist)
+
+
+def get_blacklist_extended_info(request: Request):
+    """
+    Build optional extended-request-info payload for blacklist entries.
+    """
+    app = getattr(request, "app", None)
+    state = getattr(app, "state", None)
+    cfg = getattr(state, "aiwaf_config", None)
+    if cfg is None:
+        return None
+
+    def _cfg(key: str, default):
+        try:
+            if hasattr(cfg, "get"):
+                return cfg.get(key, default)
+        except Exception:
+            pass
+        return default
+
+    enabled = bool(
+        _cfg("AIWAF_BLACKLIST_STORE_EXTENDED_INFO", False)
+        or _cfg("AIWAF_CAPTURE_EXTENDED_REQUEST_INFO", False)
+    )
+    return extract_blacklist_extended_info_from_fastapi_request(
+        request,
+        enabled=enabled,
+        max_headers=int(_cfg("AIWAF_BLACKLIST_MAX_HEADERS", 50)),
+        max_value_len=int(_cfg("AIWAF_BLACKLIST_MAX_HEADER_VALUE_LENGTH", 512)),
+        redact_headers=_cfg("AIWAF_BLACKLIST_REDACT_HEADERS", ["Authorization", "Cookie", "Set-Cookie"]),
+    )
 
 
 def parse_user_agent(user_agent: str) -> dict:

@@ -86,6 +86,7 @@ class AIWAF:
             app: FastAPI application instance
         """
         self.app = app
+        setattr(self.app.state, "aiwaf_config", self.config)
         
         # Add middleware in reverse order (FastAPI adds them in reverse)
         self._add_middleware()
@@ -153,6 +154,7 @@ class AIWAF:
             self.app.add_middleware(
                 HoneypotTimingMiddleware,
                 min_form_time=honeypot_cfg.get("min_form_time", 1.0),
+                max_page_time=honeypot_cfg.get("max_page_time", 240),
                 path_rules=path_rules,
             )
 
@@ -163,6 +165,8 @@ class AIWAF:
                 max_requests=rate_cfg.get("max_requests", 20),
                 window_seconds=rate_cfg.get("window_seconds", 10),
                 flood_threshold=rate_cfg.get("flood_threshold", 40),
+                key_mode=rate_cfg.get("key_mode", "ip_path"),
+                soft_block_blacklist=rate_cfg.get("soft_block_blacklist", False),
                 path_rules=path_rules,
             )
 

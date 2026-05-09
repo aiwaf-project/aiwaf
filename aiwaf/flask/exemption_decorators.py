@@ -5,7 +5,13 @@ Provides decorators for exempting routes from AIWAF protection with fine-grained
 """
 from functools import wraps
 from flask import request, g, current_app
-from aiwaf.core.exemptions import get_path_rule_for_path as core_get_path_rule_for_path
+from aiwaf.core.exemptions import (
+    get_path_rule_for_path as core_get_path_rule_for_path,
+    get_path_rule_overrides_for_path as core_get_path_rule_overrides_for_path,
+    is_middleware_disabled_for_path as core_is_middleware_disabled_for_path,
+    normalize_middleware_name as core_normalize_middleware_name,
+    should_apply_middleware_for_path as core_should_apply_middleware_for_path,
+)
 
 
 def aiwaf_exempt(func):
@@ -264,28 +270,37 @@ def should_apply_middleware(middleware_name):
         3. If middleware is in exemption list, don't apply (unless required)
         4. Otherwise, apply middleware
     """
-    # Check if middleware is explicitly required (route or runtime)
-    route_required = _check_route_required(middleware_name)
-    if route_required:
-        return True
-    if is_middleware_required(middleware_name):
-        return True
+    path = ""
+    rules = _get_path_rules()
+    fully_exempt = False
+    exempt_middlewares = set()
+    required_middlewares = set()
+    target = _normalize_middleware_name(middleware_name)
+    try:
+        path = request.path or ""
+        endpoint = request.endpoint
+        view_func = current_app.view_functions.get(endpoint) if endpoint else None
+        if view_func is not None:
+            fully_exempt = bool(getattr(view_func, "_aiwaf_exempt", False))
+            exempt_middlewares = set(getattr(view_func, "_aiwaf_exempt_middlewares", set()) or set())
+            required_middlewares = set(getattr(view_func, "_aiwaf_required_middlewares", set()) or set())
+    except Exception:
+        pass
 
-    # Path-specific rules (disable/override by URL prefix)
-    if _is_path_rule_disabled(middleware_name):
-        return False
-    
-    # Check route-level exemptions first (from function decorators)
-    route_exempt = _check_route_exemption(middleware_name)
-    if route_exempt is not None:
-        return not route_exempt  # If exempt, don't apply
-    
-    # Check if request is exempt from this middleware (runtime exemptions)
-    if is_request_exempt(middleware_name):
-        return False
-    
-    # Default: apply middleware
-    return True
+    # Merge runtime request-scoped exemptions/requirements from g.
+    if getattr(g, "aiwaf_exempt", False):
+        fully_exempt = True
+    exempt_middlewares.update(getattr(g, "aiwaf_exempt_middlewares", set()) or set())
+    required_middlewares.update(getattr(g, "aiwaf_required_middlewares", set()) or set())
+
+    return core_should_apply_middleware_for_path(
+        path,
+        rules,
+        target,
+        fully_exempt=fully_exempt,
+        exempt_middlewares=exempt_middlewares,
+        required_middlewares=required_middlewares,
+    )
 
 
 def _check_route_exemption(middleware_name):
@@ -364,10 +379,12 @@ def get_path_rule_for_request():
 
 def get_path_rule_overrides(section_key):
     """Return override dict for a section (e.g., RATE_LIMIT) for the current path."""
-    rule = get_path_rule_for_request()
-    if not rule:
+    try:
+        path = request.path or ""
+        rules = _get_path_rules()
+        return core_get_path_rule_overrides_for_path(path, rules, section_key)
+    except Exception:
         return {}
-    return rule.get(section_key) or rule.get(section_key.lower()) or {}
 
 
 def _get_path_rules():
@@ -382,27 +399,13 @@ def _get_path_rules():
 
 
 def _normalize_middleware_name(name):
-    mapping = {
-        "IPAndKeywordBlockMiddleware": "ip_keyword_block",
-        "RateLimitMiddleware": "rate_limit",
-        "HoneypotTimingMiddleware": "honeypot",
-        "HeaderValidationMiddleware": "header_validation",
-        "GeoBlockMiddleware": "geo_block",
-        "AIAnomalyMiddleware": "ai_anomaly",
-        "UUIDTamperMiddleware": "uuid_tamper",
-        "AIWAFLoggingMiddleware": "logging",
-    }
-    if name in mapping:
-        return mapping[name]
-    return name.lower()
+    return core_normalize_middleware_name(name)
 
 
 def _is_path_rule_disabled(middleware_name):
-    rule = get_path_rule_for_request()
-    if not rule:
+    try:
+        path = request.path or ""
+        rules = _get_path_rules()
+        return core_is_middleware_disabled_for_path(path, rules, middleware_name)
+    except Exception:
         return False
-    disabled = rule.get("DISABLE") or rule.get("disable") or []
-    if not disabled:
-        return False
-    normalized = {_normalize_middleware_name(item) for item in disabled}
-    return _normalize_middleware_name(middleware_name) in normalized

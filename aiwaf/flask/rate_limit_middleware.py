@@ -5,6 +5,14 @@ from .utils import get_ip, is_exempt
 from .blacklist_manager import BlacklistManager
 from .exemption_decorators import should_apply_middleware, get_path_rule_overrides
 from aiwaf.core.exemptions import get_path_rule_for_path as core_get_path_rule_for_path
+from aiwaf.core.block_responses import blocked_response, throttle_response
+from aiwaf.core.rate_limit import (
+    THROTTLE,
+    FLOOD_BLOCK,
+    build_rate_limit_key,
+    evaluate_rate_limit,
+    normalize_rate_key_mode,
+)
 
 _aiwaf_cache = {}
 
@@ -35,12 +43,14 @@ class RateLimitMiddleware:
             ip = get_ip()
             app_key = app._aiwaf_rate_cache_key
             path = request.path or "unknown"
-            key = f"ratelimit:{app_key}:{ip}:{path}"
+            key_mode = normalize_rate_key_mode(app.config.get("AIWAF_RATE_KEY_MODE", "ip_path"))
+            key = build_rate_limit_key("ratelimit", ip, path, key_mode=key_mode, app_key=app_key)
             now = time.time()
             timestamps = _aiwaf_cache.get(key, [])
             window = app.config.get("AIWAF_RATE_WINDOW", 10)
             max_req = app.config.get("AIWAF_RATE_MAX", 20)
             flood = app.config.get("AIWAF_RATE_FLOOD", 40)
+            soft_block_blacklist = bool(app.config.get("AIWAF_RATE_SOFT_BLOCK_BLACKLIST", False))
             overrides = get_path_rule_overrides("RATE_LIMIT")
             if not overrides:
                 overrides = _resolve_rate_limit_overrides(app, request.path)
@@ -48,15 +58,25 @@ class RateLimitMiddleware:
                 window = overrides.get("WINDOW", window)
                 max_req = overrides.get("MAX", max_req)
                 flood = overrides.get("FLOOD", flood)
-            
-            timestamps = [t for t in timestamps if now - t < window]
-            timestamps.append(now)
-            _aiwaf_cache[key] = timestamps
-            if len(timestamps) > flood:
+
+            decision = evaluate_rate_limit(
+                timestamps=timestamps,
+                now=now,
+                window_seconds=window,
+                max_requests=max_req,
+                flood_threshold=flood,
+            )
+            _aiwaf_cache[key] = decision.timestamps
+
+            if decision.action == FLOOD_BLOCK:
                 BlacklistManager.block(ip, "Flood pattern")
-                return jsonify({"error": "blocked"}), 403
-            if len(timestamps) > max_req:
-                return jsonify({"error": "too_many_requests"}), 429
+                payload, status = blocked_response()
+                return jsonify(payload), status
+            if decision.action == THROTTLE:
+                if soft_block_blacklist:
+                    BlacklistManager.block(ip, "Rate limit exceeded")
+                payload, status = throttle_response()
+                return jsonify(payload), status
 
 
 def _resolve_rate_limit_overrides(app, path):

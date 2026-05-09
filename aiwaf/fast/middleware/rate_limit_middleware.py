@@ -6,19 +6,38 @@ from fastapi.responses import JSONResponse
 
 from ..blacklist import BlacklistManager
 from ..decorators import get_path_rule_overrides, should_apply_middleware
-from ..utils import get_ip, is_exempt
+from ..utils import get_blacklist_extended_info, get_ip, is_exempt
+from ...core.rate_limit import (
+    THROTTLE,
+    FLOOD_BLOCK,
+    build_rate_limit_key,
+    evaluate_rate_limit,
+    normalize_rate_key_mode,
+)
+from ...core.block_responses import blocked_response, throttle_response
 
 _AIWAF_CACHE = {}
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, max_requests=20, window_seconds=10, flood_threshold=40, path_rules=None):
+    def __init__(
+        self,
+        app,
+        max_requests=20,
+        window_seconds=10,
+        flood_threshold=40,
+        path_rules=None,
+        key_mode="ip_path",
+        soft_block_blacklist=False,
+    ):
         super().__init__(app)
         self.max_requests = max_requests
         self.window_seconds = window_seconds
         self.flood_threshold = flood_threshold
         self.path_rules = path_rules or []
         self.app_key = f"{id(app)}:{time.time_ns()}"
+        self.key_mode = normalize_rate_key_mode(key_mode)
+        self.soft_block_blacklist = bool(soft_block_blacklist)
 
     async def dispatch(self, request, call_next):
         if not should_apply_middleware(request, "rate_limit", self.path_rules):
@@ -28,7 +47,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         ip = get_ip(request)
         path = request.url.path or "unknown"
-        key = f"ratelimit:{self.app_key}:{ip}:{path}"
+        key = build_rate_limit_key("ratelimit", ip, path, key_mode=self.key_mode, app_key=self.app_key)
         now = time.time()
         timestamps = _AIWAF_CACHE.get(key, [])
 
@@ -41,19 +60,31 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             max_req = int(overrides.get("MAX", max_req))
             flood = int(overrides.get("FLOOD", flood))
 
-        timestamps = [t for t in timestamps if now - t < window]
-        timestamps.append(now)
-        _AIWAF_CACHE[key] = timestamps
+        decision = evaluate_rate_limit(
+            timestamps=timestamps,
+            now=now,
+            window_seconds=window,
+            max_requests=max_req,
+            flood_threshold=flood,
+        )
+        _AIWAF_CACHE[key] = decision.timestamps
 
-        if len(timestamps) > flood:
-            BlacklistManager.block(ip, "Flood pattern")
+        if decision.action == FLOOD_BLOCK:
+            BlacklistManager.block(ip, "Flood pattern", extended_request_info=get_blacklist_extended_info(request))
             request.state.aiwaf_blocked = True
             request.state.aiwaf_block_reason = "Flood pattern"
-            return JSONResponse({"error": "blocked"}, status_code=403)
-        if len(timestamps) > max_req:
-            BlacklistManager.block(ip, "Rate limit exceeded")
+            payload, status = blocked_response()
+            return JSONResponse(payload, status_code=status)
+        if decision.action == THROTTLE:
+            if self.soft_block_blacklist:
+                BlacklistManager.block(
+                    ip,
+                    "Rate limit exceeded",
+                    extended_request_info=get_blacklist_extended_info(request),
+                )
             request.state.aiwaf_blocked = True
             request.state.aiwaf_block_reason = "Rate limit exceeded"
-            return JSONResponse({"error": "too_many_requests"}, status_code=429)
+            payload, status = throttle_response()
+            return JSONResponse(payload, status_code=status)
 
         return await call_next(request)

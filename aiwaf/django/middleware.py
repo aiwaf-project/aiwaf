@@ -58,6 +58,32 @@ from ..core.rust_backend import (
     is_rust_isolation_forest,
     rust_isolation_forest_from_json,
 )
+from ..core.uuid_tamper import collect_uuid_model_fields, uuid_exists_in_model_fields
+from ..core.rate_limit import (
+    THROTTLE,
+    FLOOD_BLOCK,
+    build_rate_limit_key,
+    evaluate_rate_limit,
+    normalize_rate_key_mode,
+)
+from ..core.honeypot import (
+    honeypot_get_key,
+    should_block_get_to_post_only_endpoint,
+    evaluate_form_timing,
+    ACTION_ALLOW,
+    ACTION_BLOCK,
+    ACTION_PAGE_EXPIRED,
+)
+from ..core.ip_keyword import evaluate_keyword_policy
+from ..core.method_validation import evaluate_method_policy, ACTION_BLOCK as METHOD_BLOCK
+from ..core import header_validation as core_header_validation
+from ..core.geo_policy import evaluate_geo_policy, normalize_country_list
+from ..core.block_responses import throttle_response
+from ..core.request_context import (
+    extract_blacklist_extended_info_from_django_request,
+    extract_ip_from_django_request,
+    extract_query_keys_from_django_request,
+)
 
 apply_legacy_settings()
 
@@ -112,16 +138,7 @@ def _get_uuid_model_fields(app_label):
     except LookupError:
         _UUID_MODEL_CACHE[app_label] = []
         return _UUID_MODEL_CACHE[app_label]
-    uuid_fields = []
-    for Model in app_cfg.get_models():
-        pk_field = Model._meta.pk
-        if isinstance(pk_field, UUIDField):
-            uuid_fields.append((Model, "pk"))
-        for field in Model._meta.fields:
-            if field is pk_field:
-                continue
-            if isinstance(field, UUIDField) and getattr(field, "unique", False):
-                uuid_fields.append((Model, field.name))
+    uuid_fields = collect_uuid_model_fields(app_cfg.get_models(), UUIDField)
     _UUID_MODEL_CACHE[app_label] = uuid_fields
     return uuid_fields
 
@@ -222,74 +239,42 @@ STATIC_KW = getattr(
 )
 
 def get_ip(request):
-    xff = request.META.get("HTTP_X_FORWARDED_FOR")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.META.get("REMOTE_ADDR", "")
-
-
-def _normalize_header_name(meta_key):
-    if meta_key.startswith("HTTP_"):
-        return meta_key[5:].replace("_", "-").title()
-    if meta_key in {"CONTENT_TYPE", "CONTENT_LENGTH"}:
-        return meta_key.replace("_", "-").title()
-    return None
+    return extract_ip_from_django_request(request)
 
 
 def _collect_request_headers(request):
-    max_headers = getattr(settings, "AIWAF_BLACKLIST_MAX_HEADERS", 50)
-    max_value_len = getattr(settings, "AIWAF_BLACKLIST_MAX_HEADER_VALUE_LENGTH", 512)
-    redact = {
-        h.lower()
-        for h in getattr(
+    info = extract_blacklist_extended_info_from_django_request(
+        request,
+        enabled=True,
+        max_headers=getattr(settings, "AIWAF_BLACKLIST_MAX_HEADERS", 50),
+        max_value_len=getattr(settings, "AIWAF_BLACKLIST_MAX_HEADER_VALUE_LENGTH", 512),
+        redact_headers=getattr(
             settings,
             "AIWAF_BLACKLIST_REDACT_HEADERS",
             ["Authorization", "Cookie", "Set-Cookie"],
-        )
-    }
-    headers = {}
-    for key, value in request.META.items():
-        name = _normalize_header_name(key)
-        if not name:
-            continue
-        if len(headers) >= max_headers:
-            break
-        value = str(value)
-        if name.lower() in redact:
-            headers[name] = "[redacted]"
-            continue
-        if max_value_len and len(value) > max_value_len:
-            value = value[:max_value_len] + "...(truncated)"
-        headers[name] = value
-    return headers
+        ),
+    )
+    return dict(info.get("headers", {})) if info else {}
 
 
 def _get_blacklist_extended_info(request):
     if not getattr(settings, "AIWAF_BLACKLIST_STORE_EXTENDED_INFO", False):
         return None
-
     cache_attr = "_aiwaf_blacklist_extended_info"
     cached = getattr(request, cache_attr, None)
     if cached is not None:
         return cached
-
-    info = {
-        "method": getattr(request, "method", ""),
-        "path": getattr(request, "path", ""),
-    }
-    query_string = request.META.get("QUERY_STRING")
-    if query_string:
-        info["query_string"] = query_string
-    try:
-        info["url"] = request.build_absolute_uri()
-    except Exception:
-        info["url"] = info["path"]
-    try:
-        info["host"] = request.get_host()
-    except Exception:
-        pass
-    info["headers"] = _collect_request_headers(request)
-
+    info = extract_blacklist_extended_info_from_django_request(
+        request,
+        enabled=True,
+        max_headers=getattr(settings, "AIWAF_BLACKLIST_MAX_HEADERS", 50),
+        max_value_len=getattr(settings, "AIWAF_BLACKLIST_MAX_HEADER_VALUE_LENGTH", 512),
+        redact_headers=getattr(
+            settings,
+            "AIWAF_BLACKLIST_REDACT_HEADERS",
+            ["Authorization", "Cookie", "Set-Cookie"],
+        ),
+    )
     setattr(request, cache_attr, info)
     return info
 
@@ -521,96 +506,34 @@ class IPAndKeywordBlockMiddleware:
         path_exists = path_exists_in_django(request.path)
         
         keyword_store = get_keyword_store()
-        segments = [seg for seg in re.split(r"\W+", path) if len(seg) > 3]
-        
-        # Smart learning: only learn from suspicious contexts, never from valid paths
-        if self.keyword_learning_enabled and not path_exists:  # Only learn from non-existent paths
-            for seg in segments:
-                # Only learn if it's not a legitimate keyword AND in a suspicious context
-                if (seg not in self.legitimate_path_keywords and 
-                    seg not in self.exempt_keywords and
-                    self._is_malicious_context(request, seg)):
-                    keyword_store.add_keyword(seg)
-        
         if self.keyword_learning_enabled:
             dynamic_top = keyword_store.get_top_keywords(getattr(settings, "AIWAF_DYNAMIC_TOP_N", 10))
         else:
             dynamic_top = []
-        all_kw = set(STATIC_KW) | set(dynamic_top)
-        
-        # Enhanced filtering logic
-        suspicious_kw = set()
-        for kw in all_kw:
-            # Skip if keyword is explicitly exempted
-            if kw in self.exempt_keywords:
-                continue
-            
-            # Skip if this is a legitimate path keyword and path exists in Django
-            if (kw in self.legitimate_path_keywords and 
-                path_exists and 
-                not self._is_malicious_context(request, kw)):
-                continue
-            
-            # Skip if path starts with safe prefix
-            if any(path.startswith(prefix) for prefix in self.safe_prefixes if prefix):
-                continue
-            
-            suspicious_kw.add(kw)
-        
-        # Check segments against suspicious keywords
-        for seg in segments:
-            is_suspicious = False
-            block_reason = ""
-            
-            # Check if segment is in learned suspicious keywords
-            if seg in suspicious_kw:
-                is_suspicious = True
-                block_reason = f"Learned keyword: {seg}"
-            
-            # Also check if segment appears to be inherently malicious
-            elif (not path_exists and 
-                  seg not in self.legitimate_path_keywords and 
-                  (self._is_malicious_context(request, seg) or 
-                   any(malicious_pattern in seg for malicious_pattern in 
-                       ['hack', 'exploit', 'attack', 'malicious', 'evil', 'backdoor', 'inject', 'xss']))):
-                is_suspicious = True
-                block_reason = f"Inherently suspicious: {seg}"
-            
-            if is_suspicious:
-                # Additional context check before blocking - be more conservative with valid paths
-                if path_exists:
-                    # For valid paths, only block if there are VERY strong malicious indicators
-                    very_strong_indicators = [
-                        # Multiple attack patterns in same request
-                        sum([
-                            '../' in request.path, '..\\' in request.path,
-                            any(param in request.GET for param in ['cmd', 'exec', 'system']),
-                            request.path.count('%') > 5,  # Heavy URL encoding
-                            len([s for s in segments if s in self.malicious_keywords]) > 2
-                        ]) >= 2,
-                        
-                        # Obvious attack attempts on valid paths
-                        any(attack in request.path.lower() for attack in [
-                            'union+select', 'drop+table', '<script', 'javascript:',
-                            'onload=', 'onerror=', '${', '{{', 'eval('
-                        ])
-                    ]
-                    
-                    if not any(very_strong_indicators):
-                        continue  # Skip blocking for valid paths without very strong indicators
-                
-                # For non-existent paths or paths with very strong indicators, proceed with blocking
-                if self._is_malicious_context(request, seg) or not path_exists:
-                    # Double-check exemption before blocking
-                    if not is_ip_exempted(ip):
-                        BlacklistManager.block(
-                            ip,
-                            f"Keyword block: {block_reason}",
-                            extended_request_info=_get_blacklist_extended_info(request),
-                        )
-                        # Check again after blocking attempt (exempted IPs won't be blocked)
-                        if BlacklistManager.is_blocked(ip):
-                            _raise_blocked(request, f"Keyword block: {block_reason}", status_code=403)
+        decision = evaluate_keyword_policy(
+            path=request.path,
+            query_keys=list(extract_query_keys_from_django_request(request)),
+            path_exists=path_exists,
+            keyword_learning_enabled=self.keyword_learning_enabled,
+            static_keywords=STATIC_KW,
+            dynamic_keywords=dynamic_top,
+            legitimate_keywords=set(self.legitimate_path_keywords),
+            exempt_keywords=set(self.exempt_keywords),
+            safe_prefixes=self.safe_prefixes,
+            malicious_keywords=self.malicious_keywords,
+            is_malicious_context=lambda seg: self._is_malicious_context(request, seg),
+        )
+        for seg in decision.learned_keywords:
+            keyword_store.add_keyword(seg)
+
+        if decision.block_reason and not is_ip_exempted(ip):
+            BlacklistManager.block(
+                ip,
+                decision.block_reason,
+                extended_request_info=_get_blacklist_extended_info(request),
+            )
+            if BlacklistManager.is_blocked(ip):
+                _raise_blocked(request, decision.block_reason, status_code=403)
         return self.get_response(request)
 
 
@@ -621,6 +544,8 @@ class RateLimitMiddleware:
         self.WINDOW = getattr(settings, "AIWAF_RATE_WINDOW", 10)  # seconds
         self.MAX = getattr(settings, "AIWAF_RATE_MAX", 20)        # soft limit
         self.FLOOD = getattr(settings, "AIWAF_RATE_FLOOD", 40)    # hard limit
+        self.KEY_MODE = normalize_rate_key_mode(getattr(settings, "AIWAF_RATE_KEY_MODE", "ip_path"))
+        self.SOFT_BLOCK_BLACKLIST = bool(getattr(settings, "AIWAF_RATE_SOFT_BLOCK_BLACKLIST", False))
 
     def __call__(self, request):
         if is_middleware_disabled(request, self.__class__):
@@ -640,14 +565,24 @@ class RateLimitMiddleware:
         max_requests = overrides.get("MAX", self.MAX)
         flood = overrides.get("FLOOD", self.FLOOD)
 
-        key = f"ratelimit:{ip}"
+        key = build_rate_limit_key(
+            "ratelimit",
+            ip,
+            request.path or "unknown",
+            key_mode=self.KEY_MODE,
+        )
         now = time.time()
         timestamps = cache.get(key, [])
-        timestamps = [t for t in timestamps if now - t < window]
-        timestamps.append(now)
-        cache.set(key, timestamps, timeout=window)
-        
-        if len(timestamps) > flood:
+        decision = evaluate_rate_limit(
+            timestamps=timestamps,
+            now=now,
+            window_seconds=window,
+            max_requests=max_requests,
+            flood_threshold=flood,
+        )
+        cache.set(key, decision.timestamps, timeout=window)
+
+        if decision.action == FLOOD_BLOCK:
             # Double-check exemption before blocking
             if not is_ip_exempted(ip):
                 BlacklistManager.block(
@@ -658,8 +593,15 @@ class RateLimitMiddleware:
                 # Check if actually blocked (exempted IPs won't be blocked)
                 if BlacklistManager.is_blocked(ip):
                     _raise_blocked(request, "Flood pattern", status_code=403)
-        if len(timestamps) > max_requests:
-            return JsonResponse({"error": "too_many_requests"}, status=429)
+        if decision.action == THROTTLE:
+            if self.SOFT_BLOCK_BLACKLIST:
+                BlacklistManager.block(
+                    ip,
+                    "Rate limit exceeded",
+                    extended_request_info=_get_blacklist_extended_info(request),
+                )
+            payload, status = throttle_response()
+            return JsonResponse(payload, status=status)
         return self.get_response(request)
 
 
@@ -667,12 +609,12 @@ class GeoBlockMiddleware(MiddlewareMixin):
     def __init__(self, get_response=None):
         super().__init__(get_response)
         self.enabled = getattr(settings, "AIWAF_GEO_BLOCK_ENABLED", False)
-        self.allow_countries = [
-            c.upper() for c in getattr(settings, "AIWAF_GEO_ALLOW_COUNTRIES", [])
-        ]
-        self.block_countries = [
-            c.upper() for c in getattr(settings, "AIWAF_GEO_BLOCK_COUNTRIES", [])
-        ]
+        self.allow_countries = normalize_country_list(
+            getattr(settings, "AIWAF_GEO_ALLOW_COUNTRIES", [])
+        )
+        self.block_countries = normalize_country_list(
+            getattr(settings, "AIWAF_GEO_BLOCK_COUNTRIES", [])
+        )
         self.db_path = getattr(settings, "AIWAF_GEOIP_DB_PATH", None)
         self.cache_seconds = getattr(settings, "AIWAF_GEO_CACHE_SECONDS", 3600)
         self.cache_prefix = getattr(settings, "AIWAF_GEO_CACHE_PREFIX", "aiwaf:geo:")
@@ -704,21 +646,22 @@ class GeoBlockMiddleware(MiddlewareMixin):
             )
         except Exception:
             dynamic_block = []
-        dynamic_block = [c.upper() for c in dynamic_block]
+        decision = evaluate_geo_policy(
+            country=country,
+            allow_countries=self.allow_countries,
+            block_countries=self.block_countries,
+            dynamic_blocked=dynamic_block,
+        )
 
-        if self.allow_countries:
-            should_block = country not in self.allow_countries
-        else:
-            should_block = country in (self.block_countries + dynamic_block)
-
-        if should_block:
+        if decision.should_block:
+            reason = f"Geo-blocked country: {decision.country}"
             BlacklistManager.block(
                 ip,
-                f"Geo-blocked country: {country}",
+                reason,
                 extended_request_info=_get_blacklist_extended_info(request),
             )
             if BlacklistManager.is_blocked(ip):
-                _raise_blocked(request, f"Geo-blocked country: {country}", status_code=403)
+                _raise_blocked(request, reason, status_code=403)
         return None
 
 
@@ -808,7 +751,7 @@ class AIAnomalyMiddleware(MiddlewareMixin):
             ]),
             
             # Suspicious query parameters
-            any(param in request.GET for param in ['cmd', 'exec', 'system', 'shell']),
+            any(param in extract_query_keys_from_django_request(request) for param in ['cmd', 'exec', 'system', 'shell']),
             
             # Multiple directory traversal attempts
             request.path.count('../') > 2 or request.path.count('..\\') > 2,
@@ -1125,110 +1068,97 @@ class HoneypotTimingMiddleware(MiddlewareMixin):
             return None
             
         if request.method == "GET":
-            # CONSERVATIVE: Only block GET if we're absolutely certain it's POST-only
-            # Most Django views accept both GET and POST (forms show on GET, process on POST)
-            if not self._view_accepts_method(request, 'GET'):
-                # EXTRA CHECK: Only block if path looks like obvious POST-only API endpoint
-                path_lower = request.path.lower()
-                obvious_post_only = any(path_lower.endswith(pattern) for pattern in [
-                    '/create/', '/submit/', '/upload/', '/delete/', '/process/'
-                ])
-                
-                if obvious_post_only:
-                    # This is very likely a POST-only endpoint getting a GET
-                    if not is_ip_exempted(ip):
-                        BlacklistManager.block(
-                            ip,
-                            f"GET to obvious POST-only endpoint: {request.path}",
-                            extended_request_info=_get_blacklist_extended_info(request),
-                        )
-                        if BlacklistManager.is_blocked(ip):
-                            _log_block(request, f"GET to obvious POST-only endpoint: {request.path}", status_code=405)
-                            return JsonResponse({
-                                "error": "blocked", 
-                                "message": f"GET not allowed for {request.path}"
-                            }, status=405)  # Method Not Allowed
-                # Otherwise, don't block - could be a decorated view or complex form
+            decision = evaluate_method_policy(
+                method=request.method,
+                path=request.path,
+                accepts_get=self._view_accepts_method(request, "GET"),
+                accepts_post=self._view_accepts_method(request, "POST"),
+                accepts_method=self._view_accepts_method(request, request.method),
+            )
+            if decision.action == METHOD_BLOCK and not is_ip_exempted(ip):
+                BlacklistManager.block(
+                    ip,
+                    decision.reason,
+                    extended_request_info=_get_blacklist_extended_info(request),
+                )
+                if BlacklistManager.is_blocked(ip):
+                    _log_block(request, decision.reason, status_code=decision.status_code)
+                    return JsonResponse({"error": "blocked", "message": decision.message}, status=decision.status_code)
             
             # Store timestamp for this IP's GET request  
             # Use a general key for the IP, not path-specific
-            cache.set(f"honeypot_get:{ip}", time.time(), timeout=300)  # 5 min timeout
+            cache.set(honeypot_get_key(ip), time.time(), timeout=300)  # 5 min timeout
         
         elif request.method == "POST":
-            # ENHANCEMENT: Check if this view actually accepts POST requests
-            if not self._view_accepts_method(request, 'POST'):
-                # This view is GET-only, but received a POST - likely malicious
-                if not is_ip_exempted(ip):
-                    BlacklistManager.block(
-                        ip,
-                        f"POST to GET-only view: {request.path}",
-                        extended_request_info=_get_blacklist_extended_info(request),
-                    )
-                    if BlacklistManager.is_blocked(ip):
-                        _log_block(request, f"POST to GET-only view: {request.path}", status_code=405)
-                        return JsonResponse({
-                            "error": "blocked", 
-                            "message": f"POST not allowed for {request.path}"
-                        }, status=405)  # Method Not Allowed
+            decision = evaluate_method_policy(
+                method=request.method,
+                path=request.path,
+                accepts_get=self._view_accepts_method(request, "GET"),
+                accepts_post=self._view_accepts_method(request, "POST"),
+                accepts_method=self._view_accepts_method(request, request.method),
+            )
+            if decision.action == METHOD_BLOCK and not is_ip_exempted(ip):
+                BlacklistManager.block(
+                    ip,
+                    decision.reason,
+                    extended_request_info=_get_blacklist_extended_info(request),
+                )
+                if BlacklistManager.is_blocked(ip):
+                    _log_block(request, decision.reason, status_code=decision.status_code)
+                    return JsonResponse({"error": "blocked", "message": decision.message}, status=decision.status_code)
             
             # Check if there was a preceding GET request for timing validation
-            get_time = cache.get(f"honeypot_get:{ip}")
+            get_time = cache.get(honeypot_get_key(ip))
             
             if get_time is not None:
-                # Check timing - be more lenient for login paths
-                time_diff = time.time() - get_time
-                min_time = self.MIN_FORM_TIME
-                
-                # ENHANCEMENT 2: Check for page timeout (4+ minutes)
-                if time_diff > self.MAX_PAGE_TIME:
-                    # Page has been open too long - suspicious or stale session
-                    # Don't block immediately, but require a fresh page load
-                    cache.delete(f"honeypot_get:{ip}")  # Force fresh GET
+                decision = evaluate_form_timing(
+                    now=time.time(),
+                    get_time=get_time,
+                    path=request.path,
+                    min_form_time=self.MIN_FORM_TIME,
+                    max_page_time=self.MAX_PAGE_TIME,
+                )
+                if decision.action == ACTION_PAGE_EXPIRED:
+                    cache.delete(honeypot_get_key(ip))  # Force fresh GET
                     return JsonResponse({
                         "error": "page_expired", 
-                        "message": "Page has expired. Please reload and try again.",
+                        "message": decision.message or "Page has expired. Please reload and try again.",
                         "reload_required": True
-                    }, status=409)  # 409 Conflict - client should reload
-                
-                # Use shorter time threshold for login paths (users can login quickly)
-                if any(request.path.lower().startswith(login_path) for login_path in [
-                    "/admin/login/", "/login/", "/accounts/login/", "/auth/login/", "/signin/"
-                ]):
-                    min_time = 0.1  # Very short threshold for login forms
-                
-                if time_diff < min_time:
+                    }, status=decision.status_code or 409)  # 409 Conflict - client should reload
+
+                if decision.action == ACTION_BLOCK:
                     # Double-check exemption before blocking
                     if not is_ip_exempted(ip):
                         BlacklistManager.block(
                             ip,
-                            f"Form submitted too quickly ({time_diff:.2f}s)",
+                            decision.reason or "Form submitted too quickly",
                             extended_request_info=_get_blacklist_extended_info(request),
                         )
                         # Check if actually blocked (exempted IPs won't be blocked)
                         if BlacklistManager.is_blocked(ip):
-                            _raise_blocked(request, f"Form submitted too quickly ({time_diff:.2f}s)", status_code=403)
+                            _raise_blocked(
+                                request,
+                                decision.reason or "Form submitted too quickly",
+                                status_code=decision.status_code or 403,
+                            )
         
         else:
-            # Handle other HTTP methods (PUT, DELETE, PATCH, etc.)
-            if request.method not in ['GET', 'POST', 'HEAD', 'OPTIONS']:
-                # Check if this view supports the requested method
-                if not self._view_accepts_method(request, request.method):
-                    if not is_ip_exempted(ip):
-                        BlacklistManager.block(
-                            ip,
-                            f"{request.method} to view that doesn't support it: {request.path}",
-                            extended_request_info=_get_blacklist_extended_info(request),
-                        )
-                        if BlacklistManager.is_blocked(ip):
-                            _log_block(
-                                request,
-                                f"{request.method} to view that doesn't support it: {request.path}",
-                                status_code=405,
-                            )
-                            return JsonResponse({
-                                "error": "blocked", 
-                                "message": f"{request.method} not allowed for {request.path}"
-                            }, status=405)  # Method Not Allowed
+            decision = evaluate_method_policy(
+                method=request.method,
+                path=request.path,
+                accepts_get=self._view_accepts_method(request, "GET"),
+                accepts_post=self._view_accepts_method(request, "POST"),
+                accepts_method=self._view_accepts_method(request, request.method),
+            )
+            if decision.action == METHOD_BLOCK and not is_ip_exempted(ip):
+                BlacklistManager.block(
+                    ip,
+                    decision.reason,
+                    extended_request_info=_get_blacklist_extended_info(request),
+                )
+                if BlacklistManager.is_blocked(ip):
+                    _log_block(request, decision.reason, status_code=decision.status_code)
+                    return JsonResponse({"error": "blocked", "message": decision.message}, status=decision.status_code)
         
         return None
 
@@ -1254,16 +1184,8 @@ class UUIDTamperMiddleware(MiddlewareMixin):
         uuid_fields = _get_uuid_model_fields(app_label)
         if not uuid_fields:
             return None
-        for Model, field_name in uuid_fields:
-            try:
-                if field_name == "pk":
-                    if Model.objects.filter(pk=uid).exists():
-                        return None
-                else:
-                    if Model.objects.filter(**{field_name: uid}).exists():
-                        return None
-            except (ValueError, TypeError):
-                continue
+        if uuid_exists_in_model_fields(uid, uuid_fields):
+            return None
 
         # Double-check exemption before blocking
         if not is_ip_exempted(ip):
@@ -1414,39 +1336,31 @@ class HeaderValidationMiddleware(MiddlewareMixin):
         # Get headers from request.META
         headers = request.META
 
-        cap_reason = self._enforce_header_caps(headers)
-        if cap_reason:
-            return self._block_request(request, ip, cap_reason, request.path)
-
         required_headers = self._get_required_headers(request)
+        min_score = self._get_min_quality_score(required_headers)
 
         if self._should_use_rust():
-            min_score = self._get_min_quality_score(required_headers)
             reason = rust_validate_headers(headers, required_headers, min_score)
             if reason:
                 return self._block_request(request, ip, reason, request.path)
             return None
-        
-        # Check for missing required headers
-        missing_headers = self._check_missing_headers(headers, required_headers)
-        if missing_headers:
-            return self._block_request(request, ip, f"Missing required headers: {', '.join(missing_headers)}", request.path)
-        
-        # Check for suspicious user agent
-        suspicious_ua = self._check_user_agent(headers.get('HTTP_USER_AGENT', ''))
-        if suspicious_ua:
-            return self._block_request(request, ip, f"Suspicious user agent: {suspicious_ua}", request.path)
-        
-        # Check for suspicious header combinations
-        suspicious_combo = self._check_header_combinations(headers, required_headers)
-        if suspicious_combo:
-            return self._block_request(request, ip, f"Suspicious headers: {suspicious_combo}", request.path)
-        
-        # Check header quality score
-        quality_score = self._calculate_header_quality(headers)
-        min_score = self._get_min_quality_score(required_headers)
-        if min_score and quality_score < min_score:  # Threshold for suspicion
-            return self._block_request(request, ip, f"Low header quality score: {quality_score}", request.path)
+
+        reason = core_header_validation.evaluate_header_policy(
+            headers,
+            method=getattr(request, "method", None),
+            config_required_headers=getattr(settings, "AIWAF_REQUIRED_HEADERS", None),
+            min_score=min_score,
+            max_header_bytes=self.MAX_HEADER_BYTES,
+            max_header_count=self.MAX_HEADER_COUNT,
+            max_user_agent_length=self.MAX_USER_AGENT_LENGTH,
+            max_accept_length=self.MAX_ACCEPT_LENGTH,
+            suspicious_user_agents=self.SUSPICIOUS_USER_AGENTS,
+            legitimate_bots=self.LEGITIMATE_BOTS,
+            suspicious_combinations=self.SUSPICIOUS_COMBINATIONS,
+            browser_headers=self.BROWSER_HEADERS,
+        )
+        if reason:
+            return self._block_request(request, ip, reason, request.path)
         
         return None
 

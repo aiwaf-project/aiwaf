@@ -9,6 +9,7 @@ from django.conf import settings
 from django.utils.deprecation import MiddlewareMixin
 from django.utils import timezone
 from .utils import get_ip
+from ..core.request_context import extract_logging_context_from_django_request
 
 # Defer model imports to avoid AppRegistryNotReady during Django app loading
 RequestLog = None
@@ -62,14 +63,15 @@ class AIWAFLoggerMiddleware(MiddlewareMixin):
             _import_models()
             if RequestLog is not None:
                 try:
+                    ctx = extract_logging_context_from_django_request(request, ip=get_ip(request))
                     RequestLog.objects.create(
-                        ip_address=get_ip(request),
-                        method=request.method,
-                        path=request.path[:500],  # Truncate long paths
+                        ip_address=ctx["ip"],
+                        method=ctx["method"],
+                        path=ctx["path"][:500],  # Truncate long paths
                         status_code=response.status_code,
                         response_time=response_time,
-                        user_agent=request.META.get('HTTP_USER_AGENT', '')[:2000],  # Truncate long user agents
-                        referer=request.META.get('HTTP_REFERER', '')[:500],  # Truncate long referers
+                        user_agent=ctx["user_agent"][:2000],  # Truncate long user agents
+                        referer=ctx["referer"][:500],  # Truncate long referers
                         content_length=response.get('Content-Length', '-'),
                         timestamp=timezone.now()
                     )
@@ -110,15 +112,17 @@ class AIWAFLoggerMiddleware(MiddlewareMixin):
         ]
         row = {
             "timestamp": timezone.now().isoformat(),
-            "ip": get_ip(request),
-            "method": request.method,
-            "path": request.path[:500],
+            **extract_logging_context_from_django_request(request, ip=get_ip(request)),
             "status_code": response.status_code,
             "content_length": response.get('Content-Length', '-'),
             "response_time": "{:.6f}".format(response_time),
-            "referer": request.META.get('HTTP_REFERER', '')[:500],
-            "user_agent": request.META.get('HTTP_USER_AGENT', '')[:2000],
         }
+        row["path"] = row["path"][:500]
+        row["referer"] = row["referer"][:500]
+        row["user_agent"] = row["user_agent"][:2000]
+        row.pop("path_with_query", None)
+        row.pop("query_string", None)
+        row.pop("protocol", None)
         return headers, row
 
 

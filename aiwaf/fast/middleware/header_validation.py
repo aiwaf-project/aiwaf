@@ -8,11 +8,12 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from ..utils import get_ip, is_exempt, is_static_file
+from ..utils import get_blacklist_extended_info, get_ip, is_exempt, is_static_file
 from ..blacklist import BlacklistManager
 from ..decorators import should_apply_middleware
 from aiwaf.core import header_validation as core_header_validation
 from aiwaf.core.rust_backend import validate_headers as rust_validate_headers, rust_available
+from aiwaf.core.request_context import normalized_headers_to_wsgi_environ
 
 logger = logging.getLogger(__name__)
 
@@ -135,16 +136,14 @@ class HeaderValidationMiddleware(BaseHTTPMiddleware):
         try:
             quality_score = self._calculate_header_quality(headers)
             violation_reason = None
+            environ = self._to_core_environ(headers, request.scope)
 
-            # Always try Rust helper first; it safely returns None when backend
-            # is unavailable, so Python checks remain authoritative fallback.
+            # Keep optional Rust fast-path, then apply core Python evaluator for parity.
             violation_reason = rust_validate_headers(
                 headers,
                 required_headers=self.REQUIRED_HEADERS,
                 min_score=self.quality_threshold,
             )
-            # Defensive guard: some environments can incorrectly surface an
-            # empty-UA result from Rust despite UA being present in request.
             if (
                 violation_reason
                 and "Empty user agent" in violation_reason
@@ -153,31 +152,18 @@ class HeaderValidationMiddleware(BaseHTTPMiddleware):
                 violation_reason = None
 
             if violation_reason is None:
-                # Check for missing required headers using direct request access
-                # to avoid transport/casing quirks in intermediary header maps.
-                missing_headers = [
-                    h for h in self.REQUIRED_HEADERS if not self._get_header(request, h)
-                ]
-                if missing_headers:
-                    violation_reason = f"Missing required headers: {', '.join(missing_headers)}"
+                required_headers_env = [f"HTTP_{h.upper().replace('-', '_')}" for h in self.REQUIRED_HEADERS]
+                violation_reason = core_header_validation.evaluate_header_policy(
+                    environ,
+                    method=request.method,
+                    config_required_headers={request.method.upper(): required_headers_env},
+                    min_score=self.quality_threshold,
+                    suspicious_user_agents=self.suspicious_patterns,
+                    legitimate_bots=self.legitimate_patterns,
+                    suspicious_combinations=self.suspicious_combinations,
+                    browser_headers=[f"HTTP_{h.upper().replace('-', '_')}" for h in self.BROWSER_HEADERS],
+                )
 
-                # Check for suspicious user agent
-                if violation_reason is None:
-                    user_agent = self._get_header(request, "user-agent") or ""
-                    suspicious_ua = self._check_user_agent(user_agent)
-                    if suspicious_ua:
-                        violation_reason = f"Suspicious user agent: {suspicious_ua}"
-
-                # Check for suspicious header combinations
-                if violation_reason is None:
-                    suspicious_combo = self._check_header_combinations(headers, request.scope)
-                    if suspicious_combo:
-                        violation_reason = f"Suspicious headers: {suspicious_combo}"
-
-                # Check header quality score
-                if violation_reason is None and quality_score < self.quality_threshold:
-                    violation_reason = f"Low header quality score: {quality_score}"
-            
             if violation_reason:
                 if not self.block_suspicious:
                     logger.warning(
@@ -186,7 +172,7 @@ class HeaderValidationMiddleware(BaseHTTPMiddleware):
                     )
                     return await call_next(request)
                 
-                return self._block_request(ip, violation_reason, request.url.path)
+                return self._block_request(ip, violation_reason, request.url.path, request=request)
             
             # Log legitimate request (debug level)
             logger.debug(
@@ -295,18 +281,9 @@ class HeaderValidationMiddleware(BaseHTTPMiddleware):
 
     def _to_core_environ(self, headers: Dict[str, str], scope: Dict[str, Any]) -> Dict[str, str]:
         """Map ASGI headers/scope into core validator environ format."""
-        environ: Dict[str, str] = {}
-        for key, value in headers.items():
-            env_key = f"HTTP_{key.upper().replace('-', '_')}"
-            environ[env_key] = value
-
-        http_version = scope.get('http_version')
-        if http_version:
-            environ['SERVER_PROTOCOL'] = f"HTTP/{http_version}"
-
-        return environ
+        return normalized_headers_to_wsgi_environ(headers, scope.get("http_version", ""))
     
-    def _block_request(self, ip: str, reason: str, path: str) -> Response:
+    def _block_request(self, ip: str, reason: str, path: str, request: Optional[Request] = None) -> Response:
         """Block the request and return error response"""
         if not self.block_suspicious:
             logger.warning(f"Would block {ip}: {reason} (Path: {path})")
@@ -324,7 +301,12 @@ class HeaderValidationMiddleware(BaseHTTPMiddleware):
         
         # Double-check exemption before blocking
         if not exemption_store.is_exempted(ip):
-            BlacklistManager.block(ip, f"Header validation: {reason}")
+            extended_info = get_blacklist_extended_info(request) if request is not None else None
+            BlacklistManager.block(
+                ip,
+                f"Header validation: {reason}",
+                extended_request_info=extended_info,
+            )
             
             # Check if actually blocked (exempted IPs won't be blocked)
             if BlacklistManager.is_blocked(ip):

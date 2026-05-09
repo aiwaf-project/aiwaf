@@ -1,6 +1,6 @@
 from .storage import is_ip_blacklisted, add_ip_blacklist, remove_ip_blacklist, is_ip_whitelisted
 from aiwaf.core.blacklist import should_block_ip, should_unblock_ip
-import json
+from aiwaf.core.request_context import extract_blacklist_extended_info_from_flask_request
 
 from flask import current_app, has_request_context, has_app_context, request
 
@@ -60,66 +60,16 @@ def _build_request_info():
     if not enabled:
         return None
 
-    max_bytes = int(current_app.config.get("AIWAF_EXTENDED_REQUEST_INFO_MAX_BYTES", 4096)) if has_app_context() else 4096
-    capture_headers = current_app.config.get(
-        "AIWAF_EXTENDED_REQUEST_INFO_HEADERS",
-        DEFAULT_CAPTURE_HEADERS,
-    ) if has_app_context() else DEFAULT_CAPTURE_HEADERS
-    redact_headers = current_app.config.get(
-        "AIWAF_EXTENDED_REQUEST_INFO_REDACT_HEADERS",
-        DEFAULT_REDACT_HEADERS,
-    ) if has_app_context() else DEFAULT_REDACT_HEADERS
-
-    redact_set = {str(h).strip().lower() for h in redact_headers if h}
-    selected_headers = {}
-    for header_name in capture_headers:
-        if not header_name:
-            continue
-        key = str(header_name).strip()
-        value = request.headers.get(key)
-        if value is None:
-            continue
-        if key.lower() in redact_set:
-            selected_headers[key] = "[REDACTED]"
-        else:
-            selected_headers[key] = value
-
-    payload = {
-        "url": request.url,
-        "path": request.path,
-        "query": request.query_string.decode("utf-8", errors="ignore"),
-        "method": request.method,
-        "host": request.host,
-        "headers": selected_headers,
-    }
-
-    # Keep payload under configured byte limit by dropping large fields first.
-    compact = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-    if len(compact.encode("utf-8")) <= max_bytes:
-        return payload
-
-    payload["headers"] = {}
-    compact = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-    if len(compact.encode("utf-8")) <= max_bytes:
-        return payload
-
-    query_val = payload.get("query", "")
-    if query_val:
-        payload["query"] = query_val[:256]
-        compact = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-        if len(compact.encode("utf-8")) <= max_bytes:
-            return payload
-
-    url_val = payload.get("url", "")
-    if url_val:
-        payload["url"] = url_val[:256]
-        compact = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-        if len(compact.encode("utf-8")) <= max_bytes:
-            return payload
-
-    return {
-        "path": request.path,
-        "method": request.method,
-        "host": request.host,
-        "truncated": True,
-    }
+    return extract_blacklist_extended_info_from_flask_request(
+        request,
+        enabled=True,
+        max_bytes=int(current_app.config.get("AIWAF_EXTENDED_REQUEST_INFO_MAX_BYTES", 4096)) if has_app_context() else 4096,
+        capture_headers=current_app.config.get(
+            "AIWAF_EXTENDED_REQUEST_INFO_HEADERS",
+            DEFAULT_CAPTURE_HEADERS,
+        ) if has_app_context() else DEFAULT_CAPTURE_HEADERS,
+        redact_headers=current_app.config.get(
+            "AIWAF_EXTENDED_REQUEST_INFO_REDACT_HEADERS",
+            DEFAULT_REDACT_HEADERS,
+        ) if has_app_context() else DEFAULT_REDACT_HEADERS,
+    )

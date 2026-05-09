@@ -4,15 +4,17 @@ from .storage import get_exemption_store, get_path_exemption_store
 from ..core.defaults import DEFAULT_EXEMPT_PATHS_DJANGO
 from ..core.exemptions import (
     get_path_rule_for_path as core_get_path_rule_for_path,
+    get_path_rule_overrides_for_path as core_get_path_rule_overrides_for_path,
+    should_apply_middleware_for_path as core_should_apply_middleware_for_path,
     is_path_exempt as core_is_path_exempt,
-    normalize_middleware_name as core_normalize_middleware_name,
     normalize_paths as core_normalize_paths,
 )
-from ..core.utils import get_ip_from_meta, ip_in_allowlist
+from ..core.utils import ip_in_allowlist
+from ..core.request_context import extract_ip_from_django_request
 from ..core.logs import read_rotated_logs, parse_log_line as core_parse_log_line
 
 def get_ip(request):
-    return get_ip_from_meta(getattr(request, "META", {}))
+    return extract_ip_from_django_request(request)
 
 def parse_log_line(line):
     return core_parse_log_line(line)
@@ -27,25 +29,8 @@ def is_ip_exempted(ip):
 
 def is_view_exempt(request):
     """Check if the current view is marked as AI-WAF exempt"""
-    if hasattr(request, 'resolver_match') and request.resolver_match:
-        view_func = request.resolver_match.func
-        
-        # Check if view function has aiwaf_exempt attribute
-        if hasattr(view_func, 'aiwaf_exempt'):
-            return True
-            
-        # For class-based views, check the view class
-        if hasattr(view_func, 'view_class'):
-            view_class = view_func.view_class
-            if hasattr(view_class, 'aiwaf_exempt'):
-                return True
-                
-            # Check dispatch method for method_decorator usage
-            dispatch_method = getattr(view_class, 'dispatch', None)
-            if dispatch_method and hasattr(dispatch_method, 'aiwaf_exempt'):
-                return True
-                
-    return False
+    fully_exempt, _, _ = _get_view_exemption_data(request)
+    return fully_exempt
 
 def is_exempt_path(path):
     """Check if path should be exempt from AI-WAF"""
@@ -79,27 +64,53 @@ def get_path_rule_for_path(path):
 
 
 def is_middleware_disabled(request, middleware_name):
-    """Check if middleware is disabled by PATH_RULES for this request."""
-    rule = get_path_rule_for_path(getattr(request, "path", ""))
-    if not rule:
-        return False
-    disabled = rule.get("DISABLE", []) or []
-    if not isinstance(disabled, (list, tuple, set)):
-        return False
-    target = core_normalize_middleware_name(middleware_name)
-    for entry in disabled:
-        entry_norm = core_normalize_middleware_name(entry)
-        if entry_norm == target:
-            return True
-    return False
+    """Check if middleware should be skipped for this request."""
+    path = getattr(request, "path", "")
+    settings_block = getattr(settings, "AIWAF_SETTINGS", {}) or {}
+    rules = settings_block.get("PATH_RULES", []) or []
+    fully_exempt, exempt_middlewares, required_middlewares = _get_view_exemption_data(request)
+    return not core_should_apply_middleware_for_path(
+        path,
+        rules,
+        middleware_name,
+        fully_exempt=fully_exempt,
+        exempt_middlewares=exempt_middlewares,
+        required_middlewares=required_middlewares,
+    )
 
 
 def get_rate_limit_overrides(request):
     """Return rate limit overrides from PATH_RULES for this request."""
-    rule = get_path_rule_for_path(getattr(request, "path", ""))
-    if not rule:
-        return {}
-    overrides = rule.get("RATE_LIMIT", {}) or {}
-    if not isinstance(overrides, dict):
-        return {}
-    return overrides
+    path = getattr(request, "path", "")
+    settings_block = getattr(settings, "AIWAF_SETTINGS", {}) or {}
+    rules = settings_block.get("PATH_RULES", []) or []
+    return core_get_path_rule_overrides_for_path(path, rules, "RATE_LIMIT")
+
+
+def _get_view_exemption_data(request):
+    """Return (fully_exempt, exempt_middlewares, required_middlewares) from resolver target."""
+    fully_exempt = False
+    exempt_middlewares = set()
+    required_middlewares = set()
+    resolver_match = getattr(request, "resolver_match", None)
+    if not resolver_match:
+        return fully_exempt, exempt_middlewares, required_middlewares
+
+    view_func = getattr(resolver_match, "func", None)
+    if view_func is None:
+        return fully_exempt, exempt_middlewares, required_middlewares
+
+    def _collect(target):
+        nonlocal fully_exempt, exempt_middlewares, required_middlewares
+        if target is None:
+            return
+        if bool(getattr(target, "aiwaf_exempt", False) or getattr(target, "_aiwaf_exempt", False)):
+            fully_exempt = True
+        exempt_middlewares.update(getattr(target, "_aiwaf_exempt_middlewares", set()) or set())
+        required_middlewares.update(getattr(target, "_aiwaf_required_middlewares", set()) or set())
+
+    _collect(view_func)
+    view_class = getattr(view_func, "view_class", None)
+    _collect(view_class)
+    _collect(getattr(view_class, "dispatch", None) if view_class is not None else None)
+    return fully_exempt, exempt_middlewares, required_middlewares

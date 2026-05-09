@@ -1,5 +1,6 @@
 from flask import Flask, jsonify
 import pytest
+from unittest.mock import patch
 
 from aiwaf.flask import AIWAF, aiwaf_exempt_from
 
@@ -50,6 +51,63 @@ def test_rate_limit_per_path_isolated(tmp_path):
     assert client.get('/path-b', headers=headers).status_code == 200
 
 
+def test_rate_limit_legacy_ip_mode_affects_other_paths(tmp_path):
+    app = _create_app(
+        tmp_path,
+        middlewares=['rate_limit'],
+        config={
+            'AIWAF_RATE_MAX': 1,
+            'AIWAF_RATE_WINDOW': 60,
+            'AIWAF_RATE_KEY_MODE': 'ip',
+        },
+    )
+
+    @app.route('/path-a')
+    def path_a_legacy():
+        return 'OK'
+
+    @app.route('/path-b')
+    def path_b_legacy():
+        return 'OK'
+
+    client = app.test_client()
+    headers = {'User-Agent': 'Test Browser 1.0'}
+
+    assert client.get('/path-a', headers=headers).status_code == 200
+    assert client.get('/path-a', headers=headers).status_code == 429
+    # In legacy ip-only mode, /path-b shares the same bucket.
+    assert client.get('/path-b', headers=headers).status_code == 429
+
+
+def test_rate_limit_soft_blacklist_legacy_toggle(tmp_path):
+    app = _create_app(
+        tmp_path,
+        middlewares=['rate_limit'],
+        config={
+            'AIWAF_RATE_MAX': 1,
+            'AIWAF_RATE_WINDOW': 60,
+            'AIWAF_RATE_SOFT_BLOCK_BLACKLIST': True,
+        },
+    )
+
+    @app.route('/throttle')
+    def throttle():
+        return 'OK'
+
+    client = app.test_client()
+    headers = {
+        'User-Agent': 'Test Browser 1.0',
+        'X-Forwarded-For': '203.0.113.210',
+    }
+
+    assert client.get('/throttle', headers=headers).status_code == 200
+    assert client.get('/throttle', headers=headers).status_code == 429
+
+    from aiwaf.flask.blacklist_manager import BlacklistManager
+    with app.app_context():
+        assert BlacklistManager.is_blocked('203.0.113.210')
+
+
 def test_geo_block_exempt_route(tmp_path, monkeypatch):
     app = _create_app(
         tmp_path,
@@ -97,6 +155,56 @@ def test_honeypot_blocks_fast_post(tmp_path):
 
     assert client.get('/form', headers=headers).status_code == 200
     assert client.post('/form', headers=headers).status_code == 403
+
+
+@patch("time.time")
+def test_honeypot_page_expired_returns_409(mock_time, tmp_path):
+    app = _create_app(
+        tmp_path,
+        middlewares=['honeypot'],
+        config={'AIWAF_MIN_FORM_TIME': 1.0, 'AIWAF_MAX_PAGE_TIME': 240},
+    )
+
+    @app.route('/form-expired', methods=['GET', 'POST'])
+    def form_expired():
+        return 'OK'
+
+    client = app.test_client()
+    headers = {'User-Agent': 'Test Browser 1.0'}
+
+    mock_time.return_value = 1000.0
+    assert client.get('/form-expired', headers=headers).status_code == 200
+    mock_time.return_value = 1300.0
+    resp = client.post('/form-expired', headers=headers)
+    assert resp.status_code == 409
+    payload = resp.get_json() or {}
+    assert payload.get("reload_required") is True
+
+
+def test_honeypot_get_to_obvious_post_only_returns_405(tmp_path):
+    app = _create_app(tmp_path, middlewares=['honeypot'])
+
+    @app.route('/api/create/', methods=['POST'])
+    def create_only():
+        return 'OK'
+
+    client = app.test_client()
+    headers = {'User-Agent': 'Test Browser 1.0'}
+    assert client.get('/api/create/', headers=headers).status_code == 405
+
+
+def test_honeypot_post_to_get_only_returns_405(tmp_path):
+    app = _create_app(tmp_path, middlewares=['honeypot'])
+    from aiwaf.flask.honeypot_timing_middleware import _aiwaf_cache
+    _aiwaf_cache.clear()
+
+    @app.route('/read-only', methods=['GET'])
+    def read_only():
+        return 'OK'
+
+    client = app.test_client()
+    headers = {'User-Agent': 'Test Browser 1.0'}
+    assert client.post('/read-only', headers=headers).status_code == 405
 
 
 def test_uuid_tamper_blocks_invalid(tmp_path):

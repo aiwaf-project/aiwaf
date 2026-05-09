@@ -19,7 +19,13 @@ class BlacklistManager:
     """
     
     @classmethod
-    def block(cls, ip: str, reason: str, duration: Optional[int] = None) -> bool:
+    def block(
+        cls,
+        ip: str,
+        reason: str,
+        duration: Optional[int] = None,
+        extended_request_info: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """
         Block an IP address.
         
@@ -39,7 +45,7 @@ class BlacklistManager:
         
         # Block the IP
         blacklist_store = get_blacklist_store()
-        blacklist_store.block_ip(ip, reason, duration)
+        blacklist_store.block_ip(ip, reason, duration, extended_request_info=extended_request_info)
         
         return True
     

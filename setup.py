@@ -7,7 +7,7 @@ README_PATH = HERE / "README.md"
 
 setup(
     name="aiwaf",
-    version="0.1.9.7.2",
+    version="0.1.9.7.3",
     description="AI-driven, self-learning Web Application Firewall for Python web applications",
     long_description=README_PATH.read_text(encoding="utf-8") if README_PATH.exists() else "AIWAF",
     long_description_content_type="text/markdown",
@@ -40,7 +40,7 @@ setup(
             "uvicorn>=0.27",
         ],
         "rust": [
-            "aiwaf-rust>=0.1.9",
+            "aiwaf-rust>=0.1.6",
         ],
     },
     include_package_data=True,

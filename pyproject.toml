@@ -1,6 +1,6 @@
 [project]
 name = "aiwaf"
-version = "0.1.9.7.2"
+version = "0.1.9.7.3"
 description = "AI-driven, self-learning Web Application Firewall for Python web applications"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.8"
@@ -42,7 +42,7 @@ fastapi = [
     "uvicorn>=0.27"
 ]
 rust = [
-    "aiwaf-rust>=0.1.9"
+    "aiwaf-rust>=0.1.6"
 ]
 
 [project.scripts]

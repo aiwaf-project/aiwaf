@@ -20,6 +20,14 @@ from . import training_logic  # noqa: F401
 from . import training_features  # noqa: F401
 from . import whois  # noqa: F401
 from . import utils  # noqa: F401
+from . import uuid_tamper  # noqa: F401
+from . import rate_limit  # noqa: F401
+from . import honeypot  # noqa: F401
+from . import ip_keyword  # noqa: F401
+from . import method_validation  # noqa: F401
+from . import geo_policy  # noqa: F401
+from . import block_responses  # noqa: F401
+from . import request_context  # noqa: F401
 from .rust_backend import (  # noqa: F401
     rust_available,
     rust_isolation_forest_available,
@@ -62,6 +70,14 @@ __all__ = [
     "training_features",
     "whois",
     "utils",
+    "uuid_tamper",
+    "rate_limit",
+    "honeypot",
+    "ip_keyword",
+    "method_validation",
+    "geo_policy",
+    "block_responses",
+    "request_context",
     "rust_available",
     "rust_isolation_forest_available",
     "rust_isolation_forest_class",
