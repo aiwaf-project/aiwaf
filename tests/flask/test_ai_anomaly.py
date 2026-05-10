@@ -44,7 +44,7 @@ def test_ai_anomaly_middleware():
         print(f" Failed to register AIWAF: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        raise AssertionError("Failed to register AIWAF middlewares") from e
     
     # Check if AI anomaly middleware is attached
     ai_anomaly_middleware = None
@@ -116,7 +116,7 @@ def test_ai_anomaly_middleware():
     print("- Request pattern analysis")
     print("- Anomaly detection thresholds")
     
-    return True
+    assert True
 
 if __name__ == '__main__':
     try:

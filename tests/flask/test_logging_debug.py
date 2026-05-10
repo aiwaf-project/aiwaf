@@ -36,7 +36,7 @@ def index():
     return "Hello, this is a test!"
 
 @app.route('/test')
-def test_route():
+def debug_test_route():
     return {"status": "ok", "message": "Test successful"}
 
 if __name__ == '__main__':

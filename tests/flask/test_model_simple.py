@@ -86,13 +86,13 @@ def test_model_path_simple():
                     size = item.stat().st_size if item.is_file() else 0
                     print(f"     {item.name} ({size:,} bytes)")
         
-        return True
+        assert True
         
     except Exception as e:
         print(f" Error: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        raise AssertionError("Simple model path test failed") from e
 
 if __name__ == '__main__':
     success = test_model_path_simple()

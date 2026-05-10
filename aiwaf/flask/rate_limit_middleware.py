@@ -1,7 +1,7 @@
 # Flask-adapted RateLimitMiddleware
 import time
 from flask import request, jsonify, current_app
-from .utils import get_ip, is_exempt
+from .utils import get_blacklist_extended_info, get_ip, is_exempt
 from .blacklist_manager import BlacklistManager
 from .exemption_decorators import should_apply_middleware, get_path_rule_overrides
 from aiwaf.core.exemptions import get_path_rule_for_path as core_get_path_rule_for_path
@@ -69,12 +69,20 @@ class RateLimitMiddleware:
             _aiwaf_cache[key] = decision.timestamps
 
             if decision.action == FLOOD_BLOCK:
-                BlacklistManager.block(ip, "Flood pattern")
+                BlacklistManager.block(
+                    ip,
+                    "Flood pattern",
+                    extended_request_info=get_blacklist_extended_info(request),
+                )
                 payload, status = blocked_response()
                 return jsonify(payload), status
             if decision.action == THROTTLE:
                 if soft_block_blacklist:
-                    BlacklistManager.block(ip, "Rate limit exceeded")
+                    BlacklistManager.block(
+                        ip,
+                        "Rate limit exceeded",
+                        extended_request_info=get_blacklist_extended_info(request),
+                    )
                 payload, status = throttle_response()
                 return jsonify(payload), status
 

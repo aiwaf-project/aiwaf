@@ -368,6 +368,18 @@ class AIWAFManager:
         if not country_code:
             print(" Country code is required")
             return False
+        code = str(country_code).strip().upper()
+        try:
+            current = set(self.list_geo_blocked_countries())
+            if code in current:
+                print(f"  {code} already blocked")
+                return True
+            self.storage['add_geo_blocked_country'](code)
+            print(f" Blocked country added: {code}")
+            return True
+        except Exception as e:
+            print(f" Error adding geo blocked country '{code}': {e}")
+            return False
 
     def add_path_exemption(self, path: str, reason: str = "") -> bool:
         """Add a path exemption."""
@@ -410,18 +422,6 @@ class AIWAFManager:
             return True
         except Exception as e:
             print(f" Error removing path exemption: {e}")
-            return False
-        code = str(country_code).strip().upper()
-        try:
-            current = set(self.list_geo_blocked_countries())
-            if code in current:
-                print(f"  {code} already blocked")
-                return True
-            self.storage['add_geo_blocked_country'](code)
-            print(f" Blocked country added: {code}")
-            return True
-        except Exception as e:
-            print(f" Error adding geo blocked country '{code}': {e}")
             return False
 
     def remove_geo_blocked_country(self, country_code: str) -> bool:

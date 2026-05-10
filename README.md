@@ -109,7 +109,11 @@ import aiwaf.fast as aiwaf
   - method-misuse checks (for example POST to read-only endpoints)
 
 - **UUID tamper protection**
-  - blocks invalid/guessed UUID access attempts
+  - score-based UUID abuse detection
+  - malformed UUIDs add high score and can block immediately
+  - valid UUID requests that repeatedly end in `404` increase score
+  - score decays on successful UUID requests
+  - blocks when per-IP UUID score crosses threshold
 
 - **GeoIP support**
   - optional country-level allow/block behavior
@@ -212,6 +216,13 @@ AIWAF_MIN_FORM_TIME = 1.0
 AIWAF_MAX_PAGE_TIME = 240
 AIWAF_FILE_EXTENSIONS = [".php", ".asp", ".jsp"]
 
+AIWAF_UUID_SCORE_ENABLED = True
+AIWAF_UUID_SCORE_WINDOW_SECONDS = 60
+AIWAF_UUID_SCORE_BLOCK_THRESHOLD = 5
+AIWAF_UUID_SCORE_MALFORMED_WEIGHT = 5
+AIWAF_UUID_SCORE_NOT_FOUND_WEIGHT = 1
+AIWAF_UUID_SCORE_SUCCESS_DECAY = 2
+
 AIWAF_ALLOWED_PATH_KEYWORDS = ["profile", "user", "account", "dashboard"]
 AIWAF_EXEMPT_KEYWORDS = ["api", "webhook", "health", "static", "media"]
 AIWAF_EXEMPT_PATHS = ["/favicon.ico", "/robots.txt", "/static/", "/health/"]
@@ -262,6 +273,21 @@ Legacy compatibility:
 
 Order matters in all adapters. Put protection middleware early and logging middleware near the end.
 
+### Unified `all` / `auto` Selection
+
+AIWAF now supports a centralized "enable everything with smart defaults" mode across adapters.
+
+- FastAPI and Flask: pass `middlewares=["all"]` (or `["auto"]`)
+- Django: use `"aiwaf.django.middleware.all"` in `MIDDLEWARE`
+
+Auto behavior:
+- logging middleware is enabled when `AIWAF_ACCESS_LOG` is missing/empty
+- logging middleware is disabled when `AIWAF_ACCESS_LOG` is configured
+- geo middleware is enabled when any of these are true:
+  - explicit geo enable flag is on
+  - static geo block list has countries
+  - dynamic geo block store/table has countries
+
 Django example order:
 
 ```python
@@ -280,6 +306,15 @@ MIDDLEWARE = [
 
 If JSON API clients need JSON 403 bodies, keep `JsonExceptionMiddleware` near the top.
 
+Django alias example:
+
+```python
+MIDDLEWARE = [
+    "django.middleware.security.SecurityMiddleware",
+    "aiwaf.django.middleware.all",
+]
+```
+
 FastAPI quick integration:
 
 ```python
@@ -290,11 +325,22 @@ app = FastAPI()
 
 aiwaf = AIWAF(
     app,
+    middlewares=["all"],
     storage={"backend": "memory"},
     header_validation={"enabled": True, "quality_threshold": 3},
     rate_limiting={"enabled": True, "window_seconds": 10, "max_requests": 20},
     logging_middleware={"enabled": True, "log_dir": "aiwaf_logs", "log_format": "json"},
 )
+```
+
+Flask quick integration:
+
+```python
+from flask import Flask
+from aiwaf.flask import AIWAF
+
+app = Flask(__name__)
+aiwaf = AIWAF(app, middlewares=["all"])
 ```
 
 ---
@@ -562,7 +608,7 @@ Then tune:
 | Rate limiting | Burst/flood control in sliding windows |
 | AI anomaly | ML-based behavior outlier detection |
 | Honeypot timing | Automation/timing/method misuse checks |
-| UUID tamper | Invalid UUID access blocking |
+| UUID tamper | Score-based malformed UUID + repeated UUID-404 abuse detection |
 | Header validation | Bot-like header profile detection |
 | Request logger | Optional telemetry capture for analysis/training |
 
@@ -580,7 +626,7 @@ For a typical protected request:
 6. Geo checks apply country allow/block rules (if enabled).
 7. AI anomaly evaluates extracted behavior features (if enabled and model available).
 8. Honeypot timing/method checks evaluate form timing and method misuse.
-9. UUID tamper checks validate UUID lookup behavior where applicable.
+9. UUID tamper checks validate UUID format and apply score-based repeated-miss detection.
 10. Optional logger records request/response metadata.
 
 If any blocking stage denies request:

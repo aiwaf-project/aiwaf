@@ -10,17 +10,22 @@ from .anomaly_middleware import AIAnomalyMiddleware
 from .uuid_tamper_middleware import UUIDTamperMiddleware
 from .logging_middleware import AIWAFLoggingMiddleware
 from .geo_block_middleware import GeoBlockMiddleware
+from aiwaf.core.middleware_plan import plan_enabled_middlewares
+from aiwaf.core.middleware_plan import should_enable_geo
+from aiwaf.core.route_capabilities import detect_uuid_routes_in_flask_app
+from .storage import get_geo_blocked_countries
 
 
 class AIWAF:
     AVAILABLE_MIDDLEWARES = {
+        # Keep registration order aligned with Django chain semantics.
+        "geo_block": GeoBlockMiddleware,
         "ip_keyword_block": IPAndKeywordBlockMiddleware,
         "rate_limit": RateLimitMiddleware,
-        "honeypot": HoneypotTimingMiddleware,
-        "header_validation": HeaderValidationMiddleware,
-        "geo_block": GeoBlockMiddleware,
         "ai_anomaly": AIAnomalyMiddleware,
+        "honeypot": HoneypotTimingMiddleware,
         "uuid_tamper": UUIDTamperMiddleware,
+        "header_validation": HeaderValidationMiddleware,
         "logging": AIWAFLoggingMiddleware,
     }
 
@@ -43,18 +48,31 @@ class AIWAF:
 
     def _resolve_middlewares(self, middlewares, disable_middlewares):
         all_keys = list(self.AVAILABLE_MIDDLEWARES.keys())
-        if middlewares is None:
-            enabled = set(all_keys)
-        else:
-            enabled = {m for m in middlewares if m in self.AVAILABLE_MIDDLEWARES}
-        if disable_middlewares:
-            enabled -= {m for m in disable_middlewares if m in self.AVAILABLE_MIDDLEWARES}
-        return enabled
+        access_log = self.app.config.get("AIWAF_ACCESS_LOG") if self.app is not None else None
+        geo_enabled_flag = bool(self.app.config.get("AIWAF_GEO_BLOCK_ENABLED", False)) if self.app is not None else False
+        static_block = self.app.config.get("AIWAF_GEO_BLOCK_COUNTRIES", []) if self.app is not None else []
+        dynamic_block = get_geo_blocked_countries() if self.app is not None else []
+        return plan_enabled_middlewares(
+            ordered_available=all_keys,
+            requested=middlewares,
+            disabled=disable_middlewares,
+            access_log=access_log,
+            geo_enabled_flag=geo_enabled_flag,
+            static_block_countries=static_block,
+            dynamic_block_countries=dynamic_block,
+            has_uuid_routes=detect_uuid_routes_in_flask_app(self.app),
+        )
 
     def init_app(self, app, middlewares: Iterable[str] | None = None, disable_middlewares: Iterable[str] | None = None, use_database=None):
         self.app = app
         enabled = self._resolve_middlewares(middlewares, disable_middlewares)
         self.enabled_middlewares = set(enabled)
+        if "geo_block" in enabled and not app.config.get("AIWAF_GEO_BLOCK_ENABLED", False):
+            app.config["AIWAF_GEO_BLOCK_ENABLED"] = should_enable_geo(
+                geo_enabled_flag=bool(app.config.get("AIWAF_GEO_BLOCK_ENABLED", False)),
+                static_block_countries=app.config.get("AIWAF_GEO_BLOCK_COUNTRIES", []) or [],
+                dynamic_block_countries=get_geo_blocked_countries(),
+            )
 
         # ensure database initialized when requested
         if use_database is True:

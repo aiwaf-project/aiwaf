@@ -89,31 +89,19 @@ def test_cli_functionality():
             print(f" Whitelist after removal: {whitelist_after}")
             
             print("\n All CLI tests passed!")
-            return True
+            assert True
             
     except Exception as e:
         print(f" CLI test failed: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        raise AssertionError("CLI functionality test failed") from e
 
 def test_console_script():
     """Test the console script entry point."""
     print("\n Testing console script...")
-    
-    try:
-        # Test importing the console script
-        import aiwaf_console
-        print(" Console script imports successfully")
-        
-        # Test CLI argument parsing (without execution)
-        from aiwaf.flask.cli import main
-        print(" CLI main function accessible")
-        
-        return True
-    except Exception as e:
-        print(f" Console script test failed: {e}")
-        return False
+    from aiwaf.flask.cli import main
+    assert callable(main)
 
 
 def test_cli_geo_command(monkeypatch, tmp_path):

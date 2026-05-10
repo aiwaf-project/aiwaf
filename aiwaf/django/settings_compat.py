@@ -1,5 +1,8 @@
 import logging
 from django.conf import settings
+from aiwaf.core.middleware_plan import should_enable_geo, should_enable_logging
+from aiwaf.core.middleware_plan import should_enable_uuid_tamper
+from aiwaf.core.route_capabilities import detect_uuid_routes_in_django_resolver
 
 _APPLIED = False
 
@@ -12,6 +15,7 @@ def apply_legacy_settings() -> None:
 
     legacy = getattr(settings, "AIWAF_SETTINGS", None)
     if not isinstance(legacy, dict):
+        _expand_middleware_all_alias()
         return
 
     logger = logging.getLogger("aiwaf.settings")
@@ -101,3 +105,58 @@ def apply_legacy_settings() -> None:
 
     if logger.isEnabledFor(logging.INFO):
         logger.info("Applied AIWAF_SETTINGS compatibility mapping.")
+
+    _expand_middleware_all_alias()
+
+
+def _expand_middleware_all_alias() -> None:
+    middleware = list(getattr(settings, "MIDDLEWARE", []) or [])
+    alias = "aiwaf.django.middleware.all"
+    if alias not in middleware:
+        return
+
+    access_log = getattr(settings, "AIWAF_ACCESS_LOG", None)
+    geo_enabled_flag = bool(getattr(settings, "AIWAF_GEO_BLOCK_ENABLED", False))
+    static_block = getattr(settings, "AIWAF_GEO_BLOCK_COUNTRIES", []) or []
+    dynamic_block = []
+    try:
+        from .models import GeoBlockedCountry
+
+        dynamic_block = list(GeoBlockedCountry.objects.values_list("country_code", flat=True))
+    except Exception:
+        dynamic_block = []
+
+    has_uuid_routes = None
+    try:
+        from django.urls import get_resolver
+
+        has_uuid_routes = detect_uuid_routes_in_django_resolver(get_resolver())
+    except Exception:
+        has_uuid_routes = None
+
+    chain = [
+        "aiwaf.django.middleware.JsonExceptionMiddleware",
+        "aiwaf.django.middleware.IPAndKeywordBlockMiddleware",
+        "aiwaf.django.middleware.RateLimitMiddleware",
+        "aiwaf.django.middleware.AIAnomalyMiddleware",
+        "aiwaf.django.middleware.HoneypotTimingMiddleware",
+        "aiwaf.django.middleware.HeaderValidationMiddleware",
+    ]
+    if should_enable_uuid_tamper(has_uuid_routes=has_uuid_routes):
+        chain.insert(5, "aiwaf.django.middleware.UUIDTamperMiddleware")
+    if should_enable_geo(
+        geo_enabled_flag=geo_enabled_flag,
+        static_block_countries=static_block,
+        dynamic_block_countries=dynamic_block,
+    ):
+        chain.insert(1, "aiwaf.django.middleware.GeoBlockMiddleware")
+    if should_enable_logging(access_log):
+        chain.append("aiwaf.django.middleware_logger.AIWAFLoggerMiddleware")
+
+    expanded = []
+    for item in middleware:
+        if item == alias:
+            expanded.extend(chain)
+        else:
+            expanded.append(item)
+    setattr(settings, "MIDDLEWARE", expanded)

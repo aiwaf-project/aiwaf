@@ -2,7 +2,10 @@ from flask import request
 from .storage import is_ip_whitelisted, get_path_exemptions
 from aiwaf.core.defaults import DEFAULT_EXEMPT_PATHS_FLASK
 from aiwaf.core.exemptions import is_path_exempt as core_is_path_exempt
-from aiwaf.core.request_context import extract_ip_from_flask_request
+from aiwaf.core.request_context import (
+    extract_blacklist_extended_info_from_flask_request,
+    extract_ip_from_flask_request,
+)
 
 def get_ip():
     return extract_ip_from_flask_request(request)
@@ -60,3 +63,25 @@ def get_exempt_paths():
 def get_default_exempt_paths():
     """Get default list of paths that should be exempt from AIWAF protection."""
     return set(DEFAULT_EXEMPT_PATHS_FLASK)
+
+
+def get_blacklist_extended_info(request):
+    """Build optional extended-request-info payload for blacklist entries."""
+    try:
+        from flask import current_app
+        enabled = bool(
+            current_app.config.get("AIWAF_BLACKLIST_STORE_EXTENDED_INFO", False)
+            or current_app.config.get("AIWAF_CAPTURE_EXTENDED_REQUEST_INFO", False)
+        )
+        return extract_blacklist_extended_info_from_flask_request(
+            request,
+            enabled=enabled,
+            max_headers=int(current_app.config.get("AIWAF_BLACKLIST_MAX_HEADERS", 50)),
+            max_value_len=int(current_app.config.get("AIWAF_BLACKLIST_MAX_HEADER_VALUE_LENGTH", 512)),
+            redact_headers=current_app.config.get(
+                "AIWAF_BLACKLIST_REDACT_HEADERS",
+                ["Authorization", "Cookie", "Set-Cookie"],
+            ),
+        )
+    except Exception:
+        return None

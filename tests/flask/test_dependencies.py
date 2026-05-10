@@ -11,24 +11,20 @@ def test_basic_dependencies():
         from flask import Flask
         print(" Flask: Available")
     except ImportError as e:
-        print(f" Flask: Missing - {e}")
-        return False
+        raise AssertionError(f"Flask dependency missing: {e}") from e
     
     try:
         from flask_sqlalchemy import SQLAlchemy
         print(" Flask-SQLAlchemy: Available")
     except ImportError as e:
-        print(f" Flask-SQLAlchemy: Missing - {e}")
-        return False
+        raise AssertionError(f"Flask-SQLAlchemy dependency missing: {e}") from e
     
     try:
         from aiwaf.flask import AIWAF
         print(" AIWAF Flask: Available")
     except ImportError as e:
-        print(f" AIWAF Flask: Missing - {e}")
-        return False
-    
-    return True
+        raise AssertionError(f"AIWAF Flask import missing: {e}") from e
+    assert True
 
 def test_ai_dependencies():
     """Test AI anomaly detection dependencies."""
@@ -51,7 +47,7 @@ def test_ai_dependencies():
     except ImportError:
         print(" Scikit-learn: Missing - install with 'pip install aiwaf-flask[ai]'")
     
-    return numpy_available and sklearn_available
+    assert isinstance(numpy_available and sklearn_available, bool)
 
 def test_ai_middleware():
     """Test AI anomaly middleware functionality."""
@@ -78,11 +74,10 @@ def test_ai_middleware():
         else:
             print("  AI Features: NumPy not detected - basic analysis only")
         
-        return True
+        assert True
         
     except Exception as e:
-        print(f" AI Middleware: Error - {e}")
-        return False
+        raise AssertionError(f"AI middleware test failed: {e}") from e
 
 def test_installation_variants():
     """Test different installation scenarios."""

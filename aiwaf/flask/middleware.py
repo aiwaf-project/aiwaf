@@ -8,6 +8,8 @@ from .uuid_tamper_middleware import UUIDTamperMiddleware
 from .logging_middleware import AIWAFLoggingMiddleware
 from .geo_block_middleware import GeoBlockMiddleware
 
+all = "all"
+
 def register_aiwaf_middlewares(app, use_database=None, middlewares=None, disable_middlewares=None):
     """
     Register AIWAF middlewares with the Flask app.

@@ -61,9 +61,9 @@ def test_training():
             print(f" Training failed: {e}")
             import traceback
             traceback.print_exc()
-            return False
+            raise AssertionError("Training failed") from e
     
-    return True
+    assert True
 
 if __name__ == '__main__':
     success = test_training()

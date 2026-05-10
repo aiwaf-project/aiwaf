@@ -49,17 +49,15 @@ def test_logging_middleware():
     register_aiwaf_middlewares(app)
     print(" Middlewares registered successfully")
     
-    # Check if middleware is properly attached
-    if hasattr(app, 'aiwaf_logger'):
-        logger = app.aiwaf_logger
+    logger = getattr(app, "aiwaf_logger", None)
+    if logger is not None:
         print(f" AIWAF logger attached: {logger}")
         print(f"Log directory: {logger.log_dir}")
         print(f"Access log file: {logger.access_log_file}")
         print(f"Error log file: {logger.error_log_file}")
         print(f"AIWAF log file: {logger.aiwaf_log_file}")
     else:
-        print(" AIWAF logger not attached to app")
-        return False
+        print(" AIWAF logger not attached to app (middleware still expected to emit logs)")
     
     # Create test client
     with app.test_client() as client:
@@ -99,7 +97,7 @@ def test_logging_middleware():
                 print(f"    {i+1}: {line}")
     else:
         print(f" Access log NOT created: {access_log}")
-        return False
+        raise AssertionError("Access log was not created")
     
     if error_log.exists():
         print(f" Error log exists: {error_log} (size: {error_log.stat().st_size} bytes)")
@@ -112,7 +110,7 @@ def test_logging_middleware():
         print(f"! AIWAF log not created: {aiwaf_log} (this is normal if no blocks occurred)")
     
     print("\\n Logging test completed successfully!")
-    return True
+    assert True
 
 if __name__ == '__main__':
     try:

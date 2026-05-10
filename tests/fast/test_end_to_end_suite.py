@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from aiwaf.fast import AIWAF
 from aiwaf.core.honeypot import ACTION_PAGE_EXPIRED, evaluate_form_timing
+from aiwaf.fast.middleware.honeypot_timing_middleware import HoneypotTimingMiddleware
 
 
 def test_end_to_end_rate_limit_behavior():
@@ -119,3 +120,34 @@ def test_honeypot_post_to_get_only_returns_405():
     AIWAF(app, header_validation={"enabled": False}, rate_limiting={"enabled": False}, honeypot={"enabled": True})
     client = TestClient(app)
     assert client.post("/read-only").status_code == 405
+
+
+def test_honeypot_authenticated_context_detection_fast():
+    app = FastAPI()
+    middleware = HoneypotTimingMiddleware(app)
+
+    class _Req:
+        scope = {"user": type("U", (), {"is_authenticated": True})()}
+
+    assert middleware._is_authenticated_request(_Req()) is True
+
+
+def test_honeypot_authenticated_bypass_can_be_disabled():
+    app = FastAPI()
+
+    @app.api_route("/form", methods=["GET", "POST"])
+    async def form():
+        return {"ok": True}
+
+    AIWAF(
+        app,
+        header_validation={"enabled": False},
+        rate_limiting={"enabled": False},
+        honeypot={"enabled": True, "min_form_time": 1.0, "skip_authenticated": False},
+    )
+    from aiwaf.fast.middleware import honeypot_timing_middleware as hm
+    with patch.object(hm, "is_authenticated_session_context", return_value=True):
+        client = TestClient(app)
+        assert client.get("/form").status_code == 200
+        # POST immediately after GET should still be blocked when bypass disabled.
+        assert client.post("/form").status_code == 403

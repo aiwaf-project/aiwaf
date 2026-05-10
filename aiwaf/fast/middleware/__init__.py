@@ -8,6 +8,7 @@ Usage:
 from importlib import import_module
 
 __all__ = [
+    "all",
     "IPAndKeywordBlockMiddleware",
     "RateLimitMiddleware",
     "HoneypotTimingMiddleware",
@@ -17,9 +18,12 @@ __all__ = [
     "UUIDTamperMiddleware",
     "AIWAFLoggingMiddleware",
 ]
+all = "all"
 
 
 def __getattr__(name):
+    if name == "all":
+        return all
     module_map = {
         "IPAndKeywordBlockMiddleware": ".ip_and_keyword_block_middleware",
         "RateLimitMiddleware": ".rate_limit_middleware",

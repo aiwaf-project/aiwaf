@@ -32,10 +32,32 @@ OBVIOUS_POST_ONLY_SUFFIXES = (
     "/delete/",
     "/process/",
 )
+DEFAULT_HONEYPOT_TTL_SECONDS = 300
 
 
 def honeypot_get_key(ip: str) -> str:
     return f"honeypot_get:{ip}"
+
+
+def store_honeypot_get_timestamp(setter, ip: str, now: float, ttl_seconds: int = DEFAULT_HONEYPOT_TTL_SECONDS) -> None:
+    """
+    Persist GET timestamp using adapter-provided setter(key, value, ttl_seconds).
+    """
+    setter(honeypot_get_key(ip), now, ttl_seconds)
+
+
+def load_honeypot_get_timestamp(getter, ip: str):
+    """
+    Load previously persisted GET timestamp using adapter-provided getter(key).
+    """
+    return getter(honeypot_get_key(ip))
+
+
+def clear_honeypot_get_timestamp(deleter, ip: str) -> None:
+    """
+    Clear persisted GET timestamp using adapter-provided deleter(key).
+    """
+    deleter(honeypot_get_key(ip))
 
 
 def is_login_path(path: str) -> bool:
@@ -84,3 +106,29 @@ def evaluate_form_timing(
         )
 
     return HoneypotDecision(action=ACTION_ALLOW)
+
+
+def is_authenticated_session_context(user=None, session=None) -> bool:
+    """
+    Best-effort authenticated-session detection shared across adapters.
+    """
+    if user is not None:
+        is_authenticated = getattr(user, "is_authenticated", False)
+        if callable(is_authenticated):
+            try:
+                is_authenticated = is_authenticated()
+            except Exception:
+                is_authenticated = False
+        if bool(is_authenticated):
+            return True
+
+    if session is not None:
+        try:
+            session_key = getattr(session, "session_key", None)
+            auth_user_id = session.get("_auth_user_id") if hasattr(session, "get") else None
+            if session_key and auth_user_id:
+                return True
+        except Exception:
+            pass
+
+    return False

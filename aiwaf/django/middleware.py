@@ -58,7 +58,12 @@ from ..core.rust_backend import (
     is_rust_isolation_forest,
     rust_isolation_forest_from_json,
 )
-from ..core.uuid_tamper import collect_uuid_model_fields, uuid_exists_in_model_fields
+from ..core.uuid_tamper import (
+    collect_uuid_model_fields,
+    is_malformed_uuid,
+    is_valid_uuid,
+    record_uuid_signal,
+)
 from ..core.rate_limit import (
     THROTTLE,
     FLOOD_BLOCK,
@@ -67,7 +72,9 @@ from ..core.rate_limit import (
     normalize_rate_key_mode,
 )
 from ..core.honeypot import (
-    honeypot_get_key,
+    store_honeypot_get_timestamp,
+    load_honeypot_get_timestamp,
+    clear_honeypot_get_timestamp,
     should_block_get_to_post_only_endpoint,
     evaluate_form_timing,
     ACTION_ALLOW,
@@ -95,6 +102,7 @@ MODEL_PATH = getattr(
 
 logger = logging.getLogger("aiwaf.django.middleware")
 _UUID_MODEL_CACHE = {}
+all = "aiwaf.django.middleware.all"
 
 def _log_block(request, reason, status_code=403):
     if not logger.isEnabledFor(logging.DEBUG):
@@ -1087,7 +1095,11 @@ class HoneypotTimingMiddleware(MiddlewareMixin):
             
             # Store timestamp for this IP's GET request  
             # Use a general key for the IP, not path-specific
-            cache.set(honeypot_get_key(ip), time.time(), timeout=300)  # 5 min timeout
+            store_honeypot_get_timestamp(
+                lambda key, value, ttl: cache.set(key, value, timeout=ttl),
+                ip,
+                time.time(),
+            )
         
         elif request.method == "POST":
             decision = evaluate_method_policy(
@@ -1108,7 +1120,7 @@ class HoneypotTimingMiddleware(MiddlewareMixin):
                     return JsonResponse({"error": "blocked", "message": decision.message}, status=decision.status_code)
             
             # Check if there was a preceding GET request for timing validation
-            get_time = cache.get(honeypot_get_key(ip))
+            get_time = load_honeypot_get_timestamp(cache.get, ip)
             
             if get_time is not None:
                 decision = evaluate_form_timing(
@@ -1119,7 +1131,7 @@ class HoneypotTimingMiddleware(MiddlewareMixin):
                     max_page_time=self.MAX_PAGE_TIME,
                 )
                 if decision.action == ACTION_PAGE_EXPIRED:
-                    cache.delete(honeypot_get_key(ip))  # Force fresh GET
+                    clear_honeypot_get_timestamp(cache.delete, ip)  # Force fresh GET
                     return JsonResponse({
                         "error": "page_expired", 
                         "message": decision.message or "Page has expired. Please reload and try again.",
@@ -1164,6 +1176,16 @@ class HoneypotTimingMiddleware(MiddlewareMixin):
 
 
 class UUIDTamperMiddleware(MiddlewareMixin):
+    def _score_config(self):
+        return {
+            "enabled": bool(getattr(settings, "AIWAF_UUID_SCORE_ENABLED", True)),
+            "window_seconds": int(getattr(settings, "AIWAF_UUID_SCORE_WINDOW_SECONDS", 60)),
+            "block_threshold": int(getattr(settings, "AIWAF_UUID_SCORE_BLOCK_THRESHOLD", 5)),
+            "malformed_weight": int(getattr(settings, "AIWAF_UUID_SCORE_MALFORMED_WEIGHT", 5)),
+            "not_found_weight": int(getattr(settings, "AIWAF_UUID_SCORE_NOT_FOUND_WEIGHT", 1)),
+            "success_decay": int(getattr(settings, "AIWAF_UUID_SCORE_SUCCESS_DECAY", 2)),
+        }
+
     def process_view(self, request, view_func, view_args, view_kwargs):
         if is_middleware_disabled(request, self.__class__):
             return None
@@ -1180,23 +1202,48 @@ class UUIDTamperMiddleware(MiddlewareMixin):
         if is_ip_exempted(ip):
             return None
             
-        app_label = view_func.__module__.split(".")[0]
-        uuid_fields = _get_uuid_model_fields(app_label)
-        if not uuid_fields:
-            return None
-        if uuid_exists_in_model_fields(uid, uuid_fields):
-            return None
+        request._aiwaf_uuid_candidate = uid
+        request._aiwaf_uuid_ip = ip
 
-        # Double-check exemption before blocking
-        if not is_ip_exempted(ip):
+        if is_malformed_uuid(uid) and not is_ip_exempted(ip):
+            decision = record_uuid_signal(ip, "malformed", config=self._score_config())
+            reason = f"UUID tampering score={decision['score']}"
             BlacklistManager.block(
                 ip,
-                "UUID tampering",
+                reason,
                 extended_request_info=_get_blacklist_extended_info(request),
             )
             # Check if actually blocked (exempted IPs won't be blocked)
             if BlacklistManager.is_blocked(ip):
-                _raise_blocked(request, "UUID tampering", status_code=403)
+                _raise_blocked(request, reason, status_code=403)
+        return None
+
+    def process_response(self, request, response):
+        if is_middleware_disabled(request, self.__class__):
+            return response
+        if is_exempt(request):
+            return response
+        uid = getattr(request, "_aiwaf_uuid_candidate", None)
+        ip = getattr(request, "_aiwaf_uuid_ip", None)
+        if not ip or not is_valid_uuid(uid):
+            return response
+        if is_ip_exempted(ip):
+            return response
+
+        if response.status_code == 404:
+            decision = record_uuid_signal(ip, "not_found", config=self._score_config())
+            if decision["blocked"]:
+                reason = f"UUID tampering score={decision['score']}"
+                BlacklistManager.block(
+                    ip,
+                    reason,
+                    extended_request_info=_get_blacklist_extended_info(request),
+                )
+                if BlacklistManager.is_blocked(ip):
+                    _raise_blocked(request, reason, status_code=403)
+        elif response.status_code < 400:
+            record_uuid_signal(ip, "success", config=self._score_config())
+        return response
 
 
 class HeaderValidationMiddleware(MiddlewareMixin):

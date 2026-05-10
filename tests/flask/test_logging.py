@@ -79,13 +79,13 @@ def test_logging_formats():
                 if aiwaf_log.exists():
                     print(f"   AIWAF log created ({aiwaf_log.stat().st_size} bytes)")
         
-        return True
+        assert True
         
     except Exception as e:
         print(f" Logging test failed: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        raise AssertionError("Logging format test failed") from e
 
 def test_log_analysis():
     """Test log analysis functionality."""
@@ -124,11 +124,10 @@ def test_log_analysis():
             
             print(" Log analysis test passed")
         
-        return True
+        assert True
         
     except Exception as e:
-        print(f" Log analysis test failed: {e}")
-        return False
+        raise AssertionError(f"Log analysis test failed: {e}") from e
 
 def test_cli_logs_command():
     """Test the CLI logs command."""
@@ -159,11 +158,10 @@ def test_cli_logs_command():
             else:
                 print(" CLI logs command test failed")
             
-            return result
+            assert result
         
     except Exception as e:
-        print(f" CLI logs command test failed: {e}")
-        return False
+        raise AssertionError(f"CLI logs command test failed: {e}") from e
 
 if __name__ == '__main__':
     print(" AIWAF Logging Test Suite")

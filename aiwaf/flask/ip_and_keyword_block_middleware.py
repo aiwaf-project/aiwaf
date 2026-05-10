@@ -1,7 +1,7 @@
 # Flask-adapted IPAndKeywordBlockMiddleware
 import re
 from flask import request, jsonify
-from .utils import get_ip, is_exempt
+from .utils import get_blacklist_extended_info, get_ip, is_exempt
 from .blacklist_manager import BlacklistManager
 from .storage import get_keyword_store
 from .exemption_decorators import should_apply_middleware
@@ -120,7 +120,11 @@ class IPAndKeywordBlockMiddleware:
             for seg in decision.learned_keywords:
                 keyword_store.add_keyword(seg)
             if decision.block_reason:
-                BlacklistManager.block(ip, decision.block_reason)
+                BlacklistManager.block(
+                    ip,
+                    decision.block_reason,
+                    extended_request_info=get_blacklist_extended_info(request),
+                )
                 if logger:
                     logger.mark_request_blocked(decision.block_reason)
                 return jsonify({"error": "blocked"}), 403

@@ -40,7 +40,7 @@ def test_default_behavior():
         response = client.get('/test')
         print(f"\n Test request status: {response.status_code}")
     
-    return aiwaf
+    assert aiwaf is not None
 
 def test_app_only_initialization():
     """Test AIWAF(app) pattern - should also enable all."""
@@ -61,7 +61,7 @@ def test_app_only_initialization():
     print(f" All middlewares enabled: {len(enabled) == len(available)}")
     print(f" Count: {len(enabled)}/{len(available)}")
     
-    return aiwaf
+    assert aiwaf is not None
 
 def test_no_app_then_init():
     """Test AIWAF() then init_app() pattern."""
@@ -85,7 +85,7 @@ def test_no_app_then_init():
     print(f" All middlewares enabled: {len(enabled) == len(available)}")
     print(f" Count: {len(enabled)}/{len(available)}")
     
-    return aiwaf
+    assert aiwaf is not None
 
 def test_explicit_vs_default():
     """Compare explicit all vs default behavior."""
@@ -114,7 +114,7 @@ def test_explicit_vs_default():
     print(f" Default middlewares: {len(default_enabled)}")
     print(f" Same result: {explicit_enabled == default_enabled}")
     
-    return aiwaf_explicit, aiwaf_default
+    assert aiwaf_explicit is not None and aiwaf_default is not None
 
 def main():
     """Run all default behavior tests."""

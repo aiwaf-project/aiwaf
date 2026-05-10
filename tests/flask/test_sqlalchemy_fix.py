@@ -49,7 +49,7 @@ def test_website_scenario():
         else:
             print(f" Route failed with status {response.status_code}")
             print(f"Response: {response.get_data()}")
-            return False
+            raise AssertionError("Status route failed")
     
     # Test other routes to ensure middleware works
     with app.test_client() as client:
@@ -60,10 +60,10 @@ def test_website_scenario():
             print(" Test route works!")
         else:
             print(f" Test route failed: {response.status_code}")
-            return False
+            raise AssertionError("Test route failed")
     
     print(" All tests passed! The SQLAlchemy error should be fixed.")
-    return True
+    assert True
 
 if __name__ == "__main__":
     test_website_scenario()

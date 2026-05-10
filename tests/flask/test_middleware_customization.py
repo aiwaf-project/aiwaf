@@ -34,7 +34,7 @@ def test_full_aiwaf():
         response = client.get('/test')
         print(f" Test request status: {response.status_code}")
     
-    return aiwaf
+    assert aiwaf is not None
 
 def test_selective_middlewares():
     """Test AIWAF with only specific middlewares enabled."""
@@ -67,7 +67,7 @@ def test_selective_middlewares():
         response = client.get('/selective')
         print(f" Test request status: {response.status_code}")
     
-    return aiwaf
+    assert aiwaf is not None
 
 def test_disabled_middlewares():
     """Test AIWAF with specific middlewares disabled."""
@@ -103,7 +103,7 @@ def test_disabled_middlewares():
         response = client.get('/disabled')
         print(f" Test request status: {response.status_code}")
     
-    return aiwaf
+    assert aiwaf is not None
 
 def test_minimal_aiwaf():
     """Test AIWAF with minimal middlewares (security essentials only)."""
@@ -131,7 +131,7 @@ def test_minimal_aiwaf():
         response = client.get('/minimal')
         print(f" Test request status: {response.status_code}")
     
-    return aiwaf
+    assert aiwaf is not None
 
 def test_ai_only():
     """Test AIWAF with AI anomaly detection only."""
@@ -162,7 +162,7 @@ def test_ai_only():
         response = client.get('/ai-only?cmd=whoami&union=select')
         print(f"  Suspicious request status: {response.status_code}")
     
-    return aiwaf
+    assert aiwaf is not None
 
 def test_backward_compatibility():
     """Test backward compatibility with old registration method."""
@@ -192,7 +192,7 @@ def test_backward_compatibility():
         response = client.get('/compat')
         print(f" Test request status: {response.status_code}")
     
-    return aiwaf
+    assert aiwaf is not None
 
 def main():
     """Run all middleware customization tests."""

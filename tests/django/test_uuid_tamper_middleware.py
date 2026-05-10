@@ -16,7 +16,6 @@ import django
 django.setup()
 
 from django.db import models
-from django.core.exceptions import PermissionDenied
 from tests.django.base_test import AIWAFTestCase
 
 
@@ -89,7 +88,7 @@ class UUIDTamperMiddlewareTestCase(AIWAFTestCase):
         self.assertIsNone(captured_exc)
         mock_block.assert_not_called()
 
-    def test_uuid_tamper_blocks_when_no_match(self):
+    def test_valid_uuid_no_longer_blocks_on_single_miss(self):
         pk = models.UUIDField(primary_key=True)
         model = self._fake_model(pk, other_fields=[], exists=False)
         response, mock_block, captured_exc = self._run_middleware(
@@ -99,8 +98,8 @@ class UUIDTamperMiddlewareTestCase(AIWAFTestCase):
             is_blocked=True,
         )
         self.assertIsNone(response)
-        self.assertIsInstance(captured_exc, PermissionDenied)
-        mock_block.assert_called_once()
+        self.assertIsNone(captured_exc)
+        mock_block.assert_not_called()
 
 
 if __name__ == "__main__":

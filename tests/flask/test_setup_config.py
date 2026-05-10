@@ -15,40 +15,22 @@ def test_setup_py():
         
         print(" setup.py file found")
         
-        # Check for AI dependencies in extras_require
-        if '"ai":' in content:
-            print(" AI extra dependencies section found")
-        else:
-            print(" AI extra dependencies missing")
-            return False
-        
-        if 'numpy>=1.20.0' in content:
-            print(" NumPy dependency configured")
-        else:
-            print(" NumPy dependency missing")
-            return False
-        
-        if 'scikit-learn>=1.0.0' in content:
-            print(" Scikit-learn dependency configured")
-        else:
-            print(" Scikit-learn dependency missing")
-            return False
-        
-        if '"all":' in content:
-            print(" 'all' extra dependencies section found")
-        else:
-            print(" 'all' extra dependencies missing")
-            return False
+        # Validate current package extras layout
+        assert '"flask":' in content
+        assert '"fastapi":' in content
+        assert '"django":' in content
+        assert '"rust":' in content
+        assert 'aiwaf-rust>=' in content
         
         print(" setup.py configuration is correct")
-        return True
+        assert True
         
     except FileNotFoundError:
         print(" setup.py not found")
-        return False
+        raise AssertionError("setup.py not found")
     except Exception as e:
         print(f" Error reading setup.py: {e}")
-        return False
+        raise
 
 def test_pyproject_toml():
     """Test that pyproject.toml has correct dependency configuration."""
@@ -59,40 +41,23 @@ def test_pyproject_toml():
         with open('pyproject.toml', 'r') as f:
             content = f.read()
         
-        # Check for AI dependencies in optional-dependencies
-        if 'ai =' in content:
-            print(" AI optional dependencies section found")
-        else:
-            print(" AI optional dependencies missing")
-            return False
-        
-        if 'numpy>=1.20.0' in content:
-            print(" NumPy dependency configured")
-        else:
-            print(" NumPy dependency missing")
-            return False
-        
-        if 'scikit-learn>=1.0.0' in content:
-            print(" Scikit-learn dependency configured")
-        else:
-            print(" Scikit-learn dependency missing")
-            return False
-        
-        if 'all =' in content:
-            print(" 'all' optional dependencies section found")
-        else:
-            print(" 'all' optional dependencies missing")
-            return False
+        # Validate current optional dependencies layout
+        assert '[project.optional-dependencies]' in content
+        assert 'flask =' in content
+        assert 'fastapi =' in content
+        assert 'django =' in content
+        assert 'rust =' in content
+        assert 'aiwaf-rust>=' in content
         
         print(" pyproject.toml configuration is correct")
-        return True
+        assert True
         
     except FileNotFoundError:
         print(" pyproject.toml not found")
-        return False
+        raise AssertionError("pyproject.toml not found")
     except Exception as e:
         print(f" Error reading pyproject.toml: {e}")
-        return False
+        raise
 
 def show_installation_commands():
     """Show the installation commands that users can use."""

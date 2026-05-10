@@ -7,8 +7,10 @@ from fastapi import FastAPI
 from contextlib import asynccontextmanager
 
 from .runtime_config import AIWAFConfig, initialize_config
-from .runtime_storage import initialize_storage, get_exemption_store
+from .runtime_storage import initialize_storage, get_exemption_store, get_geo_block_store
 from .runtime_blacklist import BlacklistManager
+from .middleware_plan import plan_enabled_middlewares, should_enable_geo
+from .route_capabilities import detect_uuid_routes_in_fastapi_app
 from aiwaf.fast.middleware import (
     AIAnomalyMiddleware,
     AIWAFLoggingMiddleware,
@@ -48,6 +50,8 @@ class AIWAF:
         app: Optional[FastAPI] = None,
         config: Optional[AIWAFConfig] = None,
         config_file: Optional[str] = None,
+        middlewares: Optional[List[str]] = None,
+        disable_middlewares: Optional[List[str]] = None,
         **config_overrides
     ):
         """
@@ -72,6 +76,9 @@ class AIWAF:
         # Auto-setup exemptions
         self._setup_auto_exemptions()
         
+        self._requested_middlewares = middlewares
+        self._disabled_middlewares = disable_middlewares
+
         # Initialize middleware
         if app is not None:
             self.init_app(app)
@@ -99,8 +106,47 @@ class AIWAF:
     def _add_middleware(self):
         """Add middleware to the FastAPI app."""
         path_rules = self.config.get("path_rules", []) or self.config.get("PATH_RULES", []) or []
+        ordered_available = [
+            "geo_block",
+            "ip_keyword_block",
+            "rate_limiting",
+            "ai_anomaly",
+            "honeypot",
+            "uuid_tamper",
+            "header_validation",
+            "logging_middleware",
+        ]
+        middleware_key_map = {
+            "geo_block": "geo_block",
+            "ip_keyword_block": "ip_keyword_block",
+            "rate_limiting": "rate_limiting",
+            "ai_anomaly": "ai_anomaly",
+            "honeypot": "honeypot",
+            "uuid_tamper": "uuid_tamper",
+            "header_validation": "header_validation",
+            "logging_middleware": "logging_middleware",
+            "rate_limit": "rate_limiting",
+            "logging": "logging_middleware",
+        }
+        requested = None
+        if self._requested_middlewares is not None:
+            requested = [middleware_key_map.get(str(x), str(x)) for x in self._requested_middlewares]
+        disabled = [middleware_key_map.get(str(x), str(x)) for x in (self._disabled_middlewares or [])]
+        enabled = plan_enabled_middlewares(
+            ordered_available=ordered_available,
+            requested=requested,
+            disabled=disabled,
+            access_log=self.config.get("AIWAF_ACCESS_LOG"),
+            geo_enabled_flag=bool(self.config.get("geo_block.enabled", False)),
+            static_block_countries=self.config.get("geo_block.block_countries", []) or [],
+            dynamic_block_countries=get_geo_block_store().get_countries(),
+            has_uuid_routes=detect_uuid_routes_in_fastapi_app(self.app),
+        )
 
-        if self.config.is_enabled("logging_middleware"):
+        # FastAPI executes middleware in reverse registration order.
+        # Register in inverse of Django-equivalent chain:
+        # Geo -> IP/Keyword -> Rate -> AI -> Honeypot -> UUID -> Header -> Logging
+        if "logging_middleware" in enabled and self.config.is_enabled("logging_middleware"):
             logging_cfg = self.config.get("logging_middleware", {})
             self.app.add_middleware(
                 AIWAFLoggingMiddleware,
@@ -109,29 +155,8 @@ class AIWAF:
                 path_rules=path_rules,
             )
 
-        if self.config.is_enabled("uuid_tamper"):
-            self.app.add_middleware(UUIDTamperMiddleware, path_rules=path_rules)
-
-        if self.config.is_enabled("ai_anomaly"):
-            anomaly_cfg = self.config.get("ai_anomaly", {})
-            self.app.add_middleware(
-                AIAnomalyMiddleware,
-                enabled=anomaly_cfg.get("enabled", True),
-                path_rules=path_rules,
-            )
-
-        if self.config.is_enabled("geo_block"):
-            geo_cfg = self.config.get("geo_block", {})
-            self.app.add_middleware(
-                GeoBlockMiddleware,
-                enabled=geo_cfg.get("enabled", False),
-                allow_countries=geo_cfg.get("allow_countries", []),
-                block_countries=geo_cfg.get("block_countries", []),
-                path_rules=path_rules,
-            )
-
         # Header validation middleware
-        if self.config.is_enabled('header_validation'):
+        if "header_validation" in enabled and self.config.is_enabled('header_validation'):
             header_config = self.config.get_header_validation_config()
             
             # Add the middleware to FastAPI
@@ -148,17 +173,29 @@ class AIWAF:
             )
             
             logger.info("Header validation middleware added")
-        
-        if self.config.is_enabled("honeypot"):
+
+        if "uuid_tamper" in enabled and self.config.is_enabled("uuid_tamper"):
+            self.app.add_middleware(UUIDTamperMiddleware, path_rules=path_rules)
+
+        if "honeypot" in enabled and self.config.is_enabled("honeypot"):
             honeypot_cfg = self.config.get("honeypot", {})
             self.app.add_middleware(
                 HoneypotTimingMiddleware,
                 min_form_time=honeypot_cfg.get("min_form_time", 1.0),
                 max_page_time=honeypot_cfg.get("max_page_time", 240),
+                skip_authenticated=honeypot_cfg.get("skip_authenticated", True),
                 path_rules=path_rules,
             )
 
-        if self.config.is_enabled("rate_limiting"):
+        if "ai_anomaly" in enabled and self.config.is_enabled("ai_anomaly"):
+            anomaly_cfg = self.config.get("ai_anomaly", {})
+            self.app.add_middleware(
+                AIAnomalyMiddleware,
+                enabled=anomaly_cfg.get("enabled", True),
+                path_rules=path_rules,
+            )
+
+        if "rate_limiting" in enabled and self.config.is_enabled("rate_limiting"):
             rate_cfg = self.config.get_rate_limiting_config()
             self.app.add_middleware(
                 RateLimitMiddleware,
@@ -170,11 +207,26 @@ class AIWAF:
                 path_rules=path_rules,
             )
 
-        if self.config.is_enabled("ip_keyword_block"):
+        if "ip_keyword_block" in enabled and self.config.is_enabled("ip_keyword_block"):
             ipkw_cfg = self.config.get("ip_keyword_block", {})
             self.app.add_middleware(
                 IPAndKeywordBlockMiddleware,
                 malicious_keywords=ipkw_cfg.get("malicious_keywords"),
+                path_rules=path_rules,
+            )
+
+        geo_cfg = self.config.get("geo_block", {})
+        geo_runtime_enabled = should_enable_geo(
+            geo_enabled_flag=bool(geo_cfg.get("enabled", False)),
+            static_block_countries=geo_cfg.get("block_countries", []) or [],
+            dynamic_block_countries=get_geo_block_store().get_countries(),
+        )
+        if "geo_block" in enabled and geo_runtime_enabled:
+            self.app.add_middleware(
+                GeoBlockMiddleware,
+                enabled=geo_runtime_enabled,
+                allow_countries=geo_cfg.get("allow_countries", []),
+                block_countries=geo_cfg.get("block_countries", []),
                 path_rules=path_rules,
             )
     

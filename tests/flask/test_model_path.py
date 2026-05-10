@@ -75,13 +75,13 @@ def test_model_path_resolution():
         else:
             print("  Model file not found - run training first")
         
-        return True
+        assert True
         
     except Exception as e:
         print(f" Error testing model path resolution: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        raise AssertionError("Model path resolution test failed") from e
 
 if __name__ == '__main__':
     success = test_model_path_resolution()
