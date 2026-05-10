@@ -7,7 +7,6 @@ requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [{ name = "Aayush Gauba", email = "gauba.aayush@gmail.com" }]
 classifiers = [
-    "Development Status :: 4 - Beta",
     "Framework :: Django",
     "Framework :: Flask",
     "Framework :: FastAPI",
