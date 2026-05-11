@@ -6,6 +6,7 @@ from .blacklist_manager import BlacklistManager
 from .exemption_decorators import should_apply_middleware, get_path_rule_overrides
 from aiwaf.core.exemptions import get_path_rule_for_path as core_get_path_rule_for_path
 from aiwaf.core.block_responses import blocked_response, throttle_response
+from aiwaf.core.cache_backend import CacheBackendConfig, DictCacheBackend, make_cache_backend
 from aiwaf.core.rate_limit import (
     THROTTLE,
     FLOOD_BLOCK,
@@ -15,6 +16,7 @@ from aiwaf.core.rate_limit import (
 )
 
 _aiwaf_cache = {}
+_default_cache_backend = DictCacheBackend(_aiwaf_cache)
 
 class RateLimitMiddleware:
     def __init__(self, app=None):
@@ -23,8 +25,16 @@ class RateLimitMiddleware:
             self.init_app(app)
 
     def init_app(self, app):
+        if not getattr(app, "_aiwaf_rate_cache_backend", None):
+            app._aiwaf_rate_cache_backend = _resolve_rate_cache_backend(app)
         if not getattr(app, "_aiwaf_rate_cache_key", None):
-            app._aiwaf_rate_cache_key = f"{id(app)}:{time.time_ns()}"
+            # For shared backends (e.g., Redis), do not add a per-process salt;
+            # we want multiple workers to hit the same bucket.
+            backend = getattr(app, "_aiwaf_rate_cache_backend", _default_cache_backend)
+            if getattr(backend, "is_shared", False):
+                app._aiwaf_rate_cache_key = ""
+            else:
+                app._aiwaf_rate_cache_key = f"{id(app)}:{time.time_ns()}"
 
         @app.before_request
         def before_request():
@@ -46,7 +56,8 @@ class RateLimitMiddleware:
             key_mode = normalize_rate_key_mode(app.config.get("AIWAF_RATE_KEY_MODE", "ip_path"))
             key = build_rate_limit_key("ratelimit", ip, path, key_mode=key_mode, app_key=app_key)
             now = time.time()
-            timestamps = _aiwaf_cache.get(key, [])
+            cache_backend = getattr(app, "_aiwaf_rate_cache_backend", _default_cache_backend)
+            timestamps = cache_backend.get(key) or []
             window = app.config.get("AIWAF_RATE_WINDOW", 10)
             max_req = app.config.get("AIWAF_RATE_MAX", 20)
             flood = app.config.get("AIWAF_RATE_FLOOD", 40)
@@ -66,7 +77,7 @@ class RateLimitMiddleware:
                 max_requests=max_req,
                 flood_threshold=flood,
             )
-            _aiwaf_cache[key] = decision.timestamps
+            cache_backend.set(key, decision.timestamps, ttl_seconds=window)
 
             if decision.action == FLOOD_BLOCK:
                 BlacklistManager.block(
@@ -100,3 +111,17 @@ def _resolve_rate_limit_overrides(app, path):
         return best.get("RATE_LIMIT") or best.get("rate_limit") or {}
     except Exception:
         return {}
+
+
+def _resolve_rate_cache_backend(app):
+    backend = (app.config.get("AIWAF_RATE_CACHE_BACKEND") or "memory").strip().lower()
+    if backend == "memory":
+        return _default_cache_backend
+    if backend == "redis":
+        redis_url = app.config.get("AIWAF_REDIS_URL")
+        key_prefix = app.config.get("AIWAF_RATE_CACHE_KEY_PREFIX", "aiwaf:rate:")
+        try:
+            return make_cache_backend(CacheBackendConfig(backend="redis", redis_url=redis_url, key_prefix=key_prefix))
+        except Exception:
+            return _default_cache_backend
+    return _default_cache_backend

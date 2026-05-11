@@ -1,5 +1,7 @@
 {
-  "login": 2,
-  "profile": 10,
-  "evilzebra": 11
+  "login": 4,
+  "profile": 20,
+  "evilzebra": 24,
+  "nope": 1,
+  "shellupload": 1
 }

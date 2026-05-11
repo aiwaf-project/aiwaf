@@ -74,6 +74,12 @@ class AIWAFConfig:
                 'flood_threshold': 40,
                 'key_mode': 'ip_path',
                 'soft_block_blacklist': False,
+                # Cache backend for shared rate-limit buckets (FastAPI/Flask adapters).
+                # - memory: per-process (default)
+                # - redis: shared across workers (requires redis URL)
+                'cache_backend': 'memory',
+                'redis_url': None,
+                'cache_key_prefix': 'aiwaf:rate:',
                 'exempt_ips': [],
             },
             'ip_keyword_block': {
@@ -192,6 +198,9 @@ class AIWAFConfig:
             'AIWAF_RATE_WINDOW_SECONDS': ('rate_limiting', 'window_seconds', int),
             'AIWAF_RATE_KEY_MODE': ('rate_limiting', 'key_mode', str),
             'AIWAF_RATE_SOFT_BLOCK_BLACKLIST': ('rate_limiting', 'soft_block_blacklist', bool),
+            'AIWAF_RATE_CACHE_BACKEND': ('rate_limiting', 'cache_backend', str),
+            'AIWAF_RATE_CACHE_KEY_PREFIX': ('rate_limiting', 'cache_key_prefix', str),
+            'AIWAF_REDIS_URL': ('rate_limiting', 'redis_url', str),
             
             # Blacklist
             'AIWAF_BLACKLIST_DEFAULT_DURATION': ('blacklist', 'default_block_duration', int),

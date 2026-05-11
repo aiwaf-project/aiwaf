@@ -21,6 +21,7 @@ from aiwaf.fast.middleware import (
     RateLimitMiddleware,
     UUIDTamperMiddleware,
 )
+from aiwaf.core.cache_backend import CacheBackendConfig, make_cache_backend
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +198,19 @@ class AIWAF:
 
         if "rate_limiting" in enabled and self.config.is_enabled("rate_limiting"):
             rate_cfg = self.config.get_rate_limiting_config()
+            cache_backend = None
+            try:
+                backend_name = rate_cfg.get("cache_backend", "memory")
+                if str(backend_name).strip().lower() == "redis" and rate_cfg.get("redis_url"):
+                    cache_backend = make_cache_backend(
+                        CacheBackendConfig(
+                            backend="redis",
+                            redis_url=rate_cfg.get("redis_url"),
+                            key_prefix=rate_cfg.get("cache_key_prefix", "aiwaf:rate:"),
+                        )
+                    )
+            except Exception:
+                cache_backend = None
             self.app.add_middleware(
                 RateLimitMiddleware,
                 max_requests=rate_cfg.get("max_requests", 20),
@@ -205,6 +219,7 @@ class AIWAF:
                 key_mode=rate_cfg.get("key_mode", "ip_path"),
                 soft_block_blacklist=rate_cfg.get("soft_block_blacklist", False),
                 path_rules=path_rules,
+                cache_backend=cache_backend,
             )
 
         if "ip_keyword_block" in enabled and self.config.is_enabled("ip_keyword_block"):

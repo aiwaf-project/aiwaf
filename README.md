@@ -485,6 +485,44 @@ Rules are matched by path prefix, and the most specific matching rule applies.
 - For JSON APIs (Django): `JsonExceptionMiddleware` converts blocked JSON requests into JSON `403` payloads.
 - Rate limiting can emit `429` for soft throttling paths while still escalating repeated abuse to blacklist flow.
 
+### Rate Limiting Cache (Multi-worker)
+
+By default, Flask and FastAPI rate limiting uses an in-process cache (per worker). For multi-worker / multi-instance
+deployments, configure the rate limiter to use Redis so all workers share the same counters.
+
+**Flask**
+
+```python
+app.config["AIWAF_RATE_CACHE_BACKEND"] = "redis"
+app.config["AIWAF_REDIS_URL"] = "redis://localhost:6379/0"
+# Optional (defaults to "aiwaf:rate:")
+app.config["AIWAF_RATE_CACHE_KEY_PREFIX"] = "aiwaf:rate:"
+```
+
+**FastAPI**
+
+```python
+from aiwaf.fast import AIWAF
+
+AIWAF(
+    app,
+    rate_limiting={
+        "enabled": True,
+        "cache_backend": "redis",
+        "redis_url": "redis://localhost:6379/0",
+        "cache_key_prefix": "aiwaf:rate:",  # optional
+    },
+)
+```
+
+Environment variables (both adapters):
+
+```bash
+set AIWAF_RATE_CACHE_BACKEND=redis
+set AIWAF_REDIS_URL=redis://localhost:6379/0
+set AIWAF_RATE_CACHE_KEY_PREFIX=aiwaf:rate:
+```
+
 ### Logging and Training Data Sources
 
 AIWAF trainer can pull from:

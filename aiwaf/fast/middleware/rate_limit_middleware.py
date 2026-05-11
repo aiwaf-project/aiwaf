@@ -7,6 +7,12 @@ from fastapi.responses import JSONResponse
 from ..blacklist import BlacklistManager
 from ..decorators import get_path_rule_overrides, should_apply_middleware
 from ..utils import get_blacklist_extended_info, get_ip, is_exempt
+from ...core.cache_backend import (
+    CacheBackend,
+    CacheBackendConfig,
+    DictCacheBackend,
+    make_cache_backend,
+)
 from ...core.rate_limit import (
     THROTTLE,
     FLOOD_BLOCK,
@@ -16,7 +22,8 @@ from ...core.rate_limit import (
 )
 from ...core.block_responses import blocked_response, throttle_response
 
-_AIWAF_CACHE = {}
+_AIWAF_CACHE: dict = {}
+_DEFAULT_CACHE_BACKEND: CacheBackend = DictCacheBackend(_AIWAF_CACHE)
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -29,17 +36,78 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         path_rules=None,
         key_mode="ip_path",
         soft_block_blacklist=False,
+        cache_backend: CacheBackend | None = None,
     ):
         super().__init__(app)
         self.max_requests = max_requests
         self.window_seconds = window_seconds
         self.flood_threshold = flood_threshold
         self.path_rules = path_rules or []
-        self.app_key = f"{id(app)}:{time.time_ns()}"
         self.key_mode = normalize_rate_key_mode(key_mode)
         self.soft_block_blacklist = bool(soft_block_blacklist)
+        self.cache_backend = cache_backend
+        self._initial_app = app
+        # Initialize lazily (some Starlette stacks pass a wrapped app lacking `.state`).
+        self._init_from_app(app)
+
+    def _init_from_app(self, app):
+        if self.cache_backend is None:
+            self.cache_backend = self._resolve_cache_backend(app)
+        # For shared backends (e.g., Redis), do not add a per-process salt;
+        # we want multiple workers to hit the same bucket.
+        self.app_key = "" if getattr(self.cache_backend, "is_shared", False) else f"{id(app)}:{time.time_ns()}"
+
+    def _resolve_cache_backend(self, app) -> CacheBackend:
+        # Prefer app.state config when available (AIWAF runtime attaches it).
+        cfg = None
+        try:
+            state = getattr(app, "state", None)
+            cfg = getattr(state, "aiwaf_config", None)
+        except Exception:
+            cfg = None
+
+        backend = None
+        redis_url = None
+        key_prefix = "aiwaf:rate:"
+        if cfg is not None:
+            try:
+                backend = cfg.get("rate_limiting.cache_backend", None) or cfg.get("AIWAF_RATE_CACHE_BACKEND", None)
+                redis_url = cfg.get("rate_limiting.redis_url", None) or cfg.get("AIWAF_REDIS_URL", None)
+                key_prefix = cfg.get("rate_limiting.cache_key_prefix", key_prefix) or key_prefix
+            except Exception:
+                pass
+
+        if backend:
+            try:
+                return make_cache_backend(CacheBackendConfig(backend=str(backend), redis_url=redis_url, key_prefix=str(key_prefix)))
+            except Exception:
+                # Fall back to in-memory cache on config errors.
+                return _DEFAULT_CACHE_BACKEND
+
+        return _DEFAULT_CACHE_BACKEND
 
     async def dispatch(self, request, call_next):
+        # Ensure cache backend is resolved against the actual FastAPI app when possible.
+        try:
+            candidate_apps = []
+            req_app = getattr(request, "app", None)
+            if req_app is not None:
+                candidate_apps.append(req_app)
+            scope_app = request.scope.get("app") if hasattr(request, "scope") else None
+            if scope_app is not None:
+                candidate_apps.append(scope_app)
+
+            for candidate in candidate_apps:
+                state = getattr(candidate, "state", None)
+                cfg = getattr(state, "aiwaf_config", None) if state is not None else None
+                if cfg is None:
+                    continue
+                if self.cache_backend is None or self.cache_backend is _DEFAULT_CACHE_BACKEND:
+                    self._init_from_app(candidate)
+                    break
+        except Exception:
+            pass
+
         if not should_apply_middleware(request, "rate_limit", self.path_rules):
             return await call_next(request)
         if is_exempt(request):
@@ -49,7 +117,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         path = request.url.path or "unknown"
         key = build_rate_limit_key("ratelimit", ip, path, key_mode=self.key_mode, app_key=self.app_key)
         now = time.time()
-        timestamps = _AIWAF_CACHE.get(key, [])
+        timestamps = (self.cache_backend or _DEFAULT_CACHE_BACKEND).get(key) or []
 
         window = self.window_seconds
         max_req = self.max_requests
@@ -67,7 +135,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             max_requests=max_req,
             flood_threshold=flood,
         )
-        _AIWAF_CACHE[key] = decision.timestamps
+        (self.cache_backend or _DEFAULT_CACHE_BACKEND).set(key, decision.timestamps, ttl_seconds=window)
 
         if decision.action == FLOOD_BLOCK:
             BlacklistManager.block(ip, "Flood pattern", extended_request_info=get_blacklist_extended_info(request))
