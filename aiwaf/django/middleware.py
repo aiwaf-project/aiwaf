@@ -770,79 +770,47 @@ class AIAnomalyMiddleware(MiddlewareMixin):
         
         return any(malicious_indicators)
 
+    # Back-compat helpers (used by tests and older integrations)
     def _analyze_recent_behavior_python(self, recent_data):
-        recent_kw_hits = []
-        recent_404s = 0
-        recent_burst_counts = []
+        from aiwaf.core.anomaly import analyze_recent_behavior_python as core_analyze_recent_behavior_python
 
-        for entry_time, entry_path, entry_status, _ in recent_data:
-            entry_known_path = path_exists_in_django(entry_path)
-            entry_kw_hits = 0
-            if not entry_known_path and not is_exempt_path(entry_path):
-                entry_kw_hits = sum(1 for kw in STATIC_KW if kw in entry_path.lower())
-            recent_kw_hits.append(entry_kw_hits)
-
-            if entry_status == 404:
-                recent_404s += 1
-
-            entry_burst = sum(1 for (t, _, _, _) in recent_data if abs(entry_time - t) <= 10)
-            recent_burst_counts.append(entry_burst)
-
-        avg_kw_hits = sum(recent_kw_hits) / len(recent_kw_hits) if recent_kw_hits else 0
-        max_404s = recent_404s
-        avg_burst = sum(recent_burst_counts) / len(recent_burst_counts) if recent_burst_counts else 0
-        total_requests = len(recent_data)
-        from aiwaf.core.training_logic import is_scanning_path
-        scanning_404s = sum(
-            1 for (_, path, status, _) in recent_data if status == 404 and is_scanning_path(path)
+        stats = core_analyze_recent_behavior_python(
+            recent_data,
+            static_keywords=STATIC_KW,
+            path_exists=path_exists_in_django,
+            is_exempt_path=is_exempt_path,
         )
-        legitimate_404s = max_404s - scanning_404s
-
-        should_block = True
-        if max_404s == 0 and avg_kw_hits == 0 and scanning_404s == 0:
-            should_block = False
-        elif (
-            avg_kw_hits < 3
-            and scanning_404s < 5
-            and legitimate_404s < 20
-            and avg_burst < 25
-            and total_requests < 150
-        ):
-            should_block = False
-
         return {
-            "avg_kw_hits": avg_kw_hits,
-            "max_404s": max_404s,
-            "avg_burst": avg_burst,
-            "total_requests": total_requests,
-            "scanning_404s": scanning_404s,
-            "legitimate_404s": legitimate_404s,
-            "should_block": should_block,
+            "avg_kw_hits": stats.avg_kw_hits,
+            "max_404s": stats.max_404s,
+            "avg_burst": stats.avg_burst,
+            "total_requests": stats.total_requests,
+            "scanning_404s": stats.scanning_404s,
+            "legitimate_404s": stats.legitimate_404s,
+            "should_block": stats.should_block,
         }
 
     def _analyze_recent_behavior(self, recent_data):
         if not recent_data:
             return None
 
-        stats = None
         if getattr(settings, "AIWAF_USE_RUST", False) and rust_available():
             rust_payload = []
             for entry_time, entry_path, entry_status, _ in recent_data:
                 entry_known_path = path_exists_in_django(entry_path)
-                rust_payload.append({
-                    "path_lower": entry_path.lower(),
-                    "timestamp": entry_time,
-                    "status": int(entry_status),
-                    "kw_check": (not entry_known_path and not is_exempt_path(entry_path)),
-                })
+                rust_payload.append(
+                    {
+                        "path_lower": entry_path.lower(),
+                        "timestamp": entry_time,
+                        "status": int(entry_status),
+                        "kw_check": (not entry_known_path and not is_exempt_path(entry_path)),
+                    }
+                )
             rust_stats = rust_analyze_recent_behavior(rust_payload, STATIC_KW)
             if rust_stats:
-                stats = rust_stats
+                return rust_stats
 
-        if stats is None:
-            stats = self._analyze_recent_behavior_python(recent_data)
-
-        return stats
+        return self._analyze_recent_behavior_python(recent_data)
 
     def process_request(self, request):
         if is_middleware_disabled(request, self.__class__):
@@ -876,102 +844,56 @@ class AIAnomalyMiddleware(MiddlewareMixin):
         if is_ip_exempted(ip):
             return response
             
+        from aiwaf.core.anomaly import evaluate_anomaly as core_evaluate_anomaly
+
         now = time.time()
         key = f"aiwaf:{ip}"
         data = cache.get(key, [])
-        path_len = len(request.path)
-        
-        # Use the same scoring logic as trainer.py
-        known_path = path_exists_in_django(request.path)
-        kw_hits = 0
-        if not known_path and not is_exempt_path(request.path):
-            kw_hits = sum(1 for kw in STATIC_KW if kw in request.path.lower())
-
         resp_time = now - getattr(request, "_start_time", now)
-        status_code = str(response.status_code)
-        status_idx = STATUS_IDX.index(status_code) if status_code in STATUS_IDX else -1
-        burst_count = sum(1 for (t, _, _, _) in data if now - t <= 10)
-        total_404 = sum(1 for (_, _, st, _) in data if st == 404)
-        feats = [path_len, kw_hits, resp_time, status_idx, burst_count, total_404]
-        
-        # Only use AI model if it's available
-        if self.model is not None:
-            model_is_rust = is_rust_isolation_forest(self.model)
-            if model_is_rust:
-                prediction = self.model.predict([list(map(float, feats))])[0]
-            else:
-                if not NUMPY_AVAILABLE:
-                    prediction = None
-                else:
-                    X = np.array(feats, dtype=float).reshape(1, -1)
-                    prediction = self.model.predict(X)[0]
 
-            if prediction == -1:
-                # AI detected anomaly - but analyze patterns before blocking (like trainer.py)
-                
-                # Get recent behavior data for this IP to make intelligent blocking decision
-                recent_data = [d for d in data if now - d[0] <= 300]  # Last 5 minutes
-                stats = self._analyze_recent_behavior(recent_data)
+        legitimate_keywords = set()
+        if self.keyword_learning_enabled:
+            try:
+                from .trainer import get_legitimate_keywords
+                legitimate_keywords = set(get_legitimate_keywords() or set())
+            except Exception:
+                legitimate_keywords = set()
 
-                if stats and stats.get("should_block"):
-                    max_404s = stats.get("max_404s", 0)
-                    scanning_404s = stats.get("scanning_404s", 0)
-                    avg_kw_hits = stats.get("avg_kw_hits", 0)
-                    avg_burst = stats.get("avg_burst", 0)
-                    # Double-check exemption before blocking
-                    if not is_ip_exempted(ip):
-                        BlacklistManager.block(
-                            ip,
-                            f"AI anomaly + scanning 404s (total:{max_404s}, scanning:{scanning_404s}, kw:{avg_kw_hits:.1f}, burst:{avg_burst:.1f})",
-                            extended_request_info=_get_blacklist_extended_info(request),
-                        )
-                        # Check if actually blocked (exempted IPs won't be blocked)
-                        if BlacklistManager.is_blocked(ip):
-                            _raise_blocked(
-                                request,
-                                f"AI anomaly + scanning 404s (total:{max_404s}, scanning:{scanning_404s}, kw:{avg_kw_hits:.1f}, burst:{avg_burst:.1f})",
-                                status_code=403,
-                            )
-            elif prediction is not None:
-                # No recent data to analyze - be more conservative
-                # Only block on multiple suspicious indicators, not single 404
-                from aiwaf.core.training_logic import is_scanning_path
-                current_scanning = is_scanning_path(request.path)
-                
-                if kw_hits >= 3 and current_scanning:  # Require both high keywords AND scanning pattern
-                    # Double-check exemption before blocking
-                    if not is_ip_exempted(ip):
-                        BlacklistManager.block(
-                            ip,
-                            f"AI anomaly + scanning behavior (kw:{kw_hits}, scanning_path:{request.path})",
-                            extended_request_info=_get_blacklist_extended_info(request),
-                        )
-                        if BlacklistManager.is_blocked(ip):
-                            _raise_blocked(
-                                request,
-                                f"AI anomaly + scanning behavior (kw:{kw_hits}, scanning_path:{request.path})",
-                                status_code=403,
-                            )
+        outcome = core_evaluate_anomaly(
+            ip=ip,
+            path=request.path,
+            status_code=int(getattr(response, "status_code", 0) or 0),
+            response_time=float(resp_time),
+            now=float(now),
+            history=data,
+            window_seconds=float(self.WINDOW),
+            model=self.model,
+            static_keywords=STATIC_KW,
+            malicious_keywords=STATIC_KW,
+            keyword_learning_enabled=bool(self.keyword_learning_enabled),
+            path_exists=path_exists_in_django,
+            is_exempt_path=is_exempt_path,
+            is_malicious_context=lambda seg: self._is_malicious_context(request, seg),
+            status_index_values=STATUS_IDX,
+            legitimate_keywords=legitimate_keywords,
+        )
 
-        data.append((now, request.path, response.status_code, resp_time))
-        data = [d for d in data if now - d[0] < self.WINDOW]
-        cache.set(key, data, timeout=self.WINDOW)
-        
-        # Only learn keywords from 404 responses (not found) on non-existent paths
-        # This prevents learning from 403 (blocked IPs accessing legitimate paths) or other error codes
-        if (self.keyword_learning_enabled and response.status_code == 404 and
-            not known_path and not is_exempt_path(request.path)):
+        cache.set(key, outcome.updated_history, timeout=self.WINDOW)
+
+        if outcome.learned_keywords:
             keyword_store = get_keyword_store()
-            # Get legitimate keywords to avoid learning them
-            from .trainer import get_legitimate_keywords
-            legitimate_keywords = get_legitimate_keywords()
-            
-            for seg in re.split(r"\W+", request.path.lower()):
-                if (len(seg) > 3 and 
-                    seg not in STATIC_KW and  # Don't re-learn static keywords
-                    seg not in legitimate_keywords and  # Don't learn legitimate keywords
-                    self._is_malicious_context(request, seg)):  # Only learn in malicious context
-                    keyword_store.add_keyword(seg)
+            for seg in outcome.learned_keywords:
+                keyword_store.add_keyword(seg)
+
+        if outcome.block and outcome.reason:
+            if not is_ip_exempted(ip):
+                BlacklistManager.block(
+                    ip,
+                    outcome.reason,
+                    extended_request_info=_get_blacklist_extended_info(request),
+                )
+                if BlacklistManager.is_blocked(ip):
+                    _raise_blocked(request, outcome.reason, status_code=403)
 
         return response
 

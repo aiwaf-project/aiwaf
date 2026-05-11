@@ -13,6 +13,7 @@ from .utils import get_ip, is_exempt, is_path_exempt
 from .blacklist_manager import BlacklistManager
 from .exemption_decorators import should_apply_middleware
 from aiwaf.core import rust_backend
+from aiwaf.core.anomaly import evaluate_anomaly as core_evaluate_anomaly
 
 # Try to import numpy and ML dependencies
 try:
@@ -403,158 +404,47 @@ class AIAnomalyMiddleware:
         start_time = getattr(g, 'aiwaf_start_time', now)
         resp_time = now - start_time
         
-        # Get request cache for this IP
         key = f"aiwaf:{ip}"
         data = self.request_cache.get(key, [])
-        
-        # Calculate features for ML model
-        features = self._calculate_features(request, ip, resp_time)
-        
-        # Update status code index in features
-        status_code = str(response.status_code)
-        if status_code in STATUS_CODES:
-            features[3] = STATUS_CODES.index(status_code)
-        
-        # Only use AI model if it's available (NumPy required for sklearn, not for rust)
-        if self.model is not None and (self.model_is_rust or NUMPY_AVAILABLE):
-            try:
-                if self.model_is_rust:
-                    X = [list(map(float, features))]
-                else:
-                    X = np.array(features, dtype=float).reshape(1, -1)
 
-                if self.model.predict(X)[0] == -1:  # -1 indicates anomaly
-                    self.logger.info(f"AI detected anomaly for IP {ip}: {features}")
-                    
-                    # Analyze patterns before blocking (like Django implementation)
-                    recent_data = [d for d in data if now - d[0] <= 300]  # Last 5 minutes
-                    
-                    if recent_data:
-                        use_rust = (
-                            self.app.config.get("AIWAF_USE_RUST", False)
-                            and rust_backend.rust_available()
-                        )
-                        rust_result = None
-                        if use_rust:
-                            rust_entries = []
-                            for entry_time, entry_path, entry_status, entry_resp_time in recent_data:
-                                entry_known_path = self._route_exists(entry_path)
-                                kw_check = not entry_known_path and not is_path_exempt(entry_path)
-                                rust_entries.append({
-                                    "path_lower": entry_path.lower(),
-                                    "timestamp": float(entry_time),
-                                    "status": int(entry_status),
-                                    "kw_check": kw_check,
-                                })
-                            rust_result = rust_backend.analyze_recent_behavior(
-                                rust_entries,
-                                list(self.malicious_keywords),
-                            )
+        outcome = core_evaluate_anomaly(
+            ip=ip,
+            path=request.path,
+            status_code=int(getattr(response, "status_code", 0) or 0),
+            response_time=float(resp_time),
+            now=float(now),
+            history=data,
+            window_seconds=float(self.window_seconds),
+            model=self.model,
+            static_keywords=list(STATIC_KEYWORDS),
+            malicious_keywords=list(self.malicious_keywords),
+            keyword_learning_enabled=True,
+            path_exists=self._route_exists,
+            is_exempt_path=is_path_exempt,
+            is_malicious_context=lambda seg: self._is_malicious_context(request, seg),
+            status_index_values=STATUS_CODES,
+            legitimate_keywords=set(),
+        )
 
-                        if rust_result:
-                            avg_kw_hits = rust_result.get("avg_kw_hits", 0.0)
-                            max_404s = rust_result.get("max_404s", 0)
-                            avg_burst = rust_result.get("avg_burst", 0.0)
-                            total_requests = rust_result.get("total_requests", len(recent_data))
-                            scanning_404s = rust_result.get("scanning_404s", 0)
-                            legitimate_404s = rust_result.get("legitimate_404s", max_404s - scanning_404s)
-                            should_block = rust_result.get("should_block", False)
-                        else:
-                            # Calculate behavior metrics (Python fallback)
-                            recent_kw_hits = []
-                            recent_404s = 0
-                            recent_burst_counts = []
-                            scanning_404s = 0
-                            
-                            for entry_time, entry_path, entry_status, entry_resp_time in recent_data:
-                                # Calculate keyword hits for this entry
-                                entry_known_path = self._route_exists(entry_path)
-                                entry_kw_hits = 0
-                                if not entry_known_path and not is_path_exempt(entry_path):
-                                    entry_kw_hits = sum(1 for kw in self.malicious_keywords if kw in entry_path.lower())
-                                recent_kw_hits.append(entry_kw_hits)
-                                
-                                # Count 404s and scanning 404s
-                                if entry_status == 404:
-                                    recent_404s += 1
-                                    from aiwaf.core.training_logic import is_scanning_path
-                                    if is_scanning_path(entry_path):
-                                        scanning_404s += 1
-                                
-                                # Calculate burst for this entry
-                                entry_burst = sum(1 for (t, _, _, _) in recent_data if abs(entry_time - t) <= 10)
-                                recent_burst_counts.append(entry_burst)
-                            
-                            # Calculate averages and metrics
-                            avg_kw_hits = sum(recent_kw_hits) / len(recent_kw_hits) if recent_kw_hits else 0
-                            max_404s = recent_404s
-                            avg_burst = sum(recent_burst_counts) / len(recent_burst_counts) if recent_burst_counts else 0
-                            total_requests = len(recent_data)
-                            legitimate_404s = max_404s - scanning_404s
-                            
-                            # Enhanced blocking logic - don't block legitimate behavior
-                            should_block = not (
-                                avg_kw_hits < 3 and           # Allow some keyword hits
-                                scanning_404s < 5 and        # Focus on scanning 404s
-                                legitimate_404s < 20 and     # Allow legitimate 404s
-                                avg_burst < 25 and           # Allow higher burst
-                                total_requests < 150         # Allow more total requests
-                            )
+        self.request_cache[key] = outcome.updated_history
 
-                            # High burst alone is not enough to block if there are no signals of abuse
-                            if avg_kw_hits == 0 and max_404s == 0:
-                                should_block = False
-                        
-                        if should_block:
-                            reason = f"AI anomaly + scanning behavior (404s:{max_404s}, scanning:{scanning_404s}, kw:{avg_kw_hits:.1f}, burst:{avg_burst:.1f})"
-                            BlacklistManager.block(ip, reason)
-                            self.logger.warning(f"Blocked IP {ip}: {reason}")
-                            
-                            if BlacklistManager.is_blocked(ip):
-                                return jsonify({"error": "blocked"}), 403
-                    else:
-                        # No recent data - be more conservative
-                        from aiwaf.core.training_logic import is_scanning_path
-                        current_scanning = is_scanning_path(request.path)
-                        current_kw_hits = sum(1 for kw in self.malicious_keywords if kw in request.path.lower())
-                        
-                        if current_kw_hits >= 3 and current_scanning:
-                            reason = f"AI anomaly + scanning behavior (kw:{current_kw_hits}, scanning_path:{request.path})"
-                            BlacklistManager.block(ip, reason)
-                            self.logger.warning(f"Blocked IP {ip}: {reason}")
-                            
-                            if BlacklistManager.is_blocked(ip):
-                                return jsonify({"error": "blocked"}), 403
-                                
-            except Exception as e:
-                self.logger.error(f"Error in AI anomaly detection: {e}")
-        
-        # Update request cache
-        data.append((now, request.path, response.status_code, resp_time))
-        # Keep only recent data within the window
-        data = [d for d in data if now - d[0] < self.window_seconds]
-        self.request_cache[key] = data
-        
-        # Learn keywords from 404 responses on non-existent paths
-        if (response.status_code == 404 and 
-            not self._route_exists(request.path) and 
-            not is_path_exempt(request.path)):
-            
+        if outcome.learned_keywords:
             try:
                 from .storage import get_keyword_store
                 keyword_store = get_keyword_store()
-                
-                # Extract and learn potential malicious keywords
-                for seg in re.split(r"\W+", request.path.lower()):
-                    if (len(seg) > 3 and 
-                        seg not in self.malicious_keywords and
-                        self._is_malicious_context(request, seg)):
-                        keyword_store.add_keyword(seg)
-                        self.malicious_keywords.add(seg)  # Update local cache
-                        self.logger.info(f"Learned new malicious keyword: {seg}")
+                for seg in outcome.learned_keywords:
+                    keyword_store.add_keyword(seg)
+                    self.malicious_keywords.add(seg)
+                    self.logger.info(f"Learned new malicious keyword: {seg}")
             except Exception as e:
                 self.logger.error(f"Error learning keywords: {e}")
-        
+
+        if outcome.block and outcome.reason:
+            BlacklistManager.block(ip, outcome.reason)
+            self.logger.warning(f"Blocked IP {ip}: {outcome.reason}")
+            if BlacklistManager.is_blocked(ip):
+                return jsonify({"error": "blocked"}), 403
+
         return response
 
     def get_stats(self):
