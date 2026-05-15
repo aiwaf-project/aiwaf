@@ -895,6 +895,22 @@ class AIAnomalyMiddleware(MiddlewareMixin):
                 if BlacklistManager.is_blocked(ip):
                     _raise_blocked(request, outcome.reason, status_code=403)
 
+        # Persist request data for IsolationForest training (DC-205)
+        try:
+            from .models import RequestLog
+            RequestLog.objects.create(
+                ip_address=ip,
+                method=request.method,
+                path=request.path[:500],
+                status_code=int(getattr(response, "status_code", 0) or 0),
+                response_time=float(resp_time),
+                user_agent=request.META.get("HTTP_USER_AGENT", "")[:1000],
+                referer=request.META.get("HTTP_REFERER", "")[:500],
+                content_length=str(response.get("Content-Length", "-"))[:20],
+            )
+        except Exception:
+            pass  # Never let logging break the response
+
         return response
 
 
