@@ -31,19 +31,19 @@ def write_csv_log(csv_file: str, headers: list[str], row: dict) -> None:
 
 
 _LOG_RX_PATTERNS = [
-    # Combined log format with response time
+    # Combined log format with response time (IPv4 + IPv6)
     re.compile(
-        r'(\d+\.\d+\.\d+\.\d+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" '
+        r'(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" '
         r'(\d{3}).*?"(.*?)" "(.*?)".*?response-time=(\d+\.\d+)'
     ),
-    # Standard combined log format
+    # Standard combined log format (IPv4 + IPv6)
     re.compile(
-        r'(\d+\.\d+\.\d+\.\d+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" '
+        r'(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" '
         r'(\d{3}) (\d+) "(.*?)" "(.*?)"'
     ),
-    # Common log format
+    # Common log format (IPv4 + IPv6)
     re.compile(
-        r'(\d+\.\d+\.\d+\.\d+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" '
+        r'(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" '
         r'(\d{3}) (\d+)'
     ),
 ]
