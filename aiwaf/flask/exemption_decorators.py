@@ -14,6 +14,9 @@ from aiwaf.core.exemptions import (
 from aiwaf.core.route_plan import get_route_execution_plan
 
 
+_EMPTY_PATH_RULES = ()
+
+
 def aiwaf_exempt(func):
     """
     Decorator to exempt a Flask route from ALL AIWAF middleware protection.
@@ -414,9 +417,9 @@ def _get_path_rules():
         if rules is None:
             settings = current_app.config.get("AIWAF_SETTINGS", {})
             rules = settings.get("PATH_RULES")
-        return rules or []
+        return rules if rules is not None else _EMPTY_PATH_RULES
     except Exception:
-        return []
+        return _EMPTY_PATH_RULES
 
 
 def _normalize_middleware_name(name):

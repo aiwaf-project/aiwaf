@@ -12,6 +12,9 @@ from ..core.utils import ip_in_allowlist
 from ..core.request_context import extract_ip_from_django_request
 from ..core.logs import read_rotated_logs, parse_log_line as core_parse_log_line
 
+
+_EMPTY_PATH_RULES = ()
+
 def get_ip(request):
     return extract_ip_from_django_request(request)
 
@@ -70,7 +73,9 @@ def is_middleware_disabled(request, middleware_name):
 def _get_request_route_plan(request):
     path = getattr(request, "path", "")
     settings_block = getattr(settings, "AIWAF_SETTINGS", {}) or {}
-    rules = settings_block.get("PATH_RULES", []) or []
+    rules = settings_block.get("PATH_RULES")
+    if rules is None:
+        rules = _EMPTY_PATH_RULES
     policy_version = getattr(
         settings,
         "AIWAF_ROUTE_PLAN_VERSION",

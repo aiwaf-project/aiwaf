@@ -88,22 +88,27 @@ class RoutePolicyCache:
         if maxsize < 1:
             raise ValueError("maxsize must be positive")
         self.maxsize = maxsize
-        self._policies: OrderedDict[Any, CompiledRoutePolicy] = OrderedDict()
+        self._policies: OrderedDict[Any, tuple[Any, CompiledRoutePolicy]] = OrderedDict()
         self._tokens = count(1)
         self._lock = RLock()
 
     def get_or_compile(self, rules: Iterable[dict] | None, version: Any = None) -> CompiledRoutePolicy:
-        rules_tuple = tuple(rules or ())
-        key = (_freeze(rules_tuple), _freeze(version))
+        source = rules
+        if not rules:
+            source = None
+            key = ("empty", _freeze(version))
+        else:
+            key = (id(rules), _freeze(version))
 
         with self._lock:
             cached = self._policies.get(key)
-            if cached is not None:
+            if cached is not None and cached[0] is source:
                 self._policies.move_to_end(key)
-                return cached
+                return cached[1]
 
+            rules_tuple = tuple(rules or ())
             policy = _compile_route_policy(rules_tuple, next(self._tokens))
-            self._policies[key] = policy
+            self._policies[key] = (source, policy)
             self._policies.move_to_end(key)
             while len(self._policies) > self.maxsize:
                 self._policies.popitem(last=False)

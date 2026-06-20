@@ -20,6 +20,7 @@ ALL_MIDDLEWARES = {
     "uuid_tamper",
     "logging",
 }
+_EMPTY_PATH_RULES = ()
 
 
 def _mark_endpoint(func, *, fully_exempt: bool, exempt_middlewares: Set[str], required_middlewares: Optional[Set[str]] = None):
@@ -122,7 +123,7 @@ def should_apply_middleware(request, middleware_name: str, path_rules: Optional[
 def _get_request_route_plan(request, path_rules: Optional[Iterable[Dict[str, Any]]] = None):
     endpoint = _endpoint_from_request(request)
     path = getattr(request.url, "path", "")
-    rules = path_rules or []
+    rules = path_rules if path_rules is not None else _EMPTY_PATH_RULES
     app = (getattr(request, "scope", {}) or {}).get("app")
     app_state = getattr(app, "state", None)
     policy_version = getattr(app_state, "aiwaf_route_plan_version", 0)
