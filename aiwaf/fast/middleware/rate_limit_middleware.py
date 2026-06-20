@@ -47,6 +47,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.soft_block_blacklist = bool(soft_block_blacklist)
         self.cache_backend = cache_backend
         self._initial_app = app
+        self._runtime_bound = False
         # Initialize lazily (some Starlette stacks pass a wrapped app lacking `.state`).
         self._init_from_app(app)
 
@@ -102,8 +103,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 cfg = getattr(state, "aiwaf_config", None) if state is not None else None
                 if cfg is None:
                     continue
-                if self.cache_backend is None or self.cache_backend is _DEFAULT_CACHE_BACKEND:
+                if (not self._runtime_bound) and (self.cache_backend is None):
                     self._init_from_app(candidate)
+                    self._runtime_bound = True
                     break
         except Exception:
             pass

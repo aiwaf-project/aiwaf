@@ -8,12 +8,16 @@ and automatically blocks malicious IPs based on request characteristics.
 import re
 import time
 import logging
+import os
+from datetime import datetime, timezone
 from flask import request, jsonify, g, current_app
 from .utils import get_ip, is_exempt, is_path_exempt
 from .blacklist_manager import BlacklistManager
 from .exemption_decorators import should_apply_middleware
 from aiwaf.core import rust_backend
 from aiwaf.core.anomaly import evaluate_anomaly as core_evaluate_anomaly
+from aiwaf.core.logs import write_csv_log
+from aiwaf.core.model_security import is_trusted_model_path
 
 # Try to import numpy and ML dependencies
 try:
@@ -211,6 +215,16 @@ class AIAnomalyMiddleware:
         # Get model path - use package-relative path by default
         default_model_path = self._get_default_model_path()
         model_path = app.config.get('AIWAF_MODEL_PATH', default_model_path)
+        allow_custom_model_path = bool(app.config.get('AIWAF_ALLOW_CUSTOM_MODEL_PATH', False))
+
+        if not is_trusted_model_path(model_path, default_path=default_model_path, allow_custom=allow_custom_model_path):
+            self.logger.warning(
+                "Skipping untrusted AI model path %s; set AIWAF_ALLOW_CUSTOM_MODEL_PATH=True to override",
+                model_path,
+            )
+            self.model = None
+            self.model_is_rust = False
+            return
         
         if JOBLIB_AVAILABLE:
             try:
@@ -445,7 +459,44 @@ class AIAnomalyMiddleware:
             if BlacklistManager.is_blocked(ip):
                 return jsonify({"error": "blocked"}), 403
 
+        self._persist_training_log(ip, response, resp_time)
         return response
+
+    def _persist_training_log(self, ip, response, response_time):
+        """Persist fallback training logs when dedicated logger middleware is inactive."""
+        if self.app.config.get("AIWAF_MIDDLEWARE_LOGGING", False):
+            return
+        if self.app.config.get("AIWAF_ACCESS_LOG"):
+            return
+
+        log_dir = self.app.config.get("AIWAF_LOG_DIR", "logs")
+        csv_file = os.path.join(log_dir, "aiwaf_requests.csv")
+        headers = [
+            "timestamp",
+            "ip",
+            "method",
+            "path",
+            "status_code",
+            "content_length",
+            "response_time_ms",
+            "referer",
+            "user_agent",
+        ]
+        row = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "ip": ip,
+            "method": request.method,
+            "path": request.path[:500],
+            "status_code": int(getattr(response, "status_code", 0) or 0),
+            "content_length": response.headers.get("Content-Length", "-"),
+            "response_time_ms": int(float(response_time) * 1000),
+            "referer": request.headers.get("Referer", "")[:500],
+            "user_agent": request.headers.get("User-Agent", "")[:2000],
+        }
+        try:
+            write_csv_log(csv_file, headers, row)
+        except Exception:
+            pass
 
     def get_stats(self):
         """Get statistics about the anomaly detection middleware."""

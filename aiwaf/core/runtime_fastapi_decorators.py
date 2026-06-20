@@ -7,8 +7,8 @@ from typing import Any, Dict, Iterable, Optional, Set
 from aiwaf.core.exemptions import (
     get_path_rule_overrides_for_path as core_get_path_rule_overrides_for_path,
     is_middleware_disabled_for_path as core_is_middleware_disabled_for_path,
-    should_apply_middleware_for_path as core_should_apply_middleware_for_path,
 )
+from aiwaf.core.route_plan import get_route_execution_plan
 
 ALL_MIDDLEWARES = {
     "ip_keyword_block",
@@ -108,16 +108,24 @@ def get_path_rule_overrides(request, key: str, path_rules: Optional[Iterable[Dic
     """Fetch PATH_RULES override block for the request path."""
     if not path_rules:
         return {}
+    if str(key).upper() == "RATE_LIMIT":
+        return _get_request_route_plan(request, path_rules).get_rate_limit_overrides()
     path = getattr(request.url, "path", "")
     return core_get_path_rule_overrides_for_path(path, path_rules, key)
 
 
 def should_apply_middleware(request, middleware_name: str, path_rules: Optional[Iterable[Dict[str, Any]]] = None) -> bool:
     """Decide whether middleware should run for this request."""
-    middleware_name = (middleware_name or "").strip().lower()
+    return _get_request_route_plan(request, path_rules).should_apply(middleware_name)
+
+
+def _get_request_route_plan(request, path_rules: Optional[Iterable[Dict[str, Any]]] = None):
     endpoint = _endpoint_from_request(request)
     path = getattr(request.url, "path", "")
     rules = path_rules or []
+    app = (getattr(request, "scope", {}) or {}).get("app")
+    app_state = getattr(app, "state", None)
+    policy_version = getattr(app_state, "aiwaf_route_plan_version", 0)
 
     required = set()
     fully_exempt = False
@@ -127,11 +135,27 @@ def should_apply_middleware(request, middleware_name: str, path_rules: Optional[
         fully_exempt = bool(getattr(endpoint, "aiwaf_exempt", False) or getattr(endpoint, "_aiwaf_exempt", False))
         exempt_middlewares = getattr(endpoint, "_aiwaf_exempt_middlewares", set()) or set()
 
-    return core_should_apply_middleware_for_path(
+    request_key = (
+        path,
+        id(rules),
+        repr(policy_version),
+        fully_exempt,
+        frozenset(exempt_middlewares),
+        frozenset(required),
+    )
+    state = getattr(request, "state", None)
+    if state is not None and getattr(state, "_aiwaf_route_plan_key", None) == request_key:
+        return state._aiwaf_route_plan
+
+    plan = get_route_execution_plan(
         path,
         rules,
-        middleware_name,
+        policy_version=policy_version,
         fully_exempt=fully_exempt,
         exempt_middlewares=exempt_middlewares,
         required_middlewares=required,
     )
+    if state is not None:
+        state._aiwaf_route_plan_key = request_key
+        state._aiwaf_route_plan = plan
+    return plan

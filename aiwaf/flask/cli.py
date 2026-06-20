@@ -833,6 +833,13 @@ class AIWAFManager:
                     try:
                         # Use joblib instead of pickle (matches trainer save format)
                         import joblib
+                        from aiwaf.core.model_security import is_trusted_model_path
+                        from .trainer import get_default_model_path
+
+                        if not is_trusted_model_path(str(model_path), default_path=str(get_default_model_path())):
+                            print(" Model path is not trusted; refusing to load custom artifacts by default")
+                            return False
+
                         model_data = joblib.load(model_path)
                         
                         # Check for warnings

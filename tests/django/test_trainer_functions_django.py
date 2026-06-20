@@ -88,6 +88,15 @@ class TrainerFunctionsTestCase(AIWAFTestCase):
             self.assertIn('ip', result)
             self.assertIn('path', result)
             self.assertIn('status', result)
+
+    def test_parse_log_line_ipv6(self):
+        """IPv6 client addresses are parsed and kept for training."""
+        sample_log = '2001:db8::1 - - [10/Oct/2000:13:55:36 -0700] "GET /test-ipv6 HTTP/1.1" 200 2326 "-" "Mozilla/5.0" response-time=0.321'
+        result = self.trainer_module._parse(sample_log)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["ip"], "2001:db8::1")
+        self.assertEqual(result["path"], "/test-ipv6")
+        self.assertEqual(result["status"], "200")
     
     @patch('aiwaf.django.trainer._get_logs_from_model')
     def test_get_logs_from_model(self, mock_get_logs):

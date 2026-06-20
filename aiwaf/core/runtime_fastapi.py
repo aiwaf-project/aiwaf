@@ -95,6 +95,11 @@ class AIWAF:
         """
         self.app = app
         setattr(self.app.state, "aiwaf_config", self.config)
+        setattr(
+            self.app.state,
+            "aiwaf_route_plan_version",
+            self.config.get("route_plan_version", self.config.get("ROUTE_PLAN_VERSION", 0)),
+        )
         
         # Add middleware in reverse order (FastAPI adds them in reverse)
         self._add_middleware()

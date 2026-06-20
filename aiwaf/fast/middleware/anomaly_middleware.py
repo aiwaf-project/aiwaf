@@ -10,12 +10,15 @@ Uses the shared core anomaly engine (same decision flow as Django/Flask):
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.responses import JSONResponse
 
 from aiwaf.core.anomaly import HistoryEntry, evaluate_anomaly as core_evaluate_anomaly
+from aiwaf.core.logs import write_csv_log
 
 from ..blacklist import BlacklistManager
 from ..decorators import should_apply_middleware
@@ -158,4 +161,46 @@ class AIAnomalyMiddleware(BaseHTTPMiddleware):
             request.state.aiwaf_block_reason = outcome.reason
             return JSONResponse({"error": "blocked"}, status_code=403)
 
+        self._persist_training_log(request, response, ip, resp_time)
         return response
+
+    def _persist_training_log(self, request, response, ip: str, response_time: float) -> None:
+        """Persist fallback training logs when logging middleware is not active."""
+        middleware_names = [m.cls.__name__ for m in getattr(request.app, "user_middleware", [])]
+        if "AIWAFLoggingMiddleware" in middleware_names:
+            return
+        if getattr(request.app.state, "aiwaf_config", None) and request.app.state.aiwaf_config.get("AIWAF_ACCESS_LOG"):
+            return
+
+        log_dir = "aiwaf_logs"
+        cfg = getattr(request.app.state, "aiwaf_config", None)
+        if cfg is not None and hasattr(cfg, "get"):
+            log_dir = cfg.get("logging_middleware.log_dir", log_dir)
+
+        csv_file = Path(log_dir) / "aiwaf_requests.csv"
+        headers = [
+            "timestamp",
+            "ip",
+            "method",
+            "path",
+            "status_code",
+            "content_length",
+            "response_time_ms",
+            "referer",
+            "user_agent",
+        ]
+        row = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "ip": ip,
+            "method": request.method,
+            "path": request.url.path[:500],
+            "status_code": int(getattr(response, "status_code", 0) or 0),
+            "content_length": response.headers.get("content-length", "-"),
+            "response_time_ms": int(float(response_time) * 1000),
+            "referer": request.headers.get("referer", "")[:500],
+            "user_agent": request.headers.get("user-agent", "")[:2000],
+        }
+        try:
+            write_csv_log(str(csv_file), headers, row)
+        except Exception:
+            pass

@@ -478,6 +478,10 @@ AIWAF_SETTINGS = {
 ```
 
 Rules are matched by path prefix, and the most specific matching rule applies.
+Path rules are compiled and cached. If a running application mutates its rules
+in place, increment `AIWAF_ROUTE_PLAN_VERSION` (Flask/Django) or
+`route_plan_version` (FastAPI) so cached plans are rebuilt. Replacing the rules
+list with a new object recompiles it automatically.
 
 ### Blocking Behavior
 

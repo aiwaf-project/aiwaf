@@ -1,7 +1,10 @@
 import io
 import logging
+from pathlib import Path
 from django.conf import settings
 from django.core.cache import cache
+
+from aiwaf.core.model_security import is_trusted_model_path
 
 try:
     import joblib
@@ -22,10 +25,12 @@ def _normalize_storage_mode(value):
     return value
 
 
-def _load_from_file(path):
+def _load_from_file(path, *, default_path=None, allow_custom=False):
     if not JOBLIB_AVAILABLE:
         return None
     if not path:
+        return None
+    if not is_trusted_model_path(path, default_path=default_path, allow_custom=allow_custom):
         return None
     return joblib.load(path)
 
@@ -48,6 +53,8 @@ def load_model_data():
     storage_mode = _normalize_storage_mode(getattr(settings, "AIWAF_MODEL_STORAGE", "file"))
     model_path = getattr(settings, "AIWAF_MODEL_PATH", None)
     fallback = getattr(settings, "AIWAF_MODEL_STORAGE_FALLBACK", True)
+    allow_custom = getattr(settings, "AIWAF_ALLOW_CUSTOM_MODEL_PATH", False)
+    default_model_path = str(Path(__file__).with_name("resources") / "model.pkl")
 
     if storage_mode == "db":
         try:
@@ -61,7 +68,7 @@ def load_model_data():
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("AIWAF model DB load failed: %s", exc)
         if fallback:
-            return _load_from_file(model_path)
+            return _load_from_file(model_path, default_path=default_model_path, allow_custom=allow_custom)
         return None
 
     if storage_mode == "cache":
@@ -72,10 +79,10 @@ def load_model_data():
             if data is not None:
                 return data
         if fallback:
-            return _load_from_file(model_path)
+            return _load_from_file(model_path, default_path=default_model_path, allow_custom=allow_custom)
         return None
 
-    return _load_from_file(model_path)
+    return _load_from_file(model_path, default_path=default_model_path, allow_custom=allow_custom)
 
 
 def save_model_data(model_data, metadata=None):

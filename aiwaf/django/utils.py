@@ -4,11 +4,10 @@ from .storage import get_exemption_store, get_path_exemption_store
 from ..core.defaults import DEFAULT_EXEMPT_PATHS_DJANGO
 from ..core.exemptions import (
     get_path_rule_for_path as core_get_path_rule_for_path,
-    get_path_rule_overrides_for_path as core_get_path_rule_overrides_for_path,
-    should_apply_middleware_for_path as core_should_apply_middleware_for_path,
     is_path_exempt as core_is_path_exempt,
     normalize_paths as core_normalize_paths,
 )
+from ..core.route_plan import get_route_execution_plan
 from ..core.utils import ip_in_allowlist
 from ..core.request_context import extract_ip_from_django_request
 from ..core.logs import read_rotated_logs, parse_log_line as core_parse_log_line
@@ -65,26 +64,46 @@ def get_path_rule_for_path(path):
 
 def is_middleware_disabled(request, middleware_name):
     """Check if middleware should be skipped for this request."""
+    return not _get_request_route_plan(request).should_apply(middleware_name)
+
+
+def _get_request_route_plan(request):
     path = getattr(request, "path", "")
     settings_block = getattr(settings, "AIWAF_SETTINGS", {}) or {}
     rules = settings_block.get("PATH_RULES", []) or []
+    policy_version = getattr(
+        settings,
+        "AIWAF_ROUTE_PLAN_VERSION",
+        settings_block.get("ROUTE_PLAN_VERSION", 0),
+    )
     fully_exempt, exempt_middlewares, required_middlewares = _get_view_exemption_data(request)
-    return not core_should_apply_middleware_for_path(
+    request_key = (
+        path,
+        id(rules),
+        repr(policy_version),
+        fully_exempt,
+        frozenset(exempt_middlewares),
+        frozenset(required_middlewares),
+    )
+    if getattr(request, "_aiwaf_route_plan_key", None) == request_key:
+        return request._aiwaf_route_plan
+
+    plan = get_route_execution_plan(
         path,
         rules,
-        middleware_name,
+        policy_version=policy_version,
         fully_exempt=fully_exempt,
         exempt_middlewares=exempt_middlewares,
         required_middlewares=required_middlewares,
     )
+    request._aiwaf_route_plan_key = request_key
+    request._aiwaf_route_plan = plan
+    return plan
 
 
 def get_rate_limit_overrides(request):
     """Return rate limit overrides from PATH_RULES for this request."""
-    path = getattr(request, "path", "")
-    settings_block = getattr(settings, "AIWAF_SETTINGS", {}) or {}
-    rules = settings_block.get("PATH_RULES", []) or []
-    return core_get_path_rule_overrides_for_path(path, rules, "RATE_LIMIT")
+    return _get_request_route_plan(request).get_rate_limit_overrides()
 
 
 def _get_view_exemption_data(request):

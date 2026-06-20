@@ -2,6 +2,8 @@ from django.core.management.base import BaseCommand
 import os
 import warnings
 
+from aiwaf.core.model_security import is_trusted_model_path
+
 class Command(BaseCommand):
     help = 'Regenerate AI-WAF model with current scikit-learn version'
 
@@ -40,6 +42,14 @@ class Command(BaseCommand):
             # Try to load and check version
             try:
                 import joblib
+                from aiwaf.django import trainer as django_trainer
+
+                default_model_path = os.path.join(os.path.dirname(django_trainer.__file__), "resources", "model.pkl")
+                if not is_trusted_model_path(MODEL_PATH, default_path=default_model_path):
+                    self.stdout.write(self.style.WARNING("  Refusing to load untrusted model path by default"))
+                    self.stdout.write("  Set AIWAF_ALLOW_CUSTOM_MODEL_PATH=True to override")
+                    return
+
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.base")
                     model_data = joblib.load(MODEL_PATH)

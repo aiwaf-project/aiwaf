@@ -10,8 +10,8 @@ from aiwaf.core.exemptions import (
     get_path_rule_overrides_for_path as core_get_path_rule_overrides_for_path,
     is_middleware_disabled_for_path as core_is_middleware_disabled_for_path,
     normalize_middleware_name as core_normalize_middleware_name,
-    should_apply_middleware_for_path as core_should_apply_middleware_for_path,
 )
+from aiwaf.core.route_plan import get_route_execution_plan
 
 
 def aiwaf_exempt(func):
@@ -270,12 +270,17 @@ def should_apply_middleware(middleware_name):
         3. If middleware is in exemption list, don't apply (unless required)
         4. Otherwise, apply middleware
     """
+    plan = _get_request_route_plan()
+    return plan.should_apply(middleware_name)
+
+
+def _get_request_route_plan():
     path = ""
     rules = _get_path_rules()
+    policy_version = current_app.config.get("AIWAF_ROUTE_PLAN_VERSION", 0)
     fully_exempt = False
     exempt_middlewares = set()
     required_middlewares = set()
-    target = _normalize_middleware_name(middleware_name)
     try:
         path = request.path or ""
         endpoint = request.endpoint
@@ -293,14 +298,28 @@ def should_apply_middleware(middleware_name):
     exempt_middlewares.update(getattr(g, "aiwaf_exempt_middlewares", set()) or set())
     required_middlewares.update(getattr(g, "aiwaf_required_middlewares", set()) or set())
 
-    return core_should_apply_middleware_for_path(
+    request_key = (
+        path,
+        id(rules),
+        repr(policy_version),
+        fully_exempt,
+        frozenset(exempt_middlewares),
+        frozenset(required_middlewares),
+    )
+    if getattr(g, "_aiwaf_route_plan_key", None) == request_key:
+        return g._aiwaf_route_plan
+
+    plan = get_route_execution_plan(
         path,
         rules,
-        target,
+        policy_version=policy_version,
         fully_exempt=fully_exempt,
         exempt_middlewares=exempt_middlewares,
         required_middlewares=required_middlewares,
     )
+    g._aiwaf_route_plan_key = request_key
+    g._aiwaf_route_plan = plan
+    return plan
 
 
 def _check_route_exemption(middleware_name):
@@ -380,6 +399,8 @@ def get_path_rule_for_request():
 def get_path_rule_overrides(section_key):
     """Return override dict for a section (e.g., RATE_LIMIT) for the current path."""
     try:
+        if str(section_key).upper() == "RATE_LIMIT":
+            return _get_request_route_plan().get_rate_limit_overrides()
         path = request.path or ""
         rules = _get_path_rules()
         return core_get_path_rule_overrides_for_path(path, rules, section_key)
