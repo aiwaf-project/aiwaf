@@ -89,6 +89,7 @@ import aiwaf.fast as aiwaf
 - **AI anomaly detection**
   - IsolationForest-based behavioral detection
   - model training updates as traffic grows
+  - persisted runtime models use JSON-only artifacts; Rust `IsolationForest` is the supported saved-model backend
 
 - **Dynamic keyword learning**
   - learns suspicious path terms from attack-like traffic
@@ -185,6 +186,13 @@ Thresholds:
 
 Daily retraining is recommended for active internet-facing workloads.
 
+Model persistence is intentionally JSON-only. AIWAF does not load Python object
+model artifacts (`pickle`, `joblib`, or `skops`) because those formats can
+execute code during deserialization. Scikit-learn models may be used during a
+training run for immediate analysis, but they are not persisted. To persist and
+reload runtime AI models, enable the Rust backend so `aiwaf_rust.IsolationForest`
+can save/load JSON state.
+
 ---
 
 ## Configuration (`AIWAF_*`)
@@ -238,6 +246,9 @@ AIWAF_MODEL_CACHE_TIMEOUT = None
 AIWAF_MODEL_STORAGE_FALLBACK = True
 ```
 
+Only JSON-serializable model artifacts are saved. Python object model artifacts
+are rejected by design.
+
 Header controls:
 
 ```python
@@ -260,9 +271,12 @@ Rust acceleration:
 
 ```python
 AIWAF_USE_RUST = False
+AIWAF_RUST_ISOLATION_FOREST = True
 ```
 
 When enabled, AIWAF attempts Rust-backed helpers and falls back to Python automatically.
+Persisted AI model loading requires a JSON artifact; the Rust `IsolationForest`
+backend provides the supported JSON model state.
 
 Legacy compatibility:
 - if you still use nested `AIWAF_SETTINGS`, AIWAF maps common keys into flat `AIWAF_*` values at startup.
@@ -626,6 +640,7 @@ Then tune:
 - verify log path and permissions
 - check volume vs `AIWAF_MIN_AI_LOGS` / `AIWAF_MIN_TRAIN_LOGS`
 - use `AIWAF_FORCE_AI_TRAINING=True` only when appropriate
+- for persisted runtime ML inference, enable `AIWAF_USE_RUST=True` so training can produce a JSON model artifact
 
 ### Geo-blocking not active
 
@@ -696,9 +711,9 @@ If any blocking stage denies request:
 - can cache lookups for performance
 
 `AIAnomalyMiddleware`:
-- requires model load + thresholds
+- uses a persisted JSON model when available, otherwise falls back to heuristic/keyword anomaly behavior
 - gracefully disables itself when model/deps are unavailable
-- can run Python path or Rust-assisted path depending on config/runtime
+- persisted ML inference requires the Rust JSON model backend; scikit-learn is training-time only
 
 `HoneypotTimingMiddleware`:
 - enforces minimum submit timing
@@ -754,6 +769,9 @@ AIWAF_MODEL_CACHE_KEY = "aiwaf:model"
 AIWAF_MODEL_CACHE_TIMEOUT = None
 AIWAF_MODEL_STORAGE_FALLBACK = True
 ```
+
+Do not point `AIWAF_MODEL_PATH` at `pickle`, `joblib`, or `skops` artifacts.
+AIWAF loads JSON artifacts only.
 
 Keyword and false-positive controls:
 
@@ -828,10 +846,11 @@ Many `403` immediately after one blocked request:
 - avoid disabling all middleware globally
 
 AI anomaly not active:
-- verify model is loadable
+- verify model is a JSON artifact
 - verify AI deps are installed
 - verify `AIWAF_DISABLE_AI=False`
 - verify thresholds (`AIWAF_MIN_AI_LOGS`, `AIWAF_MIN_TRAIN_LOGS`)
+- enable `AIWAF_USE_RUST=True` if you need a persisted runtime ML model
 
 Geo-blocking appears inactive:
 - confirm middleware enabled
@@ -942,6 +961,11 @@ Yes, use `AIWAF_SETTINGS["PATH_RULES"]` with `DISABLE` for that prefix.
 
 **Does Rust mode change detection outcomes?**  
 It should preserve behavior while improving some execution paths; verify with A/B multi-iteration benchmarks.
+
+**Why is model persistence JSON-only?**  
+AIWAF is security middleware, so it avoids Python object deserialization formats
+such as `pickle`, `joblib`, and `skops`. Persisted AI models should use the Rust
+`IsolationForest` JSON state path.
 
 **Do I need Django to use AIWAF?**  
 No. Core supports both Django and Flask adapters, but some operational commands are Django-specific.
