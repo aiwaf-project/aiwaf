@@ -4,7 +4,7 @@ WORKDIR /workspace
 COPY . /workspace
 
 RUN pip install --no-cache-dir -e . --no-deps \
-  && pip install --no-cache-dir flask>=2.3 requests numpy scikit-learn skops aiwaf-rust
+  && pip install --no-cache-dir flask>=2.3 requests numpy scikit-learn aiwaf-rust
 
 WORKDIR /workspace/examples/sandbox/aiwaf-flask-proxy
 

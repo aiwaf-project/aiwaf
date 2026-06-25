@@ -52,7 +52,7 @@ def test_model_loading():
             status = middleware.get_status()
             print("\n Middleware Status:")
             print(f"   Model loaded: {status['model_loaded']}")
-            print(f"   Skops available: {status.get('skops_available', 'unknown')}")
+            print(f"   JSON model artifacts: {status.get('json_model_artifacts', 'unknown')}")
             print(f"   NumPy available: {status['numpy_available']}")
             
         except Exception as e:

@@ -58,7 +58,7 @@ def load_model_data():
     model_path = getattr(settings, "AIWAF_MODEL_PATH", None)
     fallback = getattr(settings, "AIWAF_MODEL_STORAGE_FALLBACK", True)
     allow_custom = getattr(settings, "AIWAF_ALLOW_CUSTOM_MODEL_PATH", False)
-    default_model_path = str(Path(__file__).with_name("resources") / "model.skops")
+    default_model_path = str(Path(__file__).with_name("resources") / "model.json")
 
     if storage_mode == "db":
         try:

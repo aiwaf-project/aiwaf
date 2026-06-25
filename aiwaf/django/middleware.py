@@ -90,7 +90,7 @@ apply_legacy_settings()
 MODEL_PATH = getattr(
     settings,
     "AIWAF_MODEL_PATH",
-    os.path.join(os.path.dirname(__file__), "resources", "model.skops")
+    os.path.join(os.path.dirname(__file__), "resources", "model.json")
 )
 
 logger = logging.getLogger("aiwaf.django.middleware")

@@ -4,7 +4,7 @@ WORKDIR /workspace
 COPY . /workspace
 
 RUN pip install --no-cache-dir -e . --no-deps \
-  && pip install --no-cache-dir fastapi starlette "uvicorn[standard]" httpx numpy scikit-learn skops aiwaf-rust
+  && pip install --no-cache-dir fastapi starlette "uvicorn[standard]" httpx numpy scikit-learn aiwaf-rust
 
 WORKDIR /workspace/examples/sandbox/aiwaf-fastapi-proxy
 

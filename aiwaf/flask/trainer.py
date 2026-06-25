@@ -54,7 +54,7 @@ from aiwaf.core.training_features import (
     python_features_batched as core_python_features_batched,
 )
 from aiwaf.core.model_artifacts import rust_model_artifact, sklearn_model_artifact
-from aiwaf.core.model_serialization import dump_model_artifact, safe_model_serialization_available
+from aiwaf.core.model_serialization import dump_model_artifact
 from aiwaf.core.rust_backend import (
     rust_available,
     rust_isolation_forest_available,
@@ -82,7 +82,7 @@ def get_default_model_path():
     # Ensure resources directory exists
     resources_dir.mkdir(exist_ok=True)
     
-    return str(resources_dir / 'model.skops')
+    return str(resources_dir / 'model.json')
 
 DEFAULT_MODEL_PATH = get_default_model_path()
 
@@ -586,10 +586,6 @@ class FlaskAITrainer:
                     and rust_isolation_forest_available()
                     and self.get_config("AIWAF_RUST_ISOLATION_FOREST", True)
                 )
-                if not use_rust_iforest and not safe_model_serialization_available():
-                    logger.info("  skops not available; cannot save sklearn IsolationForest safely")
-                    return
-
                 if use_rust_iforest:
                     model_cls = get_isolation_forest_class()
                     model = model_cls(
@@ -627,8 +623,7 @@ class FlaskAITrainer:
                         len(X),
                         "flask",
                     )
-                    dump_model_artifact(model_data, model_path)
-                    logger.info(f" Model saved: {model_path}")
+                    logger.info(" Sklearn model trained but not persisted; only JSON-safe Rust model artifacts are saved")
                     logger.info(f" Trained on {len(X)} samples with scikit-learn v{sklearn.__version__}")
                 
                 # Check for anomalies and intelligently decide which IPs to block

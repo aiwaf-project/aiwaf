@@ -14,27 +14,33 @@ def test_model_artifact_contains_backend_metadata():
     assert artifact["framework"] == "fastapi"
 
 
-def test_fastapi_sklearn_model_artifact_roundtrips_with_skops(tmp_path):
-    pytest.importorskip("skops")
-    sklearn = pytest.importorskip("sklearn")
-    from sklearn.ensemble import IsolationForest
-
-    samples = [[0.0, 0.0], [0.1, 0.2], [10.0, 10.0], [0.2, 0.1]]
-    model = IsolationForest(contamination=0.25, random_state=42)
-    model.fit(samples)
-    expected = list(model.predict(samples))
-    artifact = sklearn_model_artifact(
-        model,
-        sklearn.__version__,
-        ["f1", "f2"],
-        len(samples),
-        framework="fastapi",
-    )
-
-    model_path = tmp_path / "model.skops"
+def test_fastapi_json_model_artifact_roundtrips(tmp_path):
+    artifact = {
+        "model_type": "aiwaf_rust.IsolationForest",
+        "model_state": {"trees": [], "threshold": 0.0},
+        "model_backend": "aiwaf_rust",
+        "framework": "fastapi",
+    }
+    model_path = tmp_path / "model.json"
     dump_model_artifact(artifact, model_path)
     loaded = load_model_artifact(model_path)
 
-    assert loaded["model_backend"] == "sklearn"
+    assert loaded["model_backend"] == "aiwaf_rust"
     assert loaded["framework"] == "fastapi"
-    assert list(loaded["model"].predict(samples)) == expected
+    assert loaded["model_state"] == artifact["model_state"]
+
+
+def test_fastapi_rejects_python_object_model_artifact(tmp_path):
+    class UnsafeModelObject:
+        pass
+
+    artifact = sklearn_model_artifact(
+        UnsafeModelObject(),
+        "test",
+        ["f1"],
+        1,
+        framework="fastapi",
+    )
+
+    with pytest.raises(RuntimeError, match="JSON serializable"):
+        dump_model_artifact(artifact, tmp_path / "model.json")

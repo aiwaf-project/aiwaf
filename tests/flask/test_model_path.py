@@ -14,30 +14,26 @@ repo_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(repo_root))
 
 
-def test_flask_middleware_loads_sklearn_model_from_skops(tmp_path):
-    pytest.importorskip("skops")
-    sklearn = pytest.importorskip("sklearn")
-    from sklearn.ensemble import IsolationForest
-
+def test_flask_middleware_loads_json_model_artifact(tmp_path, monkeypatch):
     from flask import Flask
 
-    from aiwaf.core.model_artifacts import sklearn_model_artifact
     from aiwaf.core.model_serialization import dump_model_artifact
+    from aiwaf.core import rust_backend
     from aiwaf.flask.anomaly_middleware import AIAnomalyMiddleware
 
-    samples = [[0.0, 0.0], [0.1, 0.2], [10.0, 10.0], [0.2, 0.1]]
-    model = IsolationForest(contamination=0.25, random_state=42)
-    model.fit(samples)
-    expected = list(model.predict(samples))
-    artifact = sklearn_model_artifact(
-        model,
-        sklearn.__version__,
-        ["f1", "f2"],
-        len(samples),
-        "flask",
-    )
-    model_path = tmp_path / "model.skops"
+    class StubModel:
+        def predict(self, rows):
+            return [1 for _ in rows]
+
+    artifact = {
+        "model_type": "aiwaf_rust.IsolationForest",
+        "model_state": {"stub": True},
+        "model_backend": "aiwaf_rust",
+        "framework": "flask",
+    }
+    model_path = tmp_path / "model.json"
     dump_model_artifact(artifact, model_path)
+    monkeypatch.setattr(rust_backend, "rust_isolation_forest_from_json", lambda state: StubModel())
 
     app = Flask(__name__)
     app.config.update(
@@ -50,8 +46,8 @@ def test_flask_middleware_loads_sklearn_model_from_skops(tmp_path):
     middleware._load_model(app)
 
     assert middleware.model is not None
-    assert middleware.model_is_rust is False
-    assert list(middleware.model.predict(samples)) == expected
+    assert middleware.model_is_rust is True
+    assert middleware.model.predict([[1], [2]]) == [1, 1]
 
 def test_model_path_resolution():
     """Test that the model path resolves correctly"""
@@ -91,7 +87,7 @@ def test_model_path_resolution():
         
         # Check if it's in the package directory
         package_dir = Path(__file__).resolve().parents[2] / 'aiwaf' / 'flask'
-        expected_path = package_dir / 'resources' / 'model.skops'
+        expected_path = package_dir / 'resources' / 'model.json'
         print(f" Expected package path: {expected_path}")
         print(f" Package model exists: {expected_path.exists()}")
         

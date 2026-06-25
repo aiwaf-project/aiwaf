@@ -25,7 +25,7 @@ def test_model_path_simple():
             # Ensure resources directory exists
             resources_dir.mkdir(exist_ok=True)
             
-            return str(resources_dir / 'model.skops')
+            return str(resources_dir / 'model.json')
         
         # Test path resolution
         model_path = get_default_model_path()

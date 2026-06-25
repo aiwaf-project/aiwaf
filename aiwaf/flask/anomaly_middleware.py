@@ -18,7 +18,7 @@ from aiwaf.core import rust_backend
 from aiwaf.core.anomaly import evaluate_anomaly as core_evaluate_anomaly
 from aiwaf.core.logs import write_csv_log
 from aiwaf.core.model_security import is_trusted_model_path
-from aiwaf.core.model_serialization import load_model_artifact, safe_model_serialization_available
+from aiwaf.core.model_serialization import load_model_artifact
 
 # Try to import numpy and ML dependencies
 try:
@@ -95,7 +95,7 @@ class AIAnomalyMiddleware:
         # Ensure resources directory exists
         resources_dir.mkdir(exist_ok=True)
         
-        return str(resources_dir / 'model.skops')
+        return str(resources_dir / 'model.json')
 
     def _check_log_data_sufficiency(self, app):
         """Check if there's enough log data to justify AI model usage."""
@@ -225,11 +225,6 @@ class AIAnomalyMiddleware:
         except Exception as e:
             self.logger.error(f"Failed to load AI model: {e}")
             self.logger.info("AI anomaly detection will continue without ML model (keyword-based only)")
-            self.model = None
-            self.model_is_rust = False
-
-        if not safe_model_serialization_available() and not self.model_is_rust:
-            self.logger.warning("skops not available - sklearn AI anomaly model loading disabled")
             self.model = None
             self.model_is_rust = False
 
@@ -455,7 +450,7 @@ class AIAnomalyMiddleware:
         return {
             'model_loaded': self.model is not None,
             'numpy_available': NUMPY_AVAILABLE,
-            'skops_available': safe_model_serialization_available(),
+            'json_model_artifacts': True,
             'cached_ips': len(self.request_cache),
             'malicious_keywords': len(self.malicious_keywords),
             'window_seconds': self.window_seconds

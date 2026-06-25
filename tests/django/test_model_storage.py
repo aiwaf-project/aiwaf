@@ -1,6 +1,5 @@
 import sys
 import types
-import unittest
 from django.conf import settings
 from django.core.cache import cache
 from django.test import override_settings
@@ -9,26 +8,47 @@ from .base_test import AIWAFTestCase
 
 
 class TestModelStorage(AIWAFTestCase):
-    def test_cache_model_storage_roundtrips_sklearn_model_with_skops(self):
-        try:
-            from sklearn.ensemble import IsolationForest
-            import sklearn
-            import skops  # noqa: F401
-        except Exception as exc:
-            raise unittest.SkipTest(f"skops/sklearn unavailable: {exc}") from exc
-
-        from aiwaf.core.model_artifacts import sklearn_model_artifact
+    def test_cache_model_storage_roundtrips_json_model_artifact(self):
         from aiwaf.django.model_store import load_model_data, save_model_data
 
-        samples = [[0.0, 0.0], [0.1, 0.2], [10.0, 10.0], [0.2, 0.1]]
-        model = IsolationForest(contamination=0.25, random_state=42)
-        model.fit(samples)
-        expected = list(model.predict(samples))
+        model_data = {
+            "model_type": "aiwaf_rust.IsolationForest",
+            "model_state": {"trees": [], "threshold": 0.0},
+            "model_backend": "aiwaf_rust",
+            "framework": "django",
+        }
+
+        with override_settings(
+            CACHES={
+                "default": {
+                    "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+                    "LOCATION": "aiwaf-model-store-json",
+                }
+            },
+            AIWAF_MODEL_STORAGE="cache",
+            AIWAF_MODEL_CACHE_KEY="aiwaf:test:json-model",
+            AIWAF_MODEL_STORAGE_FALLBACK=False,
+        ):
+            cache.clear()
+            assert save_model_data(model_data, metadata={"source": "json-test"}) is True
+            loaded = load_model_data()
+
+        assert loaded["model_backend"] == "aiwaf_rust"
+        assert loaded["framework"] == "django"
+        assert loaded["model_state"] == model_data["model_state"]
+
+    def test_cache_model_storage_rejects_python_object_artifact(self):
+        from aiwaf.core.model_artifacts import sklearn_model_artifact
+        from aiwaf.django.model_store import save_model_data
+
+        class UnsafeModelObject:
+            pass
+
         model_data = sklearn_model_artifact(
-            model,
-            sklearn.__version__,
-            ["f1", "f2"],
-            len(samples),
+            UnsafeModelObject(),
+            "test",
+            ["f1"],
+            1,
             "django",
         )
 
@@ -36,20 +56,15 @@ class TestModelStorage(AIWAFTestCase):
             CACHES={
                 "default": {
                     "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-                    "LOCATION": "aiwaf-model-store-skops",
+                    "LOCATION": "aiwaf-model-store-reject",
                 }
             },
             AIWAF_MODEL_STORAGE="cache",
-            AIWAF_MODEL_CACHE_KEY="aiwaf:test:skops-model",
+            AIWAF_MODEL_CACHE_KEY="aiwaf:test:reject-model",
             AIWAF_MODEL_STORAGE_FALLBACK=False,
         ):
             cache.clear()
-            assert save_model_data(model_data, metadata={"source": "skops-test"}) is True
-            loaded = load_model_data()
-
-        assert loaded["model_backend"] == "sklearn"
-        assert loaded["framework"] == "django"
-        assert list(loaded["model"].predict(samples)) == expected
+            assert save_model_data(model_data, metadata={"source": "reject-test"}) is False
 
     @override_settings(
         CACHES={
@@ -104,4 +119,4 @@ class TestModelStorage(AIWAFTestCase):
 
         output = "\n".join(captured.output)
         assert "aiwaf_aimodelartifact" in output
-        assert "model.skops" not in output
+        assert "model.json" not in output

@@ -7,7 +7,7 @@ README_PATH = HERE / "README.md"
 
 setup(
     name="aiwaf",
-    version="0.1.9.7.7",
+    version="0.1.9.7.8",
     description="AI-driven, self-learning Web Application Firewall for Python web applications",
     long_description=README_PATH.read_text(encoding="utf-8") if README_PATH.exists() else "AIWAF",
     long_description_content_type="text/markdown",
@@ -20,7 +20,6 @@ setup(
         "numpy>=2.4.6",
         "pandas>=3.0.3",
         "scikit-learn>=1.9.0,<2.0",
-        "skops>=0.10.0",
         "geoip2>=5.2.0",
         "packaging>=26.2",
         "requests>=2.34.2",
@@ -46,8 +45,8 @@ setup(
     include_package_data=True,
     package_data={
         # include your pretrained model and any JSON resources
-        "aiwaf.django": ["resources/*.skops", "resources/*.json"],
-        "aiwaf.flask": ["resources/*.skops", "resources/*.json"],
+        "aiwaf.django": ["resources/*.json"],
+        "aiwaf.flask": ["resources/*.json"],
         "aiwaf.core": ["geolock/*.mmdb"],
     },
     entry_points={

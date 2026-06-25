@@ -42,7 +42,7 @@ from ..core.training_features import (
     python_feature_from_record as core_python_feature_from_record,
 )
 from ..core.model_artifacts import rust_model_artifact, sklearn_model_artifact
-from ..core.model_serialization import dump_model_artifact, safe_model_serialization_available
+from ..core.model_serialization import can_serialize_model_artifact, dump_model_artifact
 from ..core.training_logic import is_malicious_context as core_is_malicious_context
 from ..core.rust_backend import (
     rust_available,
@@ -60,7 +60,7 @@ logger = logging.getLogger("aiwaf.django.trainer")
 
 #  Configuration 
 LOG_PATH   = getattr(settings, 'AIWAF_ACCESS_LOG', None)
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "resources", "model.skops")
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "resources", "model.json")
 MIN_AI_LOGS = getattr(settings, "AIWAF_MIN_AI_LOGS", 10000)
 MIN_TRAIN_LOGS = getattr(settings, "AIWAF_MIN_TRAIN_LOGS", 50)
 
@@ -763,10 +763,7 @@ def train(disable_ai=False, force_ai=False) -> None:
         disable_ai = True
 
     if not disable_ai:
-        if not use_rust_ai and not safe_model_serialization_available():
-            logger.info("AI model training skipped - skops not available.")
-            disable_ai = True
-        elif not PANDAS_AVAILABLE:
+        if not PANDAS_AVAILABLE:
             logger.info("AI model training skipped - pandas not available.")
             disable_ai = True
         elif not SKLEARN_AVAILABLE and not use_rust_ai:
@@ -830,12 +827,12 @@ def train(disable_ai=False, force_ai=False) -> None:
                 logger.info(f"Model trained on {len(X)} samples")
             else:
                 fallback = getattr(settings, "AIWAF_MODEL_STORAGE_FALLBACK", True)
-                if fallback:
+                if fallback and can_serialize_model_artifact(model_data):
                     os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
                     dump_model_artifact(model_data, MODEL_PATH)
                     logger.info(f"Model trained on {len(X)} samples  {MODEL_PATH}")
                 else:
-                    logger.info("Model trained, but saving failed (storage fallback disabled).")
+                    logger.info("Model trained, but no safe JSON-serializable artifact was available to save.")
             if metadata.get("model_backend") == "aiwaf_rust":
                 logger.info("Created with aiwaf-rust IsolationForest backend")
             else:

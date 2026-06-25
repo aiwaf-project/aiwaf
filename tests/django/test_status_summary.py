@@ -78,7 +78,7 @@ def print_test_status():
     print(f"\n NEXT STEPS:")
     print("   1. Run working tests: python tests/run_working_tests.py")
     print("   2. Fix storage imports in remaining tests")
-    print("   3. Install missing dependencies (skops)")
+    print("   3. Enable aiwaf-rust for persisted JSON model artifacts")
     print("   4. Test middleware integration issues")
     print("   5. Achieve 100% test success rate")
 
