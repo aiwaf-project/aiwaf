@@ -1,17 +1,16 @@
-import io
 import logging
 from pathlib import Path
 from django.conf import settings
 from django.core.cache import cache
 
 from aiwaf.core.model_security import is_trusted_model_path
-
-try:
-    import joblib
-    JOBLIB_AVAILABLE = True
-except ImportError:
-    joblib = None
-    JOBLIB_AVAILABLE = False
+from aiwaf.core.model_serialization import (
+    can_serialize_model_artifact,
+    dump_model_artifact,
+    dumps_model_artifact,
+    load_model_artifact,
+    loads_model_artifact,
+)
 
 logger = logging.getLogger("aiwaf.django.model_store")
 
@@ -26,27 +25,32 @@ def _normalize_storage_mode(value):
 
 
 def _load_from_file(path, *, default_path=None, allow_custom=False):
-    if not JOBLIB_AVAILABLE:
-        return None
     if not path:
         return None
     if not is_trusted_model_path(path, default_path=default_path, allow_custom=allow_custom):
         return None
-    return joblib.load(path)
+    try:
+        return load_model_artifact(path)
+    except Exception:
+        return None
 
 
 def _dump_to_bytes(model_data):
-    if not JOBLIB_AVAILABLE:
+    if not can_serialize_model_artifact(model_data):
         return None
-    buffer = io.BytesIO()
-    joblib.dump(model_data, buffer)
-    return buffer.getvalue()
+    try:
+        return dumps_model_artifact(model_data)
+    except Exception:
+        return None
 
 
 def _load_from_bytes(raw):
-    if not JOBLIB_AVAILABLE or not raw:
+    if not raw:
         return None
-    return joblib.load(io.BytesIO(raw))
+    try:
+        return loads_model_artifact(raw)
+    except Exception:
+        return None
 
 
 def load_model_data():
@@ -54,7 +58,7 @@ def load_model_data():
     model_path = getattr(settings, "AIWAF_MODEL_PATH", None)
     fallback = getattr(settings, "AIWAF_MODEL_STORAGE_FALLBACK", True)
     allow_custom = getattr(settings, "AIWAF_ALLOW_CUSTOM_MODEL_PATH", False)
-    default_model_path = str(Path(__file__).with_name("resources") / "model.pkl")
+    default_model_path = str(Path(__file__).with_name("resources") / "model.skops")
 
     if storage_mode == "db":
         try:
@@ -90,10 +94,13 @@ def save_model_data(model_data, metadata=None):
     model_path = getattr(settings, "AIWAF_MODEL_PATH", None)
 
     if storage_mode == "file":
-        if not JOBLIB_AVAILABLE:
+        if not can_serialize_model_artifact(model_data):
             return False
-        joblib.dump(model_data, model_path)
-        return True
+        try:
+            dump_model_artifact(model_data, model_path)
+            return True
+        except Exception:
+            return False
 
     raw = _dump_to_bytes(model_data)
     if raw is None:

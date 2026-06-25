@@ -27,13 +27,6 @@ except ImportError:
     np = None
     NUMPY_AVAILABLE = False
 
-try:
-    import joblib
-    JOBLIB_AVAILABLE = True
-except ImportError:
-    joblib = None
-    JOBLIB_AVAILABLE = False
-
 from .geoip import lookup_country
 
 from .trainer import STATIC_KW, STATUS_IDX, path_exists_in_django
@@ -97,7 +90,7 @@ apply_legacy_settings()
 MODEL_PATH = getattr(
     settings,
     "AIWAF_MODEL_PATH",
-    os.path.join(os.path.dirname(__file__), "resources", "model.pkl")
+    os.path.join(os.path.dirname(__file__), "resources", "model.skops")
 )
 
 logger = logging.getLogger("aiwaf.django.middleware")
@@ -178,11 +171,6 @@ def load_model_safely():
     ai_disabled = getattr(settings, "AIWAF_DISABLE_AI", False)
     if ai_disabled:
         logger.info("AI functionality disabled via AIWAF_DISABLE_AI setting")
-        return None
-
-    # Check if required dependencies are available
-    if not JOBLIB_AVAILABLE:
-        logger.info("joblib not available, AI functionality disabled")
         return None
 
     try:

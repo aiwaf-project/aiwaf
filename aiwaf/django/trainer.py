@@ -5,12 +5,6 @@ import csv
 import re
 from itertools import chain
 from concurrent.futures import ThreadPoolExecutor
-try:
-    import joblib
-    JOBLIB_AVAILABLE = True
-except ImportError:
-    joblib = None
-    JOBLIB_AVAILABLE = False
 from datetime import datetime
 from collections import defaultdict, Counter
 import logging
@@ -48,6 +42,7 @@ from ..core.training_features import (
     python_feature_from_record as core_python_feature_from_record,
 )
 from ..core.model_artifacts import rust_model_artifact, sklearn_model_artifact
+from ..core.model_serialization import dump_model_artifact, safe_model_serialization_available
 from ..core.training_logic import is_malicious_context as core_is_malicious_context
 from ..core.rust_backend import (
     rust_available,
@@ -65,7 +60,7 @@ logger = logging.getLogger("aiwaf.django.trainer")
 
 #  Configuration 
 LOG_PATH   = getattr(settings, 'AIWAF_ACCESS_LOG', None)
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "resources", "model.pkl")
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "resources", "model.skops")
 MIN_AI_LOGS = getattr(settings, "AIWAF_MIN_AI_LOGS", 10000)
 MIN_TRAIN_LOGS = getattr(settings, "AIWAF_MIN_TRAIN_LOGS", 50)
 
@@ -768,8 +763,8 @@ def train(disable_ai=False, force_ai=False) -> None:
         disable_ai = True
 
     if not disable_ai:
-        if not JOBLIB_AVAILABLE:
-            logger.info("AI model training skipped - joblib not available.")
+        if not use_rust_ai and not safe_model_serialization_available():
+            logger.info("AI model training skipped - skops not available.")
             disable_ai = True
         elif not PANDAS_AVAILABLE:
             logger.info("AI model training skipped - pandas not available.")
@@ -837,7 +832,7 @@ def train(disable_ai=False, force_ai=False) -> None:
                 fallback = getattr(settings, "AIWAF_MODEL_STORAGE_FALLBACK", True)
                 if fallback:
                     os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
-                    joblib.dump(model_data, MODEL_PATH)
+                    dump_model_artifact(model_data, MODEL_PATH)
                     logger.info(f"Model trained on {len(X)} samples  {MODEL_PATH}")
                 else:
                     logger.info("Model trained, but saving failed (storage fallback disabled).")

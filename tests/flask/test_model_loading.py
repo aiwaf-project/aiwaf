@@ -52,8 +52,7 @@ def test_model_loading():
             status = middleware.get_status()
             print("\n Middleware Status:")
             print(f"   Model loaded: {status['model_loaded']}")
-            print(f"   Joblib available: {status.get('joblib_available', 'unknown')}")
-            print(f"   Pickle available: {status.get('pickle_available', 'unknown')}")
+            print(f"   Skops available: {status.get('skops_available', 'unknown')}")
             print(f"   NumPy available: {status['numpy_available']}")
             
         except Exception as e:

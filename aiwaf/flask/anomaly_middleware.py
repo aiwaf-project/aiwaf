@@ -18,6 +18,7 @@ from aiwaf.core import rust_backend
 from aiwaf.core.anomaly import evaluate_anomaly as core_evaluate_anomaly
 from aiwaf.core.logs import write_csv_log
 from aiwaf.core.model_security import is_trusted_model_path
+from aiwaf.core.model_serialization import load_model_artifact, safe_model_serialization_available
 
 # Try to import numpy and ML dependencies
 try:
@@ -26,21 +27,6 @@ try:
 except ImportError:
     NUMPY_AVAILABLE = False
     np = None
-
-# Try to import dependencies for model loading
-try:
-    import joblib
-    JOBLIB_AVAILABLE = True
-except ImportError:
-    JOBLIB_AVAILABLE = False
-    joblib = None
-
-try:
-    import pickle
-    PICKLE_AVAILABLE = True
-except ImportError:
-    PICKLE_AVAILABLE = False
-    pickle = None
 
 # Static malicious keywords (similar to Django implementation)
 STATIC_KEYWORDS = {
@@ -109,7 +95,7 @@ class AIAnomalyMiddleware:
         # Ensure resources directory exists
         resources_dir.mkdir(exist_ok=True)
         
-        return str(resources_dir / 'model.pkl')
+        return str(resources_dir / 'model.skops')
 
     def _check_log_data_sufficiency(self, app):
         """Check if there's enough log data to justify AI model usage."""
@@ -226,60 +212,26 @@ class AIAnomalyMiddleware:
             self.model_is_rust = False
             return
         
-        if JOBLIB_AVAILABLE:
-            try:
-                import os
-                import warnings
-                if os.path.exists(model_path):
-                    # Try joblib first (preferred format from trainer)
-                    try:
-                        with warnings.catch_warnings():
-                            warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
-                            model_data = joblib.load(model_path)
-                            _assign_model(model_data, "joblib")
-                    
-                    except Exception as joblib_error:
-                        # Fallback to pickle if joblib fails
-                        if PICKLE_AVAILABLE:
-                            self.logger.warning(f"Joblib failed, trying pickle fallback: {joblib_error}")
-                            with warnings.catch_warnings():
-                                warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
-                                with open(model_path, 'rb') as f:
-                                    model_data = pickle.load(f)
-                                _assign_model(model_data, "pickle")
-                        else:
-                            raise joblib_error
-                            
-                else:
-                    self.logger.warning(f"AI model not found at {model_path}")
-            except Exception as e:
-                self.logger.error(f"Failed to load AI model: {e}")
-                self.logger.info("AI anomaly detection will continue without ML model (keyword-based only)")
-                self.model = None
-                self.model_is_rust = False
-        else:
-            if not JOBLIB_AVAILABLE:
-                self.logger.warning("Joblib not available - trying pickle fallback")
-                if PICKLE_AVAILABLE:
-                    try:
-                        import os
-                        import warnings
-                        if os.path.exists(model_path):
-                            with warnings.catch_warnings():
-                                warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
-                                with open(model_path, 'rb') as f:
-                                    model_data = pickle.load(f)
-                                _assign_model(model_data, "pickle only")
-                        else:
-                            self.logger.warning(f"AI model not found at {model_path}")
-                    except Exception as e:
-                        self.logger.error(f"Failed to load AI model with pickle: {e}")
-                        self.model = None
-                        self.model_is_rust = False
-                else:
-                    self.logger.warning("Neither joblib nor pickle available - AI anomaly detection disabled")
-            if not NUMPY_AVAILABLE:
-                self.logger.warning("NumPy not available - AI anomaly detection disabled")
+        try:
+            import os
+            import warnings
+            if os.path.exists(model_path):
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
+                    model_data = load_model_artifact(model_path)
+                    _assign_model(model_data, "safe artifact")
+            else:
+                self.logger.warning(f"AI model not found at {model_path}")
+        except Exception as e:
+            self.logger.error(f"Failed to load AI model: {e}")
+            self.logger.info("AI anomaly detection will continue without ML model (keyword-based only)")
+            self.model = None
+            self.model_is_rust = False
+
+        if not safe_model_serialization_available() and not self.model_is_rust:
+            self.logger.warning("skops not available - sklearn AI anomaly model loading disabled")
+            self.model = None
+            self.model_is_rust = False
 
         if self.model is not None and not self.model_is_rust and not NUMPY_AVAILABLE:
             self.logger.warning("NumPy not available - disabling sklearn-based AI model")
@@ -503,8 +455,7 @@ class AIAnomalyMiddleware:
         return {
             'model_loaded': self.model is not None,
             'numpy_available': NUMPY_AVAILABLE,
-            'joblib_available': JOBLIB_AVAILABLE,
-            'pickle_available': PICKLE_AVAILABLE,
+            'skops_available': safe_model_serialization_available(),
             'cached_ips': len(self.request_cache),
             'malicious_keywords': len(self.malicious_keywords),
             'window_seconds': self.window_seconds

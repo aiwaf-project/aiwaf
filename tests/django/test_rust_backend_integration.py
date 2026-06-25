@@ -146,17 +146,14 @@ class RustBackendIntegrationTests(TestCase):
         state = forest.to_json()
 
         original_loader = mw.load_model_data
-        original_joblib = mw.JOBLIB_AVAILABLE
         try:
             mw.load_model_data = lambda: {
                 "model_backend": "aiwaf_rust",
                 "model_state": state,
             }
-            mw.JOBLIB_AVAILABLE = True
             model = mw.load_model_safely()
         finally:
             mw.load_model_data = original_loader
-            mw.JOBLIB_AVAILABLE = original_joblib
 
         self.assertIsNotNone(model)
         preds = model.predict(data)

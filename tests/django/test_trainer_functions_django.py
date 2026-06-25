@@ -165,7 +165,6 @@ class TrainerFunctionsTestCase(AIWAFTestCase):
              patch("aiwaf.django.trainer.MIN_TRAIN_LOGS", 1), \
              patch("aiwaf.django.trainer.MIN_AI_LOGS", 0), \
              patch("aiwaf.django.trainer.PANDAS_AVAILABLE", True), \
-             patch("aiwaf.django.trainer.JOBLIB_AVAILABLE", True), \
              patch("aiwaf.django.trainer.SKLEARN_AVAILABLE", False), \
              patch("aiwaf.django.trainer.rust_isolation_forest_available", return_value=True), \
              patch("aiwaf.django.trainer.rust_isolation_forest_class", return_value=StubRustIsolationForest), \

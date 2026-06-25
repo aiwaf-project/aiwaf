@@ -1,5 +1,6 @@
 import sys
 import types
+import unittest
 from django.conf import settings
 from django.core.cache import cache
 from django.test import override_settings
@@ -8,6 +9,48 @@ from .base_test import AIWAFTestCase
 
 
 class TestModelStorage(AIWAFTestCase):
+    def test_cache_model_storage_roundtrips_sklearn_model_with_skops(self):
+        try:
+            from sklearn.ensemble import IsolationForest
+            import sklearn
+            import skops  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"skops/sklearn unavailable: {exc}") from exc
+
+        from aiwaf.core.model_artifacts import sklearn_model_artifact
+        from aiwaf.django.model_store import load_model_data, save_model_data
+
+        samples = [[0.0, 0.0], [0.1, 0.2], [10.0, 10.0], [0.2, 0.1]]
+        model = IsolationForest(contamination=0.25, random_state=42)
+        model.fit(samples)
+        expected = list(model.predict(samples))
+        model_data = sklearn_model_artifact(
+            model,
+            sklearn.__version__,
+            ["f1", "f2"],
+            len(samples),
+            "django",
+        )
+
+        with override_settings(
+            CACHES={
+                "default": {
+                    "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+                    "LOCATION": "aiwaf-model-store-skops",
+                }
+            },
+            AIWAF_MODEL_STORAGE="cache",
+            AIWAF_MODEL_CACHE_KEY="aiwaf:test:skops-model",
+            AIWAF_MODEL_STORAGE_FALLBACK=False,
+        ):
+            cache.clear()
+            assert save_model_data(model_data, metadata={"source": "skops-test"}) is True
+            loaded = load_model_data()
+
+        assert loaded["model_backend"] == "sklearn"
+        assert loaded["framework"] == "django"
+        assert list(loaded["model"].predict(samples)) == expected
+
     @override_settings(
         CACHES={
             "default": {
@@ -55,11 +98,10 @@ class TestModelStorage(AIWAFTestCase):
         AIModelArtifact.objects.all().delete()
         if "sklearn" not in sys.modules:
             sys.modules["sklearn"] = types.SimpleNamespace(__version__="0.0")
-        middleware.JOBLIB_AVAILABLE = True
 
         with self.assertLogs("aiwaf.django.middleware", level="WARNING") as captured:
             middleware.load_model_safely()
 
         output = "\n".join(captured.output)
         assert "aiwaf_aimodelartifact" in output
-        assert "model.pkl" not in output
+        assert "model.skops" not in output

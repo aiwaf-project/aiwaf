@@ -41,10 +41,10 @@ class Command(BaseCommand):
             
             # Try to load and check version
             try:
-                import joblib
                 from aiwaf.django import trainer as django_trainer
+                from aiwaf.core.model_serialization import load_model_artifact
 
-                default_model_path = os.path.join(os.path.dirname(django_trainer.__file__), "resources", "model.pkl")
+                default_model_path = os.path.join(os.path.dirname(django_trainer.__file__), "resources", "model.skops")
                 if not is_trusted_model_path(MODEL_PATH, default_path=default_model_path):
                     self.stdout.write(self.style.WARNING("  Refusing to load untrusted model path by default"))
                     self.stdout.write("  Set AIWAF_ALLOW_CUSTOM_MODEL_PATH=True to override")
@@ -52,7 +52,7 @@ class Command(BaseCommand):
 
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.base")
-                    model_data = joblib.load(MODEL_PATH)
+                    model_data = load_model_artifact(MODEL_PATH)
                     
                 if isinstance(model_data, dict) and 'sklearn_version' in model_data:
                     stored_version = model_data['sklearn_version']

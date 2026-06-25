@@ -21,7 +21,7 @@ def test_ai_anomaly_middleware():
         'AIWAF_DATA_DIR': 'test_ai_data',
         'AIWAF_WINDOW_SECONDS': 30,  # Shorter window for testing
         'AIWAF_DYNAMIC_TOP_N': 5,
-        'AIWAF_MODEL_PATH': 'aiwaf/flask/resources/model.pkl',
+        'AIWAF_MODEL_PATH': 'aiwaf/flask/resources/model.skops',
         'TESTING': True
     })
     
@@ -111,7 +111,7 @@ def test_ai_anomaly_middleware():
     
     print("\\n AI Anomaly middleware test completed!")
     print("\\nNote: Actual blocking depends on:")
-    print("- ML model availability (model.pkl)")
+    print("- ML model availability (model.skops)")
     print("- NumPy installation")
     print("- Request pattern analysis")
     print("- Anomaly detection thresholds")

@@ -231,7 +231,7 @@ AIWAF_EXEMPT_PATHS = ["/favicon.ico", "/robots.txt", "/static/", "/health/"]
 Model storage:
 
 ```python
-AIWAF_MODEL_PATH = "aiwaf/resources/model.pkl"
+AIWAF_MODEL_PATH = "aiwaf/resources/model.skops"
 AIWAF_MODEL_STORAGE = "file"          # file | db | cache
 AIWAF_MODEL_CACHE_KEY = "aiwaf:model"
 AIWAF_MODEL_CACHE_TIMEOUT = None
@@ -749,7 +749,7 @@ Model storage:
 
 ```python
 AIWAF_MODEL_STORAGE = "file"      # file | db | cache
-AIWAF_MODEL_PATH = "aiwaf/resources/model.pkl"
+AIWAF_MODEL_PATH = "aiwaf/resources/model.skops"
 AIWAF_MODEL_CACHE_KEY = "aiwaf:model"
 AIWAF_MODEL_CACHE_TIMEOUT = None
 AIWAF_MODEL_STORAGE_FALLBACK = True

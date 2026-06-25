@@ -25,7 +25,7 @@ def test_model_path_simple():
             # Ensure resources directory exists
             resources_dir.mkdir(exist_ok=True)
             
-            return str(resources_dir / 'model.pkl')
+            return str(resources_dir / 'model.skops')
         
         # Test path resolution
         model_path = get_default_model_path()
@@ -43,20 +43,18 @@ def test_model_path_simple():
             
             # Try to peek at the model file
             try:
-                import pickle
-                with open(model_path, 'rb') as f:
-                    # Try to load just the first part to check format
-                    model_data = pickle.load(f)
-                    print(" Model file is valid pickle format!")
+                from aiwaf.core.model_serialization import load_model_artifact
+                model_data = load_model_artifact(model_path)
+                print(" Model file is a valid safe artifact!")
                     
-                    # Check if it's our expected format
-                    if isinstance(model_data, dict):
-                        print(" Model metadata found:")
-                        for key, value in model_data.items():
-                            if key != 'model':  # Don't print the actual model
-                                print(f"   {key}: {value}")
-                    else:
-                        print(" Model format: Direct model object")
+                # Check if it's our expected format
+                if isinstance(model_data, dict):
+                    print(" Model metadata found:")
+                    for key, value in model_data.items():
+                        if key != 'model':  # Don't print the actual model
+                            print(f"   {key}: {value}")
+                else:
+                    print(" Model format: Direct model object")
                         
             except Exception as e:
                 print(f"  Could not read model file: {e}")

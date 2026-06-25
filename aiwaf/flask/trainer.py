@@ -20,14 +20,10 @@ from typing import List, Dict, Optional, Set, Any
 # Try to import AI dependencies
 try:
     import pandas as pd
-    import joblib
     PANDAS_AVAILABLE = True
-    JOBLIB_AVAILABLE = True
 except ImportError:
     PANDAS_AVAILABLE = False
-    JOBLIB_AVAILABLE = False
     pd = None
-    joblib = None
 
 try:
     from sklearn.ensemble import IsolationForest
@@ -38,7 +34,7 @@ except ImportError:
     IsolationForest = None
     sklearn = None
 
-AI_AVAILABLE = PANDAS_AVAILABLE and JOBLIB_AVAILABLE
+AI_AVAILABLE = PANDAS_AVAILABLE
 
 # Flask imports
 from flask import Flask, current_app
@@ -58,6 +54,7 @@ from aiwaf.core.training_features import (
     python_features_batched as core_python_features_batched,
 )
 from aiwaf.core.model_artifacts import rust_model_artifact, sklearn_model_artifact
+from aiwaf.core.model_serialization import dump_model_artifact, safe_model_serialization_available
 from aiwaf.core.rust_backend import (
     rust_available,
     rust_isolation_forest_available,
@@ -85,7 +82,7 @@ def get_default_model_path():
     # Ensure resources directory exists
     resources_dir.mkdir(exist_ok=True)
     
-    return str(resources_dir / 'model.pkl')
+    return str(resources_dir / 'model.skops')
 
 DEFAULT_MODEL_PATH = get_default_model_path()
 
@@ -589,6 +586,9 @@ class FlaskAITrainer:
                     and rust_isolation_forest_available()
                     and self.get_config("AIWAF_RUST_ISOLATION_FOREST", True)
                 )
+                if not use_rust_iforest and not safe_model_serialization_available():
+                    logger.info("  skops not available; cannot save sklearn IsolationForest safely")
+                    return
 
                 if use_rust_iforest:
                     model_cls = get_isolation_forest_class()
@@ -616,7 +616,7 @@ class FlaskAITrainer:
                 # Save model with metadata
                 if use_rust_iforest:
                     model_data = rust_model_artifact(model, feature_cols, len(X), "flask")
-                    joblib.dump(model_data, model_path)
+                    dump_model_artifact(model_data, model_path)
                     logger.info(f" Model saved: {model_path}")
                     logger.info(f" Trained on {len(X)} samples with aiwaf-rust IsolationForest")
                 else:
@@ -627,7 +627,7 @@ class FlaskAITrainer:
                         len(X),
                         "flask",
                     )
-                    joblib.dump(model_data, model_path)
+                    dump_model_artifact(model_data, model_path)
                     logger.info(f" Model saved: {model_path}")
                     logger.info(f" Trained on {len(X)} samples with scikit-learn v{sklearn.__version__}")
                 
