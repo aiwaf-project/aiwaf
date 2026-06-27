@@ -32,7 +32,8 @@ pip install "aiwaf[fastapi]"
 pip install "aiwaf[rust]"
 ```
 
-Rust extra installs the optional `aiwaf-rust` acceleration package.
+Rust extra installs `aiwaf-rust`, which accelerates selected paths and is required
+for persisted AI model inference from JSON `IsolationForest` artifacts.
 
 Important:
 - Use the adapter package for your framework (`aiwaf.django`, `aiwaf.flask`, or `aiwaf.fast`).
@@ -495,11 +496,14 @@ aiwaf fast init --app myapp:app
 aiwaf init
 aiwaf init --app myapp:app
 aiwaf init --framework flask --app myapp:app
+aiwaf init --framework django --settings myproject.settings
 ```
 
 `aiwaf init` auto-detects the framework when exactly one supported framework is
 installed. If multiple supported frameworks are installed, pass `--app` for
 Flask/FastAPI projects or `--framework` to choose the adapter explicitly.
+For Django, run from the project root containing `manage.py`, set
+`DJANGO_SETTINGS_MODULE`, or pass `--settings`.
 
 Manifest shape:
 

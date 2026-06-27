@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
+import re
 import sys
+from pathlib import Path
 from typing import List, Optional
 
 
@@ -60,6 +63,50 @@ def _detect_framework(explicit_framework: Optional[str], app=None) -> str:
     )
 
 
+def _detect_django_settings_module_from_manage_py(start_path: Optional[Path] = None) -> Optional[str]:
+    manage_py = (start_path or Path.cwd()) / "manage.py"
+    if not manage_py.exists():
+        return None
+    try:
+        text = manage_py.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(
+        r"DJANGO_SETTINGS_MODULE['\"]\s*,\s*['\"]([^'\"]+)['\"]",
+        text,
+    )
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _configure_django_for_init(settings_module: Optional[str] = None) -> None:
+    project_root = str(Path.cwd())
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
+    if settings_module:
+        os.environ["DJANGO_SETTINGS_MODULE"] = settings_module
+    elif not os.environ.get("DJANGO_SETTINGS_MODULE"):
+        detected = _detect_django_settings_module_from_manage_py()
+        if detected:
+            os.environ["DJANGO_SETTINGS_MODULE"] = detected
+
+    if not os.environ.get("DJANGO_SETTINGS_MODULE"):
+        raise SystemExit(
+            "Django settings are not configured. Run from the Django project root "
+            "with manage.py, set DJANGO_SETTINGS_MODULE, or pass "
+            "--settings project.settings."
+        )
+
+    try:
+        import django
+
+        django.setup()
+    except Exception as exc:
+        raise SystemExit(f"Could not initialize Django settings: {exc}") from exc
+
+
 def _handle_init(argv) -> None:
     import argparse
     import importlib
@@ -67,6 +114,7 @@ def _handle_init(argv) -> None:
     parser = argparse.ArgumentParser(description="Generate .aiwaf/paths.json")
     parser.add_argument("--framework", choices=["flask", "fastapi", "fast", "django"])
     parser.add_argument("--app", help="App import path for Flask/FastAPI (module:app or module:create_app)")
+    parser.add_argument("--settings", help="Django settings module for standalone `aiwaf init`")
     parser.add_argument("--output", default=".aiwaf/paths.json", help="Output manifest path")
     args = parser.parse_args(argv)
 
@@ -91,6 +139,8 @@ def _handle_init(argv) -> None:
 
     framework = _detect_framework(framework, app)
     if framework == "django":
+        _configure_django_for_init(args.settings)
+
         from aiwaf.django.path_manifest import generate_django_manifest
 
         manifest = generate_django_manifest(args.output)

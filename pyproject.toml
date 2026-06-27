@@ -1,10 +1,10 @@
 [project]
 name = "aiwaf"
-version = "1.0.0"
+version = "1.0.1"
 description = "AI-driven, self-learning Web Application Firewall for Python web applications"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.8"
-license = {text = "MIT"}
+license = "MIT"
 authors = [{ name = "Aayush Gauba", email = "gauba.aayush@gmail.com" }]
 classifiers = [
     "Framework :: Django",
@@ -14,7 +14,6 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "License :: OSI Approved :: MIT License",
 ]
 dependencies = [
     "numpy>2",
@@ -28,7 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 django = [
-    "Django>=4.0"
+    "Django>=5.0"
 ]
 flask = [
     "Flask>=3.0",
@@ -56,6 +55,4 @@ build-backend = "setuptools.build_meta"
 include = ["aiwaf*"]
 
 [tool.setuptools.package-data]
-"aiwaf.django" = ["resources/*.json"]
-"aiwaf.flask" = ["resources/*.json"]
 "aiwaf.core" = ["geolock/*.mmdb"]

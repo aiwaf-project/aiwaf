@@ -7,19 +7,18 @@ README_PATH = HERE / "README.md"
 
 setup(
     name="aiwaf",
-    version="1.0.0",
+    version="1.0.1",
     description="AI-driven, self-learning Web Application Firewall for Python web applications",
     long_description=README_PATH.read_text(encoding="utf-8") if README_PATH.exists() else "AIWAF",
     long_description_content_type="text/markdown",
     author="Aayush Gauba",
     url="https://github.com/aayushgauba/aiwaf",
-    license="MIT",
     packages=find_packages(exclude=["tests*", "docs*"]),
     python_requires=">=3.8",
     install_requires=[
         "numpy>2",
         "pandas>2",
-        "scikit-learn>=1.9.0",
+        "scikit-learn>=1.6.0",
         "geoip2>=5.0",
         "packaging>=20",
         "requests>=2.30",
@@ -27,7 +26,7 @@ setup(
     ],
     extras_require={
         "django": [
-            "Django>=4.0",
+            "Django>=5.0",
         ],
         "flask": [
             "Flask>=3.0",
@@ -44,9 +43,6 @@ setup(
     },
     include_package_data=True,
     package_data={
-        # include your pretrained model and any JSON resources
-        "aiwaf.django": ["resources/*.json"],
-        "aiwaf.flask": ["resources/*.json"],
         "aiwaf.core": ["geolock/*.mmdb"],
     },
     entry_points={
@@ -65,6 +61,5 @@ setup(
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3 :: Only",
-        "License :: OSI Approved :: MIT License",
     ],
 )
