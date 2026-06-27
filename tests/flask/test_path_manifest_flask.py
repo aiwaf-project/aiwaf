@@ -1,6 +1,8 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
+from werkzeug.security import check_password_hash
+from types import SimpleNamespace
 
-from aiwaf.flask.path_manifest import extract_flask_routes, generate_flask_manifest
+from aiwaf.flask.path_manifest import _methods, extract_flask_routes, generate_flask_manifest
 
 
 def test_flask_manifest_extracts_routes(tmp_path):
@@ -27,3 +29,89 @@ def test_flask_manifest_extracts_routes(tmp_path):
     assert manifest_path.exists()
     assert manifest["framework"] == "flask"
     assert manifest["context_hash"]
+
+
+def test_flask_manifest_filters_implicit_head_options_methods():
+    rule = SimpleNamespace(methods={"GET", "HEAD", "OPTIONS", "POST"})
+
+    assert _methods(rule) == ["GET", "POST"]
+
+
+def test_flask_manifest_uses_view_method_metadata_when_rule_missing_methods():
+    def view():
+        return "ok"
+
+    view.methods = ["PUT", "PATCH"]
+    rule = SimpleNamespace(methods=None)
+
+    assert _methods(rule, view) == ["PATCH", "PUT"]
+
+
+def test_flask_manifest_defaults_unknown_method_route_to_get():
+    rule = SimpleNamespace(methods=None)
+
+    assert _methods(rule) == ["GET"]
+
+
+def test_flask_manifest_reads_source_when_route_metadata_missing():
+    def view():
+        from flask import request
+
+        if request.method == "POST":
+            return "posted"
+        return "ok"
+
+    rule = SimpleNamespace(methods=None)
+
+    assert _methods(rule, view) == ["GET", "POST"]
+
+
+def test_flask_manifest_reads_request_form_source_when_route_metadata_missing():
+    def view():
+        from flask import request
+
+        name = request.form.get("name")
+        return name or "ok"
+
+    rule = SimpleNamespace(methods=None)
+
+    assert _methods(rule, view) == ["GET", "POST"]
+
+
+def test_flask_manifest_detects_auth_endpoint_from_login_signals(tmp_path):
+    app = Flask(__name__)
+
+    def login_user(user):
+        return user
+
+    @app.route("/signin/", methods=["GET", "POST"])
+    def signin():
+        if check_password_hash("hash", "pw"):
+            login_user(object())
+        return "ok"
+
+    routes = extract_flask_routes(app)
+    route = routes["/signin/"]
+
+    assert route["category"] == "auth"
+    assert route["auth_action"] == "login"
+    assert route["auth_confidence"] >= 0.5
+    assert "check_password_hash" in route["auth_signals"]
+
+
+def test_flask_manifest_detects_api_endpoint_from_jsonify_and_body(tmp_path):
+    app = Flask(__name__)
+
+    @app.route("/users-json/", methods=["POST"])
+    def users_json():
+        payload = request.get_json()
+        return jsonify({"payload": payload})
+
+    routes = extract_flask_routes(app)
+    route = routes["/users-json/"]
+
+    assert route["category"] == "api"
+    assert route["response_type"] == "json"
+    assert route["api_confidence"] >= 0.5
+    assert route["request_body"] is True
+    assert "jsonify" in route["api_signals"]

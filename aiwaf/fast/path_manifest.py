@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from aiwaf.core.api_detection import detect_api_endpoint
+from aiwaf.core.auth_detection import detect_auth_endpoint
 from aiwaf.core.path_manifest import build_manifest, build_route_entry, write_manifest
+from aiwaf.core.source_methods import infer_methods_from_source
+
+HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 
 
 def _view_name(endpoint: Any) -> str:
@@ -19,6 +24,25 @@ def _auth_required(route: Any) -> bool:
     return bool(dependencies)
 
 
+def _methods(route: Any, endpoint: Any = None) -> list[str]:
+    methods = {
+        str(method).upper()
+        for method in (getattr(route, "methods", None) or [])
+        if str(method).upper() in HTTP_METHODS
+    }
+    if methods:
+        return sorted(methods)
+
+    endpoint_methods = getattr(endpoint, "methods", None)
+    methods.update(str(method).upper() for method in (endpoint_methods or []) if str(method).upper() in HTTP_METHODS)
+    if methods:
+        return sorted(methods)
+
+    methods.update(infer_methods_from_source(endpoint) if endpoint is not None else [])
+
+    return sorted(methods or {"GET"})
+
+
 def extract_fastapi_routes(app) -> dict[str, dict[str, Any]]:
     routes: dict[str, dict[str, Any]] = {}
     for route in getattr(app, "routes", []):
@@ -29,11 +53,19 @@ def extract_fastapi_routes(app) -> dict[str, dict[str, Any]]:
         route_name = getattr(route, "name", "") or ""
         if route_name in {"openapi", "swagger_ui_html", "swagger_ui_redirect", "redoc_html"}:
             continue
-        methods = sorted(getattr(route, "methods", []) or [])
+        methods = _methods(route, endpoint)
         tags = list(getattr(route, "tags", []) or [])
+        auth_detection = detect_auth_endpoint(endpoint, framework="fastapi", methods=methods)
+        api_detection = detect_api_endpoint(endpoint, framework="fastapi", path=str(path_template), methods=methods, route=route)
         metadata = {
             "response_type": "json",
             "auth_required": _auth_required(route),
+            "auth_action": auth_detection.action if auth_detection.is_auth else None,
+            "auth_confidence": auth_detection.confidence if auth_detection.is_auth else None,
+            "auth_signals": auth_detection.signals if auth_detection.is_auth else None,
+            "api_confidence": api_detection.confidence if api_detection.is_api else None,
+            "api_signals": api_detection.signals if api_detection.is_api else None,
+            "request_body": api_detection.request_body if api_detection.is_api else None,
         }
         path, entry = build_route_entry(
             path=path_template,

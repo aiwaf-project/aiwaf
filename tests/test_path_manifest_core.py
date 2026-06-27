@@ -33,6 +33,73 @@ def test_build_route_entry_classifies_api_route():
     assert entry["protections"]["rate_limit"]["requests"] == 120
 
 
+def test_build_route_entry_classifies_portal_route_as_authenticated_app():
+    path, entry = build_route_entry(
+        path="/portal/classes/",
+        methods=["GET"],
+        view="portal.views.classes",
+    )
+
+    assert path == "/portal/classes/"
+    assert entry["methods"] == ["GET"]
+    assert entry["category"] == "app"
+    assert entry["auth_required"] is True
+
+
+def test_build_route_entry_keeps_portal_upload_detection_authenticated():
+    path, entry = build_route_entry(
+        path="/portal/profile/upload/photo/",
+        methods=["GET", "POST"],
+        view="portal.views.upload_photo",
+    )
+
+    assert path == "/portal/profile/upload/photo/"
+    assert entry["category"] == "upload"
+    assert entry["auth_required"] is True
+    assert "payload_validation" in entry["protections"]
+
+
+def test_build_route_entry_uses_auth_detector_metadata():
+    path, entry = build_route_entry(
+        path="/token/",
+        methods=["POST"],
+        view="app.login",
+        metadata={
+            "auth_action": "token_login",
+            "auth_confidence": 0.9,
+            "auth_signals": ["OAuth2PasswordRequestForm", "create_access_token"],
+        },
+    )
+
+    assert path == "/token/"
+    assert entry["category"] == "auth"
+    assert entry["auth_action"] == "token_login"
+    assert entry["auth_confidence"] == 0.9
+    assert "create_access_token" in entry["auth_signals"]
+
+
+def test_build_route_entry_uses_api_detector_metadata():
+    path, entry = build_route_entry(
+        path="/users/",
+        methods=["POST"],
+        view="app.users",
+        metadata={
+            "response_type": "json",
+            "api_confidence": 0.94,
+            "api_signals": ["JsonResponse", "request.body"],
+            "request_body": True,
+        },
+    )
+
+    assert path == "/users/"
+    assert entry["category"] == "api"
+    assert entry["response_type"] == "json"
+    assert entry["api_confidence"] == 0.94
+    assert entry["request_body"] is True
+    assert "payload_validation" in entry["protections"]
+    assert "content_type_validation" in entry["protections"]
+
+
 def test_compile_manifest_to_path_rules_maps_protections_to_existing_rules():
     manifest = build_manifest(
         framework="test",

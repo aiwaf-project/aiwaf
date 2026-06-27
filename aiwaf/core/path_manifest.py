@@ -45,7 +45,15 @@ def classify_route(path: str, *, methods: Iterable[str] | None = None, metadata:
 
     category = "unknown"
     response_type = "html"
-    auth_required = bool(metadata.get("auth_required", False))
+    protected_app_prefixes = (
+        "/portal/",
+        "/dashboard/",
+        "/account/",
+        "/accounts/",
+        "/profile/",
+        "/settings/",
+    )
+    auth_required = bool(metadata.get("auth_required", False)) or path_lower.startswith(protected_app_prefixes)
     protections: dict[str, Any] = {
         "rate_limit": {"requests": 60, "window_seconds": 60},
         "header_validation": {"enabled": True},
@@ -66,29 +74,48 @@ def classify_route(path: str, *, methods: Iterable[str] | None = None, metadata:
         category = "admin"
         auth_required = True
         protections["rate_limit"] = {"requests": 30, "window_seconds": 60}
-    elif any(part in path_lower for part in ("/login", "/signin", "/auth/login")):
+    elif metadata.get("auth_action") or metadata.get("auth_confidence") or any(part in path_lower for part in ("/login", "/signin", "/auth/login")):
         category = "auth"
         protections["rate_limit"] = {"requests": 30, "window_seconds": 60}
         protections["honeypot"] = {"enabled": True}
-    elif path_lower.startswith("/api/") or metadata.get("response_type") == "json":
+    elif metadata.get("api_confidence") or path_lower.startswith("/api/") or metadata.get("response_type") == "json":
         category = "api"
         response_type = "json"
         protections["rate_limit"] = {"requests": 120, "window_seconds": 60}
+        protections["api_rate_limit"] = {"requests": 120, "window_seconds": 60}
+        protections["payload_validation"] = {"max_body_bytes": 1048576, "max_json_depth": 8}
+        protections["content_type_validation"] = {"require_valid_content_type": True}
         protections["honeypot"] = {"enabled": False}
     elif any(token in path_lower for token in ("/upload", "/uploads", "/files")):
         category = "upload"
         protections["rate_limit"] = {"requests": 20, "window_seconds": 60}
         protections["payload_validation"] = {"max_body_bytes": 1048576}
+    elif auth_required:
+        category = "app"
+        protections["rate_limit"] = {"requests": 90, "window_seconds": 60}
 
     if "POST" in methods_set and category not in {"api", "upload"}:
         protections["rate_limit"] = {"requests": 30, "window_seconds": 60}
 
-    return {
+    result = {
         "category": category,
         "response_type": str(metadata.get("response_type") or response_type),
         "auth_required": auth_required,
         "protections": protections,
     }
+    if metadata.get("auth_action"):
+        result["auth_action"] = str(metadata["auth_action"])
+    if metadata.get("auth_confidence") is not None:
+        result["auth_confidence"] = metadata["auth_confidence"]
+    if metadata.get("auth_signals"):
+        result["auth_signals"] = list(metadata["auth_signals"])
+    if metadata.get("api_confidence") is not None:
+        result["api_confidence"] = metadata["api_confidence"]
+    if metadata.get("api_signals"):
+        result["api_signals"] = list(metadata["api_signals"])
+    if metadata.get("request_body") is not None:
+        result["request_body"] = bool(metadata["request_body"])
+    return result
 
 
 def build_route_entry(
