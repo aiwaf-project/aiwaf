@@ -67,6 +67,60 @@ def extract_features(records, static_keywords):
         return None
 
 
+def build_records(parsed, ip_404, path_exists_fn, path_exempt_fn, status_idx_list):
+    if aiwaf_rust is None or not hasattr(aiwaf_rust, "build_records"):
+        return None
+    try:
+        return aiwaf_rust.build_records(parsed, ip_404, path_exists_fn, path_exempt_fn, status_idx_list)
+    except Exception:
+        return None
+
+
+def rust_payload_from_records(records):
+    if aiwaf_rust is None or not hasattr(aiwaf_rust, "rust_payload_from_records"):
+        return None
+    try:
+        return aiwaf_rust.rust_payload_from_records(records)
+    except Exception:
+        return None
+
+
+def python_feature_from_record(record, ip_times, static_keywords):
+    if aiwaf_rust is None or not hasattr(aiwaf_rust, "python_feature_from_record"):
+        return None
+    try:
+        return aiwaf_rust.python_feature_from_record(record, ip_times, static_keywords)
+    except Exception:
+        return None
+
+
+def python_features_batched(
+    records,
+    ip_times,
+    static_keywords,
+    iter_batches_fn,
+    batch_size,
+    parallel_enabled,
+    parallel_chunk_size,
+    max_workers,
+):
+    if aiwaf_rust is None or not hasattr(aiwaf_rust, "python_features_batched"):
+        return None
+    try:
+        return aiwaf_rust.python_features_batched(
+            records,
+            ip_times,
+            static_keywords,
+            iter_batches_fn,
+            batch_size,
+            parallel_enabled,
+            parallel_chunk_size,
+            max_workers,
+        )
+    except Exception:
+        return None
+
+
 def supports_chunked_feature_extraction() -> bool:
     if aiwaf_rust is None:
         return False

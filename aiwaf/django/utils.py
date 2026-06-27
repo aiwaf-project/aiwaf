@@ -7,6 +7,7 @@ from ..core.exemptions import (
     is_path_exempt as core_is_path_exempt,
     normalize_paths as core_normalize_paths,
 )
+from ..core.path_manifest import get_effective_path_rules
 from ..core.route_plan import get_route_execution_plan
 from ..core.utils import ip_in_allowlist
 from ..core.request_context import extract_ip_from_django_request
@@ -62,7 +63,11 @@ def get_path_rule_for_path(path):
     if not path:
         return None
     settings_block = getattr(settings, "AIWAF_SETTINGS", {}) or {}
-    return core_get_path_rule_for_path(path, settings_block.get("PATH_RULES", []) or [])
+    rules = get_effective_path_rules(
+        settings_block.get("PATH_RULES", []) or [],
+        manifest_path=getattr(settings, "AIWAF_PATH_MANIFEST", ".aiwaf/paths.json"),
+    )
+    return core_get_path_rule_for_path(path, rules)
 
 
 def is_middleware_disabled(request, middleware_name):
@@ -73,9 +78,10 @@ def is_middleware_disabled(request, middleware_name):
 def _get_request_route_plan(request):
     path = getattr(request, "path", "")
     settings_block = getattr(settings, "AIWAF_SETTINGS", {}) or {}
-    rules = settings_block.get("PATH_RULES")
-    if rules is None:
-        rules = _EMPTY_PATH_RULES
+    rules = get_effective_path_rules(
+        settings_block.get("PATH_RULES", []) or [],
+        manifest_path=getattr(settings, "AIWAF_PATH_MANIFEST", ".aiwaf/paths.json"),
+    ) or _EMPTY_PATH_RULES
     policy_version = getattr(
         settings,
         "AIWAF_ROUTE_PLAN_VERSION",

@@ -929,7 +929,7 @@ def _load_flask_app(app_path):
     target = getattr(module, obj, None)
     if target is None:
         raise ValueError(f"App not found: {app_path}")
-    if callable(target):
+    if callable(target) and not hasattr(target, "url_map"):
         return target()
     return target
 
@@ -1120,6 +1120,11 @@ def main():
     route_shell_parser = subparsers.add_parser('route-shell', help='Interactive route browser for exemptions')
     route_shell_parser.add_argument('--app', required=True, help='Flask app import path (module:app)')
 
+    # Init path manifest command
+    init_parser = subparsers.add_parser('init', help='Generate .aiwaf/paths.json from a Flask app')
+    init_parser.add_argument('--app', required=True, help='Flask app import path (module:app or module:create_app)')
+    init_parser.add_argument('--output', default='.aiwaf/paths.json', help='Output manifest path')
+
     # WHOIS command
     whois_parser = subparsers.add_parser('whois', help='Run WHOIS ownership lookup')
     whois_parser.add_argument('target', help='Domain or IP address')
@@ -1240,6 +1245,20 @@ def main():
             print(f" Failed to load app: {e}")
             return
         _route_shell(app, manager)
+
+    elif args.command == 'init':
+        try:
+            from aiwaf.flask.path_manifest import generate_flask_manifest
+
+            app = _load_flask_app(args.app)
+            manifest = generate_flask_manifest(app, args.output)
+        except Exception as e:
+            print(f" Init failed: {e}")
+            return
+        print(f"Generated {args.output}")
+        print(f"Framework: {manifest['framework']}")
+        print(f"Routes: {len(manifest.get('routes', {}))}")
+        print(f"Context hash: {manifest['context_hash']}")
 
     elif args.command == 'whois':
         manager.whois_lookup(args.target)

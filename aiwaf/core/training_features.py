@@ -6,8 +6,14 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 
+from . import rust_backend
+
 
 def build_records(parsed, ip_404, path_exists_fn, path_exempt_fn, status_idx_list):
+    rust_records = rust_backend.build_records(parsed, ip_404, path_exists_fn, path_exempt_fn, status_idx_list)
+    if rust_records is not None:
+        return rust_records
+
     records = []
     known_cache = {}
     exempt_cache = {}
@@ -46,6 +52,10 @@ def build_records(parsed, ip_404, path_exists_fn, path_exempt_fn, status_idx_lis
 
 
 def rust_payload_from_records(records):
+    rust_payload = rust_backend.rust_payload_from_records(records)
+    if rust_payload is not None:
+        return rust_payload
+
     return [
         {
             "ip": rec["ip"],
@@ -62,6 +72,10 @@ def rust_payload_from_records(records):
 
 
 def python_feature_from_record(rec, ip_times, static_kw):
+    rust_feature = rust_backend.python_feature_from_record(rec, ip_times, static_kw)
+    if rust_feature is not None:
+        return rust_feature
+
     kw_hits = 0
     if rec["kw_check"]:
         path_lower = rec["path_lower"]
@@ -85,6 +99,19 @@ def python_feature_from_record(rec, ip_times, static_kw):
 
 
 def python_features_batched(records, ip_times, static_kw, iter_batches_fn, batch_size: int, parallel_enabled: bool, parallel_chunk_size: int, max_workers: int):
+    rust_features = rust_backend.python_features_batched(
+        records,
+        ip_times,
+        static_kw,
+        iter_batches_fn,
+        batch_size,
+        parallel_enabled,
+        parallel_chunk_size,
+        max_workers,
+    )
+    if rust_features is not None:
+        return rust_features
+
     if not records:
         return []
 

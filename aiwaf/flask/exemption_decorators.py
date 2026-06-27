@@ -12,6 +12,7 @@ from aiwaf.core.exemptions import (
     normalize_middleware_name as core_normalize_middleware_name,
 )
 from aiwaf.core.route_plan import get_route_execution_plan
+from aiwaf.core.path_manifest import get_effective_path_rules
 
 
 _EMPTY_PATH_RULES = ()
@@ -417,7 +418,10 @@ def _get_path_rules():
         if rules is None:
             settings = current_app.config.get("AIWAF_SETTINGS", {})
             rules = settings.get("PATH_RULES")
-        return rules if rules is not None else _EMPTY_PATH_RULES
+        return get_effective_path_rules(
+            rules or [],
+            manifest_path=current_app.config.get("AIWAF_PATH_MANIFEST", ".aiwaf/paths.json"),
+        ) or _EMPTY_PATH_RULES
     except Exception:
         return _EMPTY_PATH_RULES
 

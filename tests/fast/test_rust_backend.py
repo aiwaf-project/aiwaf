@@ -93,6 +93,44 @@ def test_extract_features_returns_none_on_backend_error(monkeypatch):
     assert rust_backend.extract_features([{"a": 1}], ["k"]) is None
 
 
+def test_build_records_returns_payload(monkeypatch):
+    backend = SimpleNamespace(
+        build_records=lambda parsed, ip_404, path_exists_fn, path_exempt_fn, status_idx_list: [{"from": "rust"}],
+    )
+    monkeypatch.setattr(rust_backend, "aiwaf_rust", backend)
+
+    assert rust_backend.build_records([], {}, lambda path: False, lambda path: False, [200, 404]) == [{"from": "rust"}]
+
+
+def test_build_records_returns_none_when_api_missing(monkeypatch):
+    monkeypatch.setattr(rust_backend, "aiwaf_rust", SimpleNamespace())
+
+    assert rust_backend.build_records([], {}, lambda path: False, lambda path: False, [200, 404]) is None
+
+
+def test_rust_payload_from_records_returns_payload(monkeypatch):
+    backend = SimpleNamespace(rust_payload_from_records=lambda records: [{"payload": "rust"}])
+    monkeypatch.setattr(rust_backend, "aiwaf_rust", backend)
+
+    assert rust_backend.rust_payload_from_records([{"ip": "1.1.1.1"}]) == [{"payload": "rust"}]
+
+
+def test_python_feature_from_record_returns_payload(monkeypatch):
+    backend = SimpleNamespace(python_feature_from_record=lambda record, ip_times, static_keywords: {"feature": "rust"})
+    monkeypatch.setattr(rust_backend, "aiwaf_rust", backend)
+
+    assert rust_backend.python_feature_from_record({}, {}, []) == {"feature": "rust"}
+
+
+def test_python_features_batched_returns_payload(monkeypatch):
+    backend = SimpleNamespace(python_features_batched=lambda *args: [{"feature": "rust"}])
+    monkeypatch.setattr(rust_backend, "aiwaf_rust", backend)
+
+    result = rust_backend.python_features_batched([{}], {}, [], lambda rows, size: [rows], 1, False, 1, 1)
+
+    assert result == [{"feature": "rust"}]
+
+
 def test_extract_features_batch_accepts_dict_result(monkeypatch):
     backend = SimpleNamespace(
         extract_features_batch_with_state=lambda records, keywords, state: {

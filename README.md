@@ -89,7 +89,7 @@ import aiwaf.fast as aiwaf
 - **AI anomaly detection**
   - IsolationForest-based behavioral detection
   - model training updates as traffic grows
-  - persisted runtime models use JSON-only artifacts; Rust `IsolationForest` is the supported saved-model backend
+  - persisted runtime models use JSON-only artifacts; Rust `IsolationForest` is required for saved-model inference
 
 - **Dynamic keyword learning**
   - learns suspicious path terms from attack-like traffic
@@ -191,7 +191,8 @@ model artifacts (`pickle`, `joblib`, or `skops`) because those formats can
 execute code during deserialization. Scikit-learn models may be used during a
 training run for immediate analysis, but they are not persisted. To persist and
 reload runtime AI models, enable the Rust backend so `aiwaf_rust.IsolationForest`
-can save/load JSON state.
+can save/load JSON state. The old bundled `model.pkl` artifacts have been
+removed; retrain to generate a `model.json` artifact.
 
 ---
 
@@ -276,7 +277,8 @@ AIWAF_RUST_ISOLATION_FOREST = True
 
 When enabled, AIWAF attempts Rust-backed helpers and falls back to Python automatically.
 Persisted AI model loading requires a JSON artifact; the Rust `IsolationForest`
-backend provides the supported JSON model state.
+backend provides the supported JSON model state. Pickle-based `model.pkl`
+artifacts are no longer shipped or loaded.
 
 Legacy compatibility:
 - if you still use nested `AIWAF_SETTINGS`, AIWAF maps common keys into flat `AIWAF_*` values at startup.
@@ -473,7 +475,57 @@ aiwaf-fast --help
 
 ### Path-Specific Rules
 
-Use path rules to selectively disable middleware or override rate limits without globally weakening protection:
+AIWAF can generate a route manifest at `.aiwaf/paths.json` and compile it into
+runtime path rules. This is the preferred 1.0 workflow because framework-specific
+route extraction happens once during init, not on every request.
+
+Generate a manifest:
+
+```bash
+# Django
+python manage.py aiwaf init
+
+# Flask
+aiwaf flask init --app myapp:app
+
+# FastAPI
+aiwaf fast init --app myapp:app
+
+# Unified entrypoint
+aiwaf init
+aiwaf init --app myapp:app
+aiwaf init --framework flask --app myapp:app
+```
+
+`aiwaf init` auto-detects the framework when exactly one supported framework is
+installed. If multiple supported frameworks are installed, pass `--app` for
+Flask/FastAPI projects or `--framework` to choose the adapter explicitly.
+
+Manifest shape:
+
+```json
+{
+  "schema_version": "1.0",
+  "framework": "flask",
+  "context_hash": "sha256...",
+  "routes": {
+    "/api/users/": {
+      "methods": ["GET", "POST"],
+      "view": "myapp.users",
+      "category": "api",
+      "response_type": "json",
+      "auth_required": false,
+      "protections": {
+        "rate_limit": {"requests": 120, "window_seconds": 60},
+        "honeypot": {"enabled": false}
+      }
+    }
+  }
+}
+```
+
+You can still define manual path rules to selectively disable middleware or
+override rate limits without globally weakening protection:
 
 ```python
 AIWAF_SETTINGS = {
@@ -492,10 +544,11 @@ AIWAF_SETTINGS = {
 ```
 
 Rules are matched by path prefix, and the most specific matching rule applies.
-Path rules are compiled and cached. If a running application mutates its rules
-in place, increment `AIWAF_ROUTE_PLAN_VERSION` (Flask/Django) or
-`route_plan_version` (FastAPI) so cached plans are rebuilt. Replacing the rules
-list with a new object recompiles it automatically.
+Manual rules are applied before generated manifest rules. Path rules are compiled
+and cached. If a running application mutates its rules in place, increment
+`AIWAF_ROUTE_PLAN_VERSION` (Flask/Django) or `route_plan_version` (FastAPI) so
+cached plans are rebuilt. Replacing the rules list with a new object recompiles
+it automatically.
 
 ### Blocking Behavior
 
@@ -713,7 +766,7 @@ If any blocking stage denies request:
 `AIAnomalyMiddleware`:
 - uses a persisted JSON model when available, otherwise falls back to heuristic/keyword anomaly behavior
 - gracefully disables itself when model/deps are unavailable
-- persisted ML inference requires the Rust JSON model backend; scikit-learn is training-time only
+- persisted ML inference requires the Rust JSON model backend; scikit-learn is training-time only and `model.pkl` is not supported
 
 `HoneypotTimingMiddleware`:
 - enforces minimum submit timing
@@ -771,7 +824,8 @@ AIWAF_MODEL_STORAGE_FALLBACK = True
 ```
 
 Do not point `AIWAF_MODEL_PATH` at `pickle`, `joblib`, or `skops` artifacts.
-AIWAF loads JSON artifacts only.
+AIWAF loads JSON artifacts only. Fresh installs do not include `model.pkl`;
+run training with Rust enabled to create `model.json`.
 
 Keyword and false-positive controls:
 
@@ -965,7 +1019,8 @@ It should preserve behavior while improving some execution paths; verify with A/
 **Why is model persistence JSON-only?**  
 AIWAF is security middleware, so it avoids Python object deserialization formats
 such as `pickle`, `joblib`, and `skops`. Persisted AI models should use the Rust
-`IsolationForest` JSON state path.
+`IsolationForest` JSON state path. Legacy `model.pkl` files are not loaded and
+are no longer bundled.
 
 **Do I need Django to use AIWAF?**  
 No. Core supports both Django and Flask adapters, but some operational commands are Django-specific.

@@ -11,6 +11,7 @@ from .runtime_storage import initialize_storage, get_exemption_store, get_geo_bl
 from .runtime_blacklist import BlacklistManager
 from .middleware_plan import plan_enabled_middlewares, should_enable_geo
 from .route_capabilities import detect_uuid_routes_in_fastapi_app
+from .path_manifest import get_effective_path_rules
 from aiwaf.fast.middleware import (
     AIAnomalyMiddleware,
     AIWAFLoggingMiddleware,
@@ -111,7 +112,10 @@ class AIWAF:
     
     def _add_middleware(self):
         """Add middleware to the FastAPI app."""
-        path_rules = self.config.get("path_rules", []) or self.config.get("PATH_RULES", []) or []
+        path_rules = get_effective_path_rules(
+            self.config.get("path_rules", []) or self.config.get("PATH_RULES", []) or [],
+            manifest_path=self.config.get("path_manifest", self.config.get("PATH_MANIFEST", ".aiwaf/paths.json")),
+        )
         ordered_available = [
             "geo_block",
             "ip_keyword_block",
