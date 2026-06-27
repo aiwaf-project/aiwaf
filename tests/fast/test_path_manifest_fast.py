@@ -19,6 +19,7 @@ def test_fastapi_manifest_extracts_routes(tmp_path):
     assert "/api/users/" in routes
     assert routes["/api/users/"]["category"] == "api"
     assert routes["/api/users/"]["response_type"] == "json"
+    assert routes["/api/users/"]["payload_type"] == "json"
     assert routes["/api/users/"]["methods"] == ["POST"]
     assert routes["/api/users/"]["tags"] == ["users"]
 
@@ -117,6 +118,7 @@ def test_fastapi_manifest_detects_api_endpoint_from_response_model_and_body_mode
 
     assert route["category"] == "api"
     assert route["response_type"] == "json"
+    assert route["payload_type"] == "json"
     assert route["api_confidence"] >= 0.5
     assert route["request_body"] is True
     assert "response_model" in route["api_signals"]

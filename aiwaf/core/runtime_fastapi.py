@@ -2,6 +2,7 @@
 Main AIWAF class - orchestrates all security middleware components
 """
 import logging
+import time
 from typing import Optional, Dict, Any, Set, List
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
@@ -551,7 +552,7 @@ class AIWAF:
             'statistics': self.get_statistics(),
             'recent_activity': self.get_recent_activity(),
             'health': self.health_check(),
-            'export_timestamp': __import__('time').time()
+            'export_timestamp': time.time()
         }
     
     def __repr__(self) -> str:

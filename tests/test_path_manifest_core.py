@@ -85,6 +85,7 @@ def test_build_route_entry_uses_api_detector_metadata():
         view="app.users",
         metadata={
             "response_type": "json",
+            "payload_type": "json",
             "api_confidence": 0.94,
             "api_signals": ["JsonResponse", "request.body"],
             "request_body": True,
@@ -94,10 +95,36 @@ def test_build_route_entry_uses_api_detector_metadata():
     assert path == "/users/"
     assert entry["category"] == "api"
     assert entry["response_type"] == "json"
+    assert entry["payload_type"] == "json"
     assert entry["api_confidence"] == 0.94
     assert entry["request_body"] is True
     assert "payload_validation" in entry["protections"]
     assert "content_type_validation" in entry["protections"]
+
+
+def test_build_route_entry_uses_form_payload_metadata():
+    path, entry = build_route_entry(
+        path="/contact/",
+        methods=["GET", "POST"],
+        view="app.contact",
+        metadata={
+            "response_type": "mixed",
+            "payload_type": "form",
+            "form_confidence": 0.75,
+            "form_signals": ["request.POST", "render", "redirect"],
+            "request_body": True,
+        },
+    )
+
+    assert path == "/contact/"
+    assert entry["category"] == "form"
+    assert entry["response_type"] == "mixed"
+    assert entry["payload_type"] == "form"
+    assert entry["form_confidence"] == 0.75
+    assert entry["request_body"] is True
+    assert "request.POST" in entry["form_signals"]
+    assert entry["protections"]["rate_limit"]["requests"] == 30
+    assert "payload_validation" in entry["protections"]
 
 
 def test_compile_manifest_to_path_rules_maps_protections_to_existing_rules():

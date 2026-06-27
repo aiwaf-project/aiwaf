@@ -58,14 +58,17 @@ def extract_fastapi_routes(app) -> dict[str, dict[str, Any]]:
         auth_detection = detect_auth_endpoint(endpoint, framework="fastapi", methods=methods)
         api_detection = detect_api_endpoint(endpoint, framework="fastapi", path=str(path_template), methods=methods, route=route)
         metadata = {
-            "response_type": "json",
+            "response_type": api_detection.response_type or "json",
+            "payload_type": api_detection.payload_type or ("json" if api_detection.is_api else None),
             "auth_required": _auth_required(route),
             "auth_action": auth_detection.action if auth_detection.is_auth else None,
             "auth_confidence": auth_detection.confidence if auth_detection.is_auth else None,
             "auth_signals": auth_detection.signals if auth_detection.is_auth else None,
             "api_confidence": api_detection.confidence if api_detection.is_api else None,
             "api_signals": api_detection.signals if api_detection.is_api else None,
-            "request_body": api_detection.request_body if api_detection.is_api else None,
+            "form_confidence": api_detection.form_confidence if api_detection.form_confidence else None,
+            "form_signals": api_detection.form_signals if api_detection.form_signals else None,
+            "request_body": api_detection.request_body if api_detection.request_body else None,
         }
         path, entry = build_route_entry(
             path=path_template,

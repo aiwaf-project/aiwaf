@@ -198,10 +198,13 @@ def _collect_routes(patterns: Any, prefix: str = "") -> dict[str, dict[str, Any]
                 "auth_action": auth_detection.action if auth_detection.is_auth else None,
                 "auth_confidence": auth_detection.confidence if auth_detection.is_auth else None,
                 "auth_signals": auth_detection.signals if auth_detection.is_auth else None,
-                "response_type": "json" if api_detection.is_api or raw_path.startswith("api/") else None,
+                "response_type": api_detection.response_type if api_detection.response_type else ("json" if raw_path.startswith("api/") else None),
+                "payload_type": api_detection.payload_type or None,
                 "api_confidence": api_detection.confidence if api_detection.is_api else None,
                 "api_signals": api_detection.signals if api_detection.is_api else None,
-                "request_body": api_detection.request_body if api_detection.is_api else None,
+                "form_confidence": api_detection.form_confidence if api_detection.form_confidence else None,
+                "form_signals": api_detection.form_signals if api_detection.form_signals else None,
+                "request_body": api_detection.request_body if api_detection.request_body else None,
             },
         )
         routes[path] = entry

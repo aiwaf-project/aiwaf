@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import importlib
 import ipaddress
 import socket
 from typing import Any
+
+import whois
 
 
 def _resolve_domain(target: str) -> str:
@@ -26,6 +27,5 @@ def _resolve_domain(target: str) -> str:
 
 
 def run_whois_lookup(target: str) -> Any:
-    whois_module = __import__("whois")
     domain = _resolve_domain(target)
-    return whois_module.whois(domain)
+    return whois.whois(domain)

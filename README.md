@@ -505,6 +505,22 @@ Flask/FastAPI projects or `--framework` to choose the adapter explicitly.
 For Django, run from the project root containing `manage.py`, set
 `DJANGO_SETTINGS_MODULE`, or pass `--settings`.
 
+During init, AIWAF uses framework metadata first and then bounded static source
+analysis when metadata is missing. It can infer:
+
+- route methods from Flask/FastAPI routers, DRF actions, Django CBVs, decorators, and view source
+- auth endpoints from signals such as `authenticate`, `login`, `login_user`, `OAuth2PasswordRequestForm`, and helper calls
+- API endpoints from combined signals such as `/api/` paths, DRF `APIView`/`ViewSet`, Flask JSON endpoints, FastAPI route metadata, Pydantic/body models, `request.body`, `request.data`, `request.json`, and JSON content-type expectations
+- form endpoints from `request.POST`, `request.form`, Django `Form`/`ModelForm`, `render`, `render_template`, `redirect`, and mixed HTML/JSON response flows
+- upload/static/app routes from path and source signals
+
+Detector output is explainable: generated routes can include confidence scores
+and the exact signals used for auth/API/form classification. Response type alone
+does not force API classification; payload type is preferred. For example, a
+contact form that redirects on success and returns `JsonResponse` on validation
+failure is classified as `category: "form"`, `response_type: "mixed"`, and
+`payload_type: "form"`.
+
 Manifest shape:
 
 ```json
@@ -518,15 +534,57 @@ Manifest shape:
       "view": "myapp.users",
       "category": "api",
       "response_type": "json",
+      "payload_type": "json",
       "auth_required": false,
+      "api_confidence": 0.94,
+      "api_signals": ["path:/api", "JsonResponse", "request.body"],
+      "request_body": true,
       "protections": {
         "rate_limit": {"requests": 120, "window_seconds": 60},
+        "api_rate_limit": {"requests": 120, "window_seconds": 60},
+        "payload_validation": {"max_body_bytes": 1048576, "max_json_depth": 8},
+        "content_type_validation": {"require_valid_content_type": true},
         "honeypot": {"enabled": false}
+      }
+    },
+    "/contact/": {
+      "methods": ["GET", "POST"],
+      "view": "myapp.contact",
+      "category": "form",
+      "response_type": "mixed",
+      "payload_type": "form",
+      "auth_required": false,
+      "form_confidence": 0.75,
+      "form_signals": ["request.POST", "render", "redirect"],
+      "request_body": true,
+      "protections": {
+        "rate_limit": {"requests": 30, "window_seconds": 60},
+        "payload_validation": {"max_body_bytes": 1048576},
+        "honeypot": {"enabled": true}
+      }
+    },
+    "/login/": {
+      "methods": ["GET", "POST"],
+      "view": "accounts.views.login_view",
+      "category": "auth",
+      "response_type": "html",
+      "auth_required": false,
+      "auth_action": "login",
+      "auth_confidence": 0.9,
+      "auth_signals": ["django.contrib.auth.authenticate", "django.contrib.auth.login", "POST"],
+      "protections": {
+        "rate_limit": {"requests": 30, "window_seconds": 60},
+        "honeypot": {"enabled": true}
       }
     }
   }
 }
 ```
+
+Method and category detection is deterministic but still best-effort for highly
+dynamic code. For maximum accuracy, use framework method decorators such as
+Django `@require_http_methods`, explicit Flask route methods, and FastAPI
+`@app.get` / `@app.post` decorators.
 
 You can still define manual path rules to selectively disable middleware or
 override rate limits without globally weakening protection:

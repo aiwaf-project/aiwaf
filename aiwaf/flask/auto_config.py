@@ -536,12 +536,9 @@ class AIWAFAutoConfig:
                 self.detected_config['location'] = str(location)
                 return self.data_dir
         
-        # Absolute last resort - use temp directory with user-specific name
+        # Absolute last resort - use a generic temp directory without reading OS identity
         import tempfile
-        try:
-            temp_dir = Path(tempfile.gettempdir()) / f'aiwaf_data_{os.getlogin()}'
-        except:
-            temp_dir = Path(tempfile.gettempdir()) / 'aiwaf_data_default'
+        temp_dir = Path(tempfile.gettempdir()) / 'aiwaf_data'
         temp_dir.mkdir(exist_ok=True)
         self.data_dir = str(temp_dir.absolute())
         self.detected_config['method'] = 'temp_user_directory'

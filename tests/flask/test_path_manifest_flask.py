@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, redirect, render_template, request
 from werkzeug.security import check_password_hash
 from types import SimpleNamespace
 
@@ -115,3 +115,26 @@ def test_flask_manifest_detects_api_endpoint_from_jsonify_and_body(tmp_path):
     assert route["api_confidence"] >= 0.5
     assert route["request_body"] is True
     assert "jsonify" in route["api_signals"]
+
+
+def test_flask_manifest_detects_form_payload_over_mixed_json_response(tmp_path):
+    app = Flask(__name__)
+
+    @app.route("/contact/", methods=["GET", "POST"])
+    def contact():
+        name = request.form.get("name")
+        if not name:
+            return jsonify({"error": "name required"})
+        if request.method == "POST":
+            return redirect("/thanks/")
+        return render_template("contact.html")
+
+    routes = extract_flask_routes(app)
+    route = routes["/contact/"]
+
+    assert route["category"] == "form"
+    assert route["response_type"] == "mixed"
+    assert route["payload_type"] == "form"
+    assert route["request_body"] is True
+    assert route["form_confidence"] >= 0.5
+    assert "request.form" in route["form_signals"]

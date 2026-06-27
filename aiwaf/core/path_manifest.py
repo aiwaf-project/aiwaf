@@ -78,7 +78,15 @@ def classify_route(path: str, *, methods: Iterable[str] | None = None, metadata:
         category = "auth"
         protections["rate_limit"] = {"requests": 30, "window_seconds": 60}
         protections["honeypot"] = {"enabled": True}
-    elif metadata.get("api_confidence") or path_lower.startswith("/api/") or metadata.get("response_type") == "json":
+    elif metadata.get("payload_type") == "form" or metadata.get("form_confidence"):
+        category = "form"
+        response_type = str(metadata.get("response_type") or "mixed")
+        protections["rate_limit"] = {"requests": 30, "window_seconds": 60}
+        protections["payload_validation"] = {"max_body_bytes": 1048576}
+        protections["honeypot"] = {"enabled": True}
+    elif metadata.get("api_confidence") or path_lower.startswith("/api/") or (
+        metadata.get("response_type") == "json" and metadata.get("payload_type") != "form"
+    ):
         category = "api"
         response_type = "json"
         protections["rate_limit"] = {"requests": 120, "window_seconds": 60}
@@ -113,6 +121,12 @@ def classify_route(path: str, *, methods: Iterable[str] | None = None, metadata:
         result["api_confidence"] = metadata["api_confidence"]
     if metadata.get("api_signals"):
         result["api_signals"] = list(metadata["api_signals"])
+    if metadata.get("payload_type"):
+        result["payload_type"] = str(metadata["payload_type"])
+    if metadata.get("form_confidence") is not None:
+        result["form_confidence"] = metadata["form_confidence"]
+    if metadata.get("form_signals"):
+        result["form_signals"] = list(metadata["form_signals"])
     if metadata.get("request_body") is not None:
         result["request_body"] = bool(metadata["request_body"])
     return result

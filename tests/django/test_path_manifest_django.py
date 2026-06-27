@@ -1,5 +1,6 @@
 from django.test import override_settings
 from django.http import HttpResponse, JsonResponse
+from django.shortcuts import redirect, render
 from django.urls import path
 from django.views.decorators.http import require_GET, require_POST, require_http_methods
 from django.contrib.auth import authenticate, login
@@ -59,6 +60,15 @@ def _api_payload_helper(request):
 def django_json_endpoint(request):
     _api_payload_helper(request)
     return JsonResponse({"ok": True})
+
+
+def django_contact_form_endpoint(request):
+    if request.method == "POST":
+        name = request.POST.get("name")
+        if not name:
+            return JsonResponse({"error": "name required"}, status=400)
+        return redirect("/thanks/")
+    return render(request, "contact.html")
 
 
 class DjangoPathManifestTest(AIWAFTestCase):
@@ -236,3 +246,18 @@ class DjangoPathManifestTest(AIWAFTestCase):
         assert route["api_confidence"] >= 0.5
         assert route["request_body"] is True
         assert "JsonResponse" in route["api_signals"]
+
+    def test_django_manifest_detects_form_payload_over_mixed_json_response(self):
+        from aiwaf.django.path_manifest import _collect_routes
+
+        routes = _collect_routes([
+            path("contact/", django_contact_form_endpoint, name="contact"),
+        ])
+
+        route = routes["/contact/"]
+        assert route["category"] == "form"
+        assert route["response_type"] == "mixed"
+        assert route["payload_type"] == "form"
+        assert route["request_body"] is True
+        assert route["form_confidence"] >= 0.5
+        assert "request.POST" in route["form_signals"]
