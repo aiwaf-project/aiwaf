@@ -4,7 +4,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from types import SimpleNamespace
 
-from aiwaf.fast.path_manifest import _methods, extract_fastapi_routes, generate_fastapi_manifest
+from aiwaf.fast.path_manifest import _auth_required, _methods, extract_fastapi_routes, generate_fastapi_manifest
 
 
 def test_fastapi_manifest_extracts_routes(tmp_path):
@@ -43,6 +43,31 @@ def test_fastapi_manifest_uses_endpoint_method_metadata_when_route_missing_metho
     assert _methods(route, endpoint) == ["PATCH", "POST"]
 
 
+def test_fastapi_manifest_uses_endpoint_class_when_route_missing_methods():
+    class UserEndpoint:
+        methods = ["GET", "POST", "DELETE"]
+
+        def get(self):
+            return {"ok": True}
+
+        def post(self):
+            return {"ok": True}
+
+    def endpoint():
+        return {"ok": True}
+
+    endpoint.view_class = UserEndpoint
+    route = SimpleNamespace(methods=None)
+
+    assert _methods(route, endpoint) == ["GET", "POST"]
+
+
+def test_fastapi_manifest_uses_route_hints_when_metadata_missing():
+    route = SimpleNamespace(methods=None, path="/token/", name="token")
+
+    assert _methods(route) == ["GET", "POST"]
+
+
 def test_fastapi_manifest_defaults_unknown_method_route_to_get():
     route = SimpleNamespace(methods=None)
 
@@ -68,6 +93,18 @@ def test_fastapi_manifest_reads_request_json_source_when_route_metadata_missing(
     route = SimpleNamespace(methods=None)
 
     assert _methods(route, endpoint) == ["GET", "POST"]
+
+
+def test_fastapi_manifest_marks_dependency_routes_authenticated():
+    def current_user():
+        return {"user": "aayush"}
+
+    route = SimpleNamespace(
+        dependant=SimpleNamespace(dependencies=[SimpleNamespace(call=current_user)]),
+        dependencies=[],
+    )
+
+    assert _auth_required(route) is True
 
 
 def create_access_token(data):

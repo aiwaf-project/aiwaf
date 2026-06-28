@@ -1,3 +1,5 @@
+from functools import wraps
+
 from flask import Flask, jsonify, redirect, render_template, request
 from werkzeug.security import check_password_hash
 from types import SimpleNamespace
@@ -45,6 +47,31 @@ def test_flask_manifest_uses_view_method_metadata_when_rule_missing_methods():
     rule = SimpleNamespace(methods=None)
 
     assert _methods(rule, view) == ["PATCH", "PUT"]
+
+
+def test_flask_manifest_uses_method_view_class_when_rule_missing_methods():
+    class UserView:
+        methods = ["GET", "POST", "DELETE"]
+
+        def get(self):
+            return "ok"
+
+        def post(self):
+            return "ok"
+
+    def view():
+        return "ok"
+
+    view.view_class = UserView
+    rule = SimpleNamespace(methods=None)
+
+    assert _methods(rule, view) == ["GET", "POST"]
+
+
+def test_flask_manifest_uses_route_hints_when_metadata_missing():
+    rule = SimpleNamespace(methods=None, rule="/login/", endpoint="login")
+
+    assert _methods(rule) == ["GET", "POST"]
 
 
 def test_flask_manifest_defaults_unknown_method_route_to_get():
@@ -99,6 +126,28 @@ def test_flask_manifest_detects_auth_endpoint_from_login_signals(tmp_path):
     assert "check_password_hash" in route["auth_signals"]
 
 
+def test_flask_manifest_marks_login_required_routes_authenticated(tmp_path):
+    app = Flask(__name__)
+
+    def login_required(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    @app.route("/dashboard/")
+    @login_required
+    def dashboard():
+        return "ok"
+
+    routes = extract_flask_routes(app)
+    route = routes["/dashboard/"]
+
+    assert route["category"] == "app"
+    assert route["auth_required"] is True
+
+
 def test_flask_manifest_detects_api_endpoint_from_jsonify_and_body(tmp_path):
     app = Flask(__name__)
 
@@ -138,3 +187,19 @@ def test_flask_manifest_detects_form_payload_over_mixed_json_response(tmp_path):
     assert route["request_body"] is True
     assert route["form_confidence"] >= 0.5
     assert "request.form" in route["form_signals"]
+
+
+def test_flask_manifest_does_not_classify_get_template_page_as_form(tmp_path):
+    app = Flask(__name__)
+
+    @app.route("/", methods=["GET"])
+    def home():
+        return render_template("home.html")
+
+    routes = extract_flask_routes(app)
+    route = routes["/"]
+
+    assert route["category"] == "unknown"
+    assert route["response_type"] == "html"
+    assert "payload_type" not in route
+    assert "form_confidence" not in route

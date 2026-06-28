@@ -375,7 +375,10 @@ def detect_api_endpoint(
     request_body = request_body or best_request_body
     payload_type = best_payload_type or payload_type
 
-    is_form = form_score >= 50 and form_score >= score
+    methods_set = {str(method).upper() for method in (methods or []) if method}
+    has_unsafe_method = bool(methods_set & {"POST", "PUT", "PATCH", "DELETE"})
+    has_form_payload_signal = payload_type == "form"
+    is_form = form_score >= 50 and form_score >= score and (has_form_payload_signal or has_unsafe_method)
     is_api = bool(score >= 50 and not is_form)
     confidence = min(0.99, score / 100.0)
     form_confidence = min(0.99, form_score / 100.0)
@@ -393,6 +396,6 @@ def detect_api_endpoint(
         confidence=round(confidence, 2),
         signals=sorted(set(signals)),
         request_body=request_body,
-        form_confidence=round(form_confidence, 2),
-        form_signals=sorted(set(form_signals)),
+        form_confidence=round(form_confidence, 2) if is_form else 0.0,
+        form_signals=sorted(set(form_signals)) if is_form else [],
     )
