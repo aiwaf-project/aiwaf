@@ -12,6 +12,7 @@ from .exemptions import normalize_path
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_MANIFEST_PATH = ".aiwaf/paths.json"
+INTERNAL_AIWAF_PATH_PREFIXES = ("/aiwaf", "/.aiwaf")
 
 MIDDLEWARE_NAMES = {
     "geo_block",
@@ -35,6 +36,11 @@ def stable_json(value: Any) -> str:
 
 def compute_context_hash(routes: Mapping[str, Any] | Iterable[Mapping[str, Any]]) -> str:
     return hashlib.sha256(stable_json(routes).encode("utf-8")).hexdigest()
+
+
+def is_internal_aiwaf_path(path: str) -> bool:
+    normalized = normalize_path(path, trailing_slash=False)
+    return any(normalized == prefix or normalized.startswith(prefix + "/") for prefix in INTERNAL_AIWAF_PATH_PREFIXES)
 
 
 def classify_route(path: str, *, methods: Iterable[str] | None = None, metadata: Mapping[str, Any] | None = None) -> dict[str, Any]:

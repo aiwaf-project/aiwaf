@@ -10,7 +10,7 @@ from typing import Any
 
 from aiwaf.core.api_detection import detect_api_endpoint
 from aiwaf.core.auth_detection import detect_auth_endpoint
-from aiwaf.core.path_manifest import build_manifest, build_route_entry, write_manifest
+from aiwaf.core.path_manifest import build_manifest, build_route_entry, is_internal_aiwaf_path, write_manifest
 from aiwaf.core.source_methods import infer_methods_from_source
 
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
@@ -168,6 +168,8 @@ def extract_flask_routes(app) -> dict[str, dict[str, Any]]:
     routes: dict[str, dict[str, Any]] = {}
     for rule in app.url_map.iter_rules():
         if rule.endpoint == "static":
+            continue
+        if is_internal_aiwaf_path(str(rule.rule)):
             continue
         raw_view_func = app.view_functions.get(rule.endpoint)
         view_func = _unwrap_view(raw_view_func)

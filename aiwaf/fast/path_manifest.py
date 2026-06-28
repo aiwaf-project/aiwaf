@@ -9,7 +9,7 @@ from typing import Any
 
 from aiwaf.core.api_detection import detect_api_endpoint
 from aiwaf.core.auth_detection import detect_auth_endpoint
-from aiwaf.core.path_manifest import build_manifest, build_route_entry, write_manifest
+from aiwaf.core.path_manifest import build_manifest, build_route_entry, is_internal_aiwaf_path, write_manifest
 from aiwaf.core.source_methods import infer_methods_from_source
 
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
@@ -173,6 +173,8 @@ def extract_fastapi_routes(app) -> dict[str, dict[str, Any]]:
         raw_endpoint = getattr(route, "endpoint", None)
         endpoint = _unwrap_endpoint(raw_endpoint)
         if not path_template or endpoint is None:
+            continue
+        if is_internal_aiwaf_path(str(path_template)):
             continue
         route_name = getattr(route, "name", "") or ""
         if route_name in {"openapi", "swagger_ui_html", "swagger_ui_redirect", "redoc_html"}:

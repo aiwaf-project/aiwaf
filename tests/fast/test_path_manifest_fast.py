@@ -30,6 +30,25 @@ def test_fastapi_manifest_extracts_routes(tmp_path):
     assert manifest["context_hash"]
 
 
+def test_fastapi_manifest_excludes_internal_aiwaf_routes():
+    def aiwaf_status():
+        return {"ok": True}
+
+    def health():
+        return {"ok": True}
+
+    app = SimpleNamespace(routes=[
+        SimpleNamespace(path="/aiwaf/status", endpoint=aiwaf_status, name="aiwaf_status", methods={"GET"}, tags=[]),
+        SimpleNamespace(path="/health", endpoint=health, name="health", methods={"GET"}, tags=[]),
+    ])
+
+    routes = extract_fastapi_routes(app)
+
+    assert "/aiwaf/status/" not in routes
+    assert "/aiwaf/status" not in routes
+    assert "/health/" in routes or "/health" in routes
+
+
 def test_fastapi_manifest_filters_head_options_methods():
     route = SimpleNamespace(methods={"GET", "HEAD", "OPTIONS", "DELETE"})
 

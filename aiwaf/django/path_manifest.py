@@ -10,7 +10,7 @@ from django.urls.resolvers import URLPattern, URLResolver
 
 from aiwaf.core.api_detection import detect_api_endpoint
 from aiwaf.core.auth_detection import detect_auth_endpoint
-from aiwaf.core.path_manifest import build_manifest, build_route_entry, write_manifest
+from aiwaf.core.path_manifest import build_manifest, build_route_entry, is_internal_aiwaf_path, write_manifest
 from aiwaf.core.source_methods import infer_methods_from_source
 
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
@@ -183,6 +183,8 @@ def _collect_routes(patterns: Any, prefix: str = "") -> dict[str, dict[str, Any]
         if not isinstance(pattern, URLPattern):
             continue
         raw_path = prefix + _clean_pattern(pattern.pattern)
+        if is_internal_aiwaf_path(raw_path or "/"):
+            continue
         callback = getattr(pattern, "callback", None)
         name = getattr(pattern, "name", "") or ""
         methods = _methods(callback, raw_path, name)

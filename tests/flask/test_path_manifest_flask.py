@@ -33,6 +33,24 @@ def test_flask_manifest_extracts_routes(tmp_path):
     assert manifest["context_hash"]
 
 
+def test_flask_manifest_excludes_internal_aiwaf_routes():
+    app = Flask(__name__)
+
+    @app.route("/aiwaf/status")
+    def aiwaf_status():
+        return jsonify({"ok": True})
+
+    @app.route("/health")
+    def health():
+        return "ok"
+
+    routes = extract_flask_routes(app)
+
+    assert "/aiwaf/status/" not in routes
+    assert "/aiwaf/status" not in routes
+    assert "/health/" in routes or "/health" in routes
+
+
 def test_flask_manifest_filters_implicit_head_options_methods():
     rule = SimpleNamespace(methods={"GET", "HEAD", "OPTIONS", "POST"})
 

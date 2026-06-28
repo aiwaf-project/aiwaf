@@ -261,3 +261,15 @@ class DjangoPathManifestTest(AIWAFTestCase):
         assert route["request_body"] is True
         assert route["form_confidence"] >= 0.5
         assert "request.POST" in route["form_signals"]
+
+    def test_django_manifest_excludes_internal_aiwaf_routes(self):
+        from aiwaf.django.path_manifest import _collect_routes
+
+        routes = _collect_routes([
+            path("aiwaf/status", django_json_endpoint, name="aiwaf_status"),
+            path("health", django_json_endpoint, name="health"),
+        ])
+
+        assert "/aiwaf/status/" not in routes
+        assert "/aiwaf/status" not in routes
+        assert "/health/" in routes or "/health" in routes

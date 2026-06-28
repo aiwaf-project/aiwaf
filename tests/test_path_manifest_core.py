@@ -3,6 +3,7 @@ from aiwaf.core.path_manifest import (
     build_route_entry,
     compile_manifest_to_path_rules,
     compute_context_hash,
+    is_internal_aiwaf_path,
 )
 
 
@@ -16,6 +17,16 @@ def test_manifest_context_hash_is_stable_for_same_routes():
     }
 
     assert compute_context_hash(routes) == compute_context_hash(dict(routes))
+
+
+def test_internal_aiwaf_paths_are_reserved():
+    assert is_internal_aiwaf_path("/aiwaf")
+    assert is_internal_aiwaf_path("/aiwaf/status")
+    assert is_internal_aiwaf_path("aiwaf/admin")
+    assert is_internal_aiwaf_path("/.aiwaf")
+    assert is_internal_aiwaf_path("/.aiwaf/paths.json")
+    assert not is_internal_aiwaf_path("/docs/aiwaf/")
+    assert not is_internal_aiwaf_path("/api/aiwaf-status/")
 
 
 def test_build_route_entry_classifies_api_route():
