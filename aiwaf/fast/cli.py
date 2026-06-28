@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import sys
+from pathlib import Path
 
 from aiwaf.flask.cli import main as _flask_cli_main
 
@@ -14,6 +15,10 @@ def _load_fastapi_app(app_path):
     module_path, _, obj = app_path.partition(":")
     if not module_path or not obj:
         raise ValueError("Use --app module:app or module:create_app")
+    project_root = str(Path.cwd())
+    while project_root in sys.path:
+        sys.path.remove(project_root)
+    sys.path.insert(0, project_root)
     module = importlib.import_module(module_path)
     target = getattr(module, obj, None)
     if target is None:

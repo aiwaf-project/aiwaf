@@ -81,9 +81,7 @@ def _detect_django_settings_module_from_manage_py(start_path: Optional[Path] = N
 
 
 def _configure_django_for_init(settings_module: Optional[str] = None) -> None:
-    project_root = str(Path.cwd())
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
+    _prepend_cwd_to_syspath()
 
     if settings_module:
         os.environ["DJANGO_SETTINGS_MODULE"] = settings_module
@@ -107,6 +105,13 @@ def _configure_django_for_init(settings_module: Optional[str] = None) -> None:
         raise SystemExit(f"Could not initialize Django settings: {exc}") from exc
 
 
+def _prepend_cwd_to_syspath() -> None:
+    project_root = str(Path.cwd())
+    while project_root in sys.path:
+        sys.path.remove(project_root)
+    sys.path.insert(0, project_root)
+
+
 def _handle_init(argv) -> None:
     import argparse
     import importlib
@@ -124,6 +129,7 @@ def _handle_init(argv) -> None:
         module_path, _, obj = args.app.partition(":")
         if not module_path or not obj:
             parser.error("--app must be module:app or module:create_app")
+        _prepend_cwd_to_syspath()
         module = importlib.import_module(module_path)
         target = getattr(module, obj, None)
         if target is None:

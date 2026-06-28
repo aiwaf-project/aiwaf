@@ -7,7 +7,7 @@ Usage:
 
 from importlib import import_module
 
-__version__ = "0.0.2"
+__version__ = "1.0.4"
 
 __all__ = [
     "AIWAF",
