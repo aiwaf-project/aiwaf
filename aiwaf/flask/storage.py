@@ -2,8 +2,10 @@
 
 import json
 import logging
+import time
 from pathlib import Path
 from aiwaf.core import storage_csv_impl as csv_impl
+from aiwaf.core.reputation import FIRST_BLOCK_SECONDS, evaluate_reputation, format_block_reason
 from aiwaf.core.storage_interfaces import ExemptionStore as ExemptionStoreProtocol, KeywordStore as KeywordStoreProtocol
 from aiwaf.core.storage_schema import (
     DEFAULT_DATA_DIR,
@@ -45,6 +47,79 @@ def _get_storage_mode():
         pass
     
     return 'memory'
+
+
+def _database_blacklist_columns():
+    """Return deployed blacklist columns without selecting through the new model."""
+    from sqlalchemy import inspect
+
+    return {
+        column["name"]
+        for column in inspect(db.engine).get_columns(BlacklistedIP.__tablename__)
+    }
+
+
+def _database_has_current_blacklist_schema():
+    required = {
+        "reputation_reason", "reasons", "score", "offenses", "blocked_at",
+        "expires_at", "duration", "permanent",
+    }
+    try:
+        return required.issubset(_database_blacklist_columns())
+    except Exception:
+        return False
+
+
+def _legacy_database_is_blacklisted(ip):
+    from sqlalchemy import text
+
+    row = db.session.execute(
+        text(f"SELECT 1 FROM {BlacklistedIP.__tablename__} WHERE ip = :ip LIMIT 1"),
+        {"ip": ip},
+    ).first()
+    return row is not None
+
+
+def _legacy_database_add_blacklist(ip, reason, extended_request_info=None):
+    """Use only columns present in a pre-reputation SQLAlchemy table."""
+    from sqlalchemy import text
+
+    table = BlacklistedIP.__tablename__
+    columns = _database_blacklist_columns()
+    existing = _legacy_database_is_blacklisted(ip)
+    values = {"ip": ip, "reason": reason}
+    assignments = ["reason = :reason"]
+    insert_columns = ["ip", "reason"]
+    insert_values = [":ip", ":reason"]
+    if "extended_request_info" in columns and extended_request_info is not None:
+        values["extended_request_info"] = json.dumps(extended_request_info)
+        assignments.append("extended_request_info = :extended_request_info")
+        insert_columns.append("extended_request_info")
+        insert_values.append(":extended_request_info")
+    if existing:
+        db.session.execute(
+            text(f"UPDATE {table} SET {', '.join(assignments)} WHERE ip = :ip"),
+            values,
+        )
+    else:
+        db.session.execute(
+            text(
+                f"INSERT INTO {table} ({', '.join(insert_columns)}) "
+                f"VALUES ({', '.join(insert_values)})"
+            ),
+            values,
+        )
+    db.session.commit()
+
+
+def _legacy_database_remove_blacklist(ip):
+    from sqlalchemy import text
+
+    db.session.execute(
+        text(f"DELETE FROM {BlacklistedIP.__tablename__} WHERE ip = :ip"),
+        {"ip": ip},
+    )
+    db.session.commit()
 
 def _get_data_dir():
     """Get data directory for CSV files."""
@@ -146,6 +221,84 @@ def _rewrite_csv_blacklist(blacklist):
     data_dir = Path(_get_data_dir())
     return csv_impl.rewrite_blacklist(data_dir, blacklist)
 
+def _is_blacklist_entry_expired(entry, now=None):
+    if not isinstance(entry, dict):
+        return False
+    expires_at = entry.get("expires_at")
+    if not expires_at:
+        return False
+    try:
+        return float(expires_at) <= (now or time.time())
+    except (TypeError, ValueError):
+        return False
+
+def _blacklist_metadata(ip, reason=None, existing=None, duration=None, extended_request_info=None):
+    now = time.time()
+    decision = evaluate_reputation(
+        existing=existing if isinstance(existing, dict) else {},
+        reason=reason or "Blocked",
+        now=now,
+    )
+    if duration is None:
+        effective_duration = decision.duration or FIRST_BLOCK_SECONDS
+    elif duration <= 0:
+        effective_duration = None
+    else:
+        effective_duration = duration
+    metadata = {
+        "ip": ip,
+        "reason": reason or "Blocked",
+        "reputation_reason": format_block_reason(decision),
+        "reasons": decision.reasons,
+        "score": decision.score,
+        "offenses": decision.offenses,
+        "blocked_at": now,
+        "added_date": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)),
+        "duration": effective_duration,
+        "expires_at": now + effective_duration if effective_duration else None,
+        "permanent": effective_duration is None,
+    }
+    if extended_request_info is not None:
+        metadata["extended_request_info"] = extended_request_info
+    elif isinstance(existing, dict) and existing.get("extended_request_info") is not None:
+        metadata["extended_request_info"] = existing.get("extended_request_info")
+    return metadata
+
+def _entry_to_dict(entry):
+    if entry is None:
+        return {}
+    reasons = getattr(entry, "reasons", None)
+    if not isinstance(reasons, list):
+        reasons = [getattr(entry, "reason", "Blocked")]
+    return {
+        "reason": getattr(entry, "reason", "Blocked"),
+        "reputation_reason": getattr(entry, "reputation_reason", ""),
+        "reasons": reasons,
+        "score": getattr(entry, "score", 0) or 0,
+        "offenses": getattr(entry, "offenses", 0) or 0,
+        "blocked_at": getattr(entry, "blocked_at", None),
+        "duration": getattr(entry, "duration", None),
+        "expires_at": getattr(entry, "expires_at", None),
+        "permanent": getattr(entry, "permanent", False),
+        "extended_request_info": getattr(entry, "extended_request_info", None),
+    }
+
+def _apply_entry_metadata(entry, metadata):
+    for key in (
+        "reason",
+        "reputation_reason",
+        "reasons",
+        "score",
+        "offenses",
+        "blocked_at",
+        "expires_at",
+        "duration",
+        "permanent",
+        "extended_request_info",
+    ):
+        if hasattr(entry, key):
+            setattr(entry, key, metadata.get(key))
+
 # Store adapters for keyword/exemption access
 class ExemptionStore:
     _exempt_ips = set()
@@ -241,13 +394,23 @@ def _rewrite_csv_whitelist(whitelist):
 def is_ip_blacklisted(ip):
     """Check if IP is blacklisted."""
     storage_mode = _get_storage_mode()
+    now = time.time()
     
     if storage_mode == 'database':
         try:
             # Additional check to ensure database is properly initialized
             from flask import current_app
             if hasattr(current_app, 'extensions') and 'sqlalchemy' in current_app.extensions:
-                return BlacklistedIP.query.filter_by(ip=ip).first() is not None
+                if not _database_has_current_blacklist_schema():
+                    return _legacy_database_is_blacklisted(ip)
+                entry = BlacklistedIP.query.filter_by(ip=ip).first()
+                if not entry:
+                    return False
+                if _is_blacklist_entry_expired(_entry_to_dict(entry), now=now):
+                    db.session.delete(entry)
+                    db.session.commit()
+                    return False
+                return True
             else:
                 storage_mode = 'csv'
         except Exception:
@@ -256,36 +419,80 @@ def is_ip_blacklisted(ip):
     
     if storage_mode == 'csv':
         blacklist = _read_csv_blacklist()
-        return ip in blacklist
+        entry = blacklist.get(ip)
+        if _is_blacklist_entry_expired(entry, now=now):
+            blacklist.pop(ip, None)
+            _rewrite_csv_blacklist(blacklist)
+            return False
+        return entry is not None
     else:
-        return ip in _memory_blacklist
+        entry = _memory_blacklist.get(ip)
+        if _is_blacklist_entry_expired(entry, now=now):
+            _memory_blacklist.pop(ip, None)
+            return False
+        return entry is not None
 
-def add_ip_blacklist(ip, reason=None, extended_request_info=None):
+def add_ip_blacklist(ip, reason=None, extended_request_info=None, duration=None):
     """Add IP to blacklist."""
-    if is_ip_blacklisted(ip):
-        return
-    
     storage_mode = _get_storage_mode()
     reason = reason or "Blocked"
     
     if storage_mode == 'database':
         try:
-            db.session.add(
-                BlacklistedIP(
-                    ip=ip,
-                    reason=reason,
+            if not _database_has_current_blacklist_schema():
+                _legacy_database_add_blacklist(
+                    ip,
+                    reason,
                     extended_request_info=extended_request_info,
                 )
+                return
+            entry = BlacklistedIP.query.filter_by(ip=ip).first()
+            existing = _entry_to_dict(entry) if entry else {}
+            if _is_blacklist_entry_expired(existing):
+                db.session.delete(entry)
+                db.session.flush()
+                entry = None
+                existing = {}
+            metadata = _blacklist_metadata(
+                ip,
+                reason=reason,
+                existing=existing,
+                duration=duration,
+                extended_request_info=extended_request_info,
             )
+            if entry is None:
+                entry = BlacklistedIP(ip=ip)
+                db.session.add(entry)
+            _apply_entry_metadata(entry, metadata)
             db.session.commit()
             return
         except Exception:
             storage_mode = 'csv'
     
     if storage_mode == 'csv':
-        _append_csv_blacklist(ip, reason, extended_request_info=extended_request_info)
+        blacklist = _read_csv_blacklist()
+        existing = blacklist.get(ip) or {}
+        if _is_blacklist_entry_expired(existing):
+            existing = {}
+        blacklist[ip] = _blacklist_metadata(
+            ip,
+            reason=reason,
+            existing=existing,
+            duration=duration,
+            extended_request_info=extended_request_info,
+        )
+        _rewrite_csv_blacklist(blacklist)
     else:
-        _memory_blacklist[ip] = reason
+        existing = _memory_blacklist.get(ip) or {}
+        if _is_blacklist_entry_expired(existing):
+            existing = {}
+        _memory_blacklist[ip] = _blacklist_metadata(
+            ip,
+            reason=reason,
+            existing=existing,
+            duration=duration,
+            extended_request_info=extended_request_info,
+        )
 
 def remove_ip_blacklist(ip):
     """Remove IP from blacklist."""
@@ -293,6 +500,9 @@ def remove_ip_blacklist(ip):
     
     if storage_mode == 'database':
         try:
+            if not _database_has_current_blacklist_schema():
+                _legacy_database_remove_blacklist(ip)
+                return
             entry = BlacklistedIP.query.filter_by(ip=ip).first()
             if entry:
                 db.session.delete(entry)

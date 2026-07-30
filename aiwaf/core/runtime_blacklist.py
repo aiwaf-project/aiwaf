@@ -176,7 +176,7 @@ class BlacklistManager:
         Returns:
             True if blocked, False if exempted
         """
-        return cls.block(ip, f"Permanent: {reason}", None)
+        return cls.block(ip, f"Permanent: {reason}", 0)
     
     @classmethod
     def add_to_whitelist(cls, ip: str, reason: str = "Manual whitelist"):

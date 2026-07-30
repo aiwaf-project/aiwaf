@@ -782,7 +782,7 @@ class AIAnomalyMiddleware(MiddlewareMixin):
         if not recent_data:
             return None
 
-        if getattr(settings, "AIWAF_USE_RUST", False) and rust_available():
+        if rust_available():
             rust_payload = []
             for entry_time, entry_path, entry_status, _ in recent_data:
                 entry_known_path = path_exists_in_django(entry_path)
@@ -1318,11 +1318,9 @@ class HeaderValidationMiddleware(MiddlewareMixin):
         required_headers = self._get_required_headers(request)
         min_score = self._get_min_quality_score(required_headers)
 
+        rust_reason = None
         if self._should_use_rust():
-            reason = rust_validate_headers(headers, required_headers, min_score)
-            if reason:
-                return self._block_request(request, ip, reason, request.path)
-            return None
+            rust_reason = rust_validate_headers(headers, required_headers, min_score)
 
         reason = core_header_validation.evaluate_header_policy(
             headers,
@@ -1340,14 +1338,14 @@ class HeaderValidationMiddleware(MiddlewareMixin):
         )
         if reason:
             return self._block_request(request, ip, reason, request.path)
+
+        if rust_reason:
+            return self._block_request(request, ip, rust_reason, request.path)
         
         return None
 
     def _should_use_rust(self) -> bool:
-        return (
-            getattr(settings, "AIWAF_USE_RUST", False)
-            and rust_available()
-        )
+        return rust_available()
     
     def _is_static_request(self, request):
         """Check if this is a request for static files"""

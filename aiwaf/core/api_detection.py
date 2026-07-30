@@ -19,6 +19,7 @@ class ApiDetection:
     request_body: bool = False
     form_confidence: float = 0.0
     form_signals: List[str] = field(default_factory=list)
+    payload_fields: List[str] = field(default_factory=list)
 
 
 IMPORT_SIGNALS = {
@@ -65,6 +66,8 @@ FORM_BODY_ATTRS = {
     "FILES",
     "form",
 }
+
+PAYLOAD_FIELD_METHODS = {"get", "getlist", "pop", "__getitem__"}
 
 
 def _unwrap(callback: Any) -> Any:
@@ -171,6 +174,61 @@ def _is_form_body_attr(node: ast.AST, request_names: Set[str]) -> bool:
     )
 
 
+def _constant_string(node: ast.AST) -> Optional[str]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        value = node.value.strip()
+        return value or None
+    if isinstance(node, ast.Str):
+        value = node.s.strip()
+        return value or None
+    return None
+
+
+def _is_request_payload_source(node: ast.AST, request_names: Set[str]) -> bool:
+    if _is_json_body_attr(node, request_names) or _is_form_body_attr(node, request_names):
+        return True
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"get_json", "json"}
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in request_names
+    )
+
+
+def _assigned_names(target: ast.AST) -> Set[str]:
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, (ast.Tuple, ast.List)):
+        names: Set[str] = set()
+        for element in target.elts:
+            names.update(_assigned_names(element))
+        return names
+    return set()
+
+
+def _payload_field_from_call(call: ast.Call, request_names: Set[str], payload_names: Set[str]) -> Optional[str]:
+    function = call.func
+    if isinstance(function, ast.Attribute) and function.attr in PAYLOAD_FIELD_METHODS and call.args:
+        receiver = function.value
+        if (
+            isinstance(receiver, ast.Name)
+            and receiver.id in payload_names
+        ) or _is_request_payload_source(receiver, request_names):
+            return _constant_string(call.args[0])
+    return None
+
+
+def _payload_field_from_subscript(node: ast.Subscript, request_names: Set[str], payload_names: Set[str]) -> Optional[str]:
+    receiver = node.value
+    if (
+        isinstance(receiver, ast.Name)
+        and receiver.id in payload_names
+    ) or _is_request_payload_source(receiver, request_names):
+        return _constant_string(node.slice)
+    return None
+
+
 def _literal_content_type(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and isinstance(node.value, str) and "application/json" in node.value.lower()
 
@@ -182,14 +240,14 @@ def _analyze_function(
     *,
     depth: int = 0,
     seen: Optional[Set[str]] = None,
-) -> tuple[int, List[str], bool, int, List[str], str]:
+) -> tuple[int, List[str], bool, int, List[str], str, List[str]]:
     if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        return 0, [], False, 0, [], ""
+        return 0, [], False, 0, [], "", []
     if depth > 3:
-        return 0, [], False, 0, [], ""
+        return 0, [], False, 0, [], "", []
     seen = set(seen or set())
     if node.name in seen:
-        return 0, [], False, 0, [], ""
+        return 0, [], False, 0, [], "", []
     seen.add(node.name)
 
     score = 0
@@ -198,6 +256,8 @@ def _analyze_function(
     form_signals: List[str] = []
     request_body = False
     payload_type = ""
+    payload_fields: Set[str] = set()
+    payload_names: Set[str] = set()
     request_names = {"request"}
     if node.args.args:
         request_names.add(node.args.args[0].arg)
@@ -218,6 +278,12 @@ def _analyze_function(
             signals.append(f"body_model:{annotation_name}")
 
     for child in ast.walk(node):
+        if isinstance(child, ast.Assign) and _is_request_payload_source(child.value, request_names):
+            for target in child.targets:
+                payload_names.update(_assigned_names(target))
+        if isinstance(child, ast.AnnAssign) and child.value is not None and _is_request_payload_source(child.value, request_names):
+            payload_names.update(_assigned_names(child.target))
+
         if isinstance(child, ast.Return):
             if isinstance(child.value, (ast.Dict, ast.List, ast.Tuple)):
                 score += 50
@@ -251,6 +317,9 @@ def _analyze_function(
         if isinstance(child, ast.Call):
             name = _call_name(child)
             function = child.func
+            field_name = _payload_field_from_call(child, request_names, payload_names)
+            if field_name:
+                payload_fields.add(field_name)
             if (
                 isinstance(function, ast.Attribute)
                 and function.attr in {"get_json", "json"}
@@ -276,6 +345,7 @@ def _analyze_function(
                     helper_form_score,
                     helper_form_signals,
                     helper_payload_type,
+                    helper_payload_fields,
                 ) = _analyze_function(
                     helper,
                     functions,
@@ -289,7 +359,12 @@ def _analyze_function(
                 signals.extend(helper_signals)
                 form_signals.extend(helper_form_signals)
                 payload_type = helper_payload_type or payload_type
-    return score, signals, request_body, form_score, form_signals, payload_type
+                payload_fields.update(helper_payload_fields)
+        if isinstance(child, ast.Subscript):
+            field_name = _payload_field_from_subscript(child, request_names, payload_names)
+            if field_name:
+                payload_fields.add(field_name)
+    return score, signals, request_body, form_score, form_signals, payload_type, sorted(payload_fields)
 
 
 def detect_api_endpoint(
@@ -345,6 +420,7 @@ def detect_api_endpoint(
     best_form_score = 0
     best_form_signals: List[str] = []
     best_payload_type = ""
+    best_payload_fields: List[str] = []
     for tree, top_level_only in trees:
         imports, import_signals, import_score, form_import_signals, form_import_score = _imports(tree)
         functions = _top_level_functions(tree) if top_level_only else {
@@ -353,9 +429,17 @@ def detect_api_endpoint(
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
         if view_name and view_name in functions:
-            call_score, call_signals, body, source_form_score, source_form_signals, source_payload_type = _analyze_function(functions[view_name], functions, imports)
+            (
+                call_score,
+                call_signals,
+                body,
+                source_form_score,
+                source_form_signals,
+                source_payload_type,
+                source_payload_fields,
+            ) = _analyze_function(functions[view_name], functions, imports)
         else:
-            call_score, call_signals, body, source_form_score, source_form_signals, source_payload_type = 0, [], False, 0, [], ""
+            call_score, call_signals, body, source_form_score, source_form_signals, source_payload_type, source_payload_fields = 0, [], False, 0, [], "", []
         source_score = call_score + (import_score if call_score else 0)
         source_form_score = source_form_score + (form_import_score if source_form_score else 0)
         source_signals = call_signals + (import_signals if call_score else [])
@@ -367,6 +451,7 @@ def detect_api_endpoint(
             best_form_score = source_form_score
             best_form_signals = source_form_signals
             best_payload_type = source_payload_type
+            best_payload_fields = source_payload_fields
 
     score += best_source_score
     form_score += best_form_score
@@ -374,6 +459,7 @@ def detect_api_endpoint(
     form_signals.extend(best_form_signals)
     request_body = request_body or best_request_body
     payload_type = best_payload_type or payload_type
+    payload_fields = sorted(set(best_payload_fields))
 
     methods_set = {str(method).upper() for method in (methods or []) if method}
     has_unsafe_method = bool(methods_set & {"POST", "PUT", "PATCH", "DELETE"})
@@ -398,4 +484,5 @@ def detect_api_endpoint(
         request_body=request_body,
         form_confidence=round(form_confidence, 2) if is_form else 0.0,
         form_signals=sorted(set(form_signals)) if is_form else [],
+        payload_fields=payload_fields,
     )

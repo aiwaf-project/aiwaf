@@ -2,6 +2,7 @@ import pytest
 import tempfile
 import shutil
 from pathlib import Path
+from aiwaf.core.storage_schema import BLACKLIST_CSV, CSV_HEADERS
 
 def test_csv_middleware_integration(app):
     """Test AIWAF middleware with CSV storage."""
@@ -75,7 +76,7 @@ def test_csv_files_structure():
         with open(blacklist_file, 'r') as f:
             reader = csv.reader(f)
             headers = next(reader)
-            assert headers == ['ip', 'reason', 'added_date', 'extended_request_info']
+            assert headers == CSV_HEADERS[BLACKLIST_CSV]
         
         # Check keywords structure
         keywords_file = Path(temp_dir) / 'keywords.csv'

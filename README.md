@@ -7,6 +7,9 @@ AIWAF provides context-aware protection with rate limiting, anomaly detection, h
 
 ## Latest Enhancements
 
+- Reputation-based IP blocking with weighted offenses and progressive block durations
+- Automatic migration of legacy blacklist CSV formats with CLI tools to inspect, convert, or clear imported entries
+- Request payload-field inference for generated route manifests
 - Smart keyword filtering to avoid blocking legitimate paths like `/profile/`
 - Granular reset controls for blacklist, keywords, and exemptions
 - Context-aware learning that prioritizes suspicious traffic over normal routes
@@ -82,6 +85,9 @@ import aiwaf.fast as aiwaf
 - **IP blocklist**
   - blocks known suspicious sources quickly
   - supports runtime updates through adapter storage
+  - tracks reason history, reputation score, offense count, and expiration metadata
+  - uses progressive temporary blocks while retaining explicit permanent-block support
+  - automatically removes expired entries during blacklist checks
 
 - **Rate limiting**
   - sliding-window request control (`AIWAF_RATE_WINDOW`, `AIWAF_RATE_MAX`)
@@ -191,8 +197,9 @@ Model persistence is intentionally JSON-only. AIWAF does not load Python object
 model artifacts (`pickle`, `joblib`, or `skops`) because those formats can
 execute code during deserialization. Scikit-learn models may be used during a
 training run for immediate analysis, but they are not persisted. To persist and
-reload runtime AI models, enable the Rust backend so `aiwaf_rust.IsolationForest`
-can save/load JSON state. The old bundled `model.pkl` artifacts have been
+reload runtime AI models, install the Rust package so
+`aiwaf_rust.IsolationForest` can save/load JSON state. The old bundled
+`model.pkl` artifacts have been
 removed; retrain to generate a `model.json` artifact.
 
 ---
@@ -272,11 +279,12 @@ AIWAF_GEO_CACHE_PREFIX = "aiwaf:geo:"
 Rust acceleration:
 
 ```python
-AIWAF_USE_RUST = False
 AIWAF_RUST_ISOLATION_FOREST = True
 ```
 
-When enabled, AIWAF attempts Rust-backed helpers and falls back to Python automatically.
+When `aiwaf_rust` is importable, AIWAF automatically uses its supported
+accelerators. No `AIWAF_USE_RUST` setting is required. Python fallback remains
+automatic when the package or a particular Rust capability is unavailable.
 Persisted AI model loading requires a JSON artifact; the Rust `IsolationForest`
 backend provides the supported JSON model state. Pickle-based `model.pkl`
 artifacts are no longer shipped or loaded.
@@ -427,7 +435,6 @@ from flask import Flask
 from aiwaf.flask import AIWAF
 
 app = Flask(__name__)
-app.config["AIWAF_USE_RUST"] = True
 app.config["AIWAF_GEO_BLOCK_ENABLED"] = False
 app.config["AIWAF_MIN_AI_LOGS"] = 10000
 
@@ -453,6 +460,105 @@ python -m aiwaf.flask.cli add whitelist 203.0.113.10
 python -m aiwaf.flask.cli add blacklist 203.0.113.99 --reason "manual test"
 python -m aiwaf.flask.cli add keyword ../etc/passwd
 python -m aiwaf.flask.cli status
+python -m aiwaf.flask.cli blocked
+python -m aiwaf.flask.cli unblock 203.0.113.99
+python -m aiwaf.flask.cli clear
+```
+
+Blacklist migration commands:
+
+```bash
+# Detect the configured backend and upgrade legacy rows
+aiwaf flask blacklist migrate --app myapp:app
+aiwaf fast blacklist migrate --app myapp:app
+aiwaf django blacklist migrate
+
+# Inspect all entries or only legacy imports
+python -m aiwaf.flask.cli blacklist list
+python -m aiwaf.flask.cli blacklist list --legacy
+
+# Convert legacy permanent entries to temporary blocks (default: 24h)
+python -m aiwaf.flask.cli blacklist convert-legacy
+python -m aiwaf.flask.cli blacklist convert-legacy --duration 1d
+
+# Remove only legacy-imported entries
+python -m aiwaf.flask.cli blacklist clear-legacy
+```
+
+Durations accept seconds or an `s`, `m`, `h`, or `d` suffix, such as `900`,
+`15m`, `24h`, or `1d`. Old headered and headerless blacklist CSV layouts are
+upgraded automatically. Imported legacy rows remain permanent until explicitly
+converted or cleared.
+
+#### Upgrading an Existing Blocklist
+
+Back up the database or AIWAF data directory before upgrading. Existing entries
+should be preserved as permanent blocks unless you deliberately convert them to
+temporary blocks.
+
+| Framework/storage | Schema update | Existing entries |
+|---|---|---|
+| Django ORM | Run Django migrations, then `aiwaf django blacklist migrate` | Command backfills the new reputation fields |
+| Flask SQLAlchemy | Run the application's Alembic/Flask-Migrate migration, then `aiwaf flask blacklist migrate --app ...` | Command backfills the new fields |
+| Flask `blacklist.csv` | `aiwaf flask blacklist migrate --app ...` | Imported as permanent; use `convert-legacy` to make them temporary |
+| Django/FastAPI shared `csv`, `file`, or `db` runtime backend | `aiwaf django blacklist migrate` or `aiwaf fast blacklist migrate --app ...` | Command upgrades legacy key/value records in place |
+
+Django ORM:
+
+```bash
+# Generate and apply the model-column migration in the Django project.
+python manage.py makemigrations aiwaf
+python manage.py migrate aiwaf
+
+aiwaf django blacklist migrate
+# Equivalent:
+python manage.py aiwaf_migrate_blacklist
+```
+
+The command detects `AIWAF_STORAGE_MODE`. In ORM mode it verifies that the new
+columns exist and backfills legacy rows. In CSV mode it upgrades the configured
+runtime store. It stops with the exact schema-migration instruction if ORM
+columns are still missing.
+
+Flask SQLAlchemy ORM:
+
+```bash
+# db.create_all() does not alter an existing table.
+flask db migrate -m "add AIWAF blacklist reputation fields"
+flask db upgrade
+aiwaf flask blacklist migrate --app myapp:app
+```
+
+The Flask command loads the application so it can inspect `AIWAF_USE_CSV` and
+the initialized SQLAlchemy extension. It migrates CSV directly, or verifies and
+backfills the ORM table. If ORM columns are missing, it stops and asks for the
+application-owned Alembic/Flask-Migrate migration; AIWAF does not silently alter
+an application's relational schema.
+
+Migration is optional for runtime compatibility. Until it is run, Django and
+Flask ORM adapters detect the deployed table columns and continue using the
+legacy `ip`/`reason` behavior. FastAPI and the shared runtime backends continue
+to recognize old reason-only `blocked:*` values as permanent blocks. New
+reputation metadata takes effect after migration or when a legacy runtime value
+is updated. This fallback prevents a package upgrade from silently unblocking
+existing IPs.
+
+For Flask CSV storage, set `AIWAF_DATA_DIR` (or Flask
+`AIWAF_DATA_DIR`) to the directory containing the current `blacklist.csv`
+before running the migration commands. Reading the file rewrites old layouts
+to the current columns. The migration recognizes old headered layouts such as
+`ip,reason,added_date,extended_request_info` and `ip,timestamp,reason`, plus
+headerless `ip[,reason]` rows.
+
+For Django CSV and FastAPI, the shared runtime backends use key/value storage
+(`runtime_store.csv`, JSON/file storage, or the `kv_store` SQLite table), so
+there are no ORM columns to add. Keep the configured data path unchanged and
+run the matching migration command. For FastAPI without an importable app, pass
+the backend explicitly, for example:
+
+```bash
+aiwaf fast blacklist migrate --backend csv --storage-path aiwaf_data/runtime_store.csv
+aiwaf fast blacklist migrate --backend db --storage-path aiwaf_data/aiwaf_data.db
 ```
 
 ### FastAPI Adapter Reference
@@ -512,6 +618,7 @@ analysis when metadata is missing. It can infer:
 - auth endpoints from signals such as `authenticate`, `login`, `login_user`, `OAuth2PasswordRequestForm`, and helper calls
 - API endpoints from combined signals such as `/api/` paths, DRF `APIView`/`ViewSet`, Flask JSON endpoints, FastAPI route metadata, Pydantic/body models, `request.body`, `request.data`, `request.json`, and JSON content-type expectations
 - form endpoints from `request.POST`, `request.form`, Django `Form`/`ModelForm`, `render`, `render_template`, `redirect`, and mixed HTML/JSON response flows
+- literal payload field names from form/JSON access such as `payload.get("email")`, `request.form["password"]`, and equivalent aliases
 - upload/static/app routes from path and source signals
 
 Detector output is explainable: generated routes can include confidence scores
@@ -535,6 +642,7 @@ Manifest shape:
       "category": "api",
       "response_type": "json",
       "payload_type": "json",
+      "payload_fields": ["email", "message"],
       "auth_required": false,
       "api_confidence": 0.94,
       "api_signals": ["path:/api", "JsonResponse", "request.body"],
@@ -617,6 +725,10 @@ it automatically.
 - Default behavior: blocked requests raise `PermissionDenied("blocked")` and return `403`.
 - For JSON APIs (Django): `JsonExceptionMiddleware` converts blocked JSON requests into JSON `403` payloads.
 - Rate limiting can emit `429` for soft throttling paths while still escalating repeated abuse to blacklist flow.
+- Reputation scores accumulate by reason (for example SQL injection, XSS, scanner, brute-force, rate-limit, honeypot, UUID, header, geo, and keyword events).
+- The default reputation threshold is 60. Qualifying blocks progress from 15 minutes to 1 hour and then 24 hours for repeated or high-score abuse.
+- Storage backends persist score, offenses, reason history, block/expiry timestamps, duration, permanence, and extended request details.
+- Passing a positive duration creates a temporary block; the runtime storage API treats a non-positive duration as an explicit permanent block.
 
 ### Rate Limiting Cache (Multi-worker)
 
@@ -755,7 +867,7 @@ Then tune:
 - verify log path and permissions
 - check volume vs `AIWAF_MIN_AI_LOGS` / `AIWAF_MIN_TRAIN_LOGS`
 - use `AIWAF_FORCE_AI_TRAINING=True` only when appropriate
-- for persisted runtime ML inference, enable `AIWAF_USE_RUST=True` so training can produce a JSON model artifact
+- install `aiwaf-rust` for persisted runtime ML inference and JSON model artifacts
 
 ### Geo-blocking not active
 
@@ -765,7 +877,6 @@ Then tune:
 
 ### Rust mode appears inactive
 
-- set `AIWAF_USE_RUST=True`
 - verify environment can import Rust extension
 - fallback to Python is expected on Rust import/runtime failure
 
@@ -932,18 +1043,12 @@ Stabilize real-time paths:
 
 ## Rust Verification
 
-Enable:
-
-```python
-AIWAF_USE_RUST = True
-```
-
 Runtime behavior:
 - Rust extension available: selected paths use Rust acceleration
 - Rust extension unavailable: automatic fallback to Python
 
 Verification checklist:
-1. start app with `AIWAF_USE_RUST=True`
+1. verify `python -c "import aiwaf_rust"` succeeds
 2. confirm startup/runtime logs show Rust availability or fallback path
 3. benchmark with multiple iterations and compare medians (`run-and-compare.py -n 5`)
 
@@ -966,7 +1071,7 @@ AI anomaly not active:
 - verify AI deps are installed
 - verify `AIWAF_DISABLE_AI=False`
 - verify thresholds (`AIWAF_MIN_AI_LOGS`, `AIWAF_MIN_TRAIN_LOGS`)
-- enable `AIWAF_USE_RUST=True` if you need a persisted runtime ML model
+- install `aiwaf-rust` if you need a persisted runtime ML model
 
 Geo-blocking appears inactive:
 - confirm middleware enabled

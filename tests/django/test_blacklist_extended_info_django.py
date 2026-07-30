@@ -30,6 +30,11 @@ class BlacklistExtendedInfoStorageTests(AIWAFStorageTestCase):
         self.assertTrue(any(e.get("ip_address") == "203.0.113.55" for e in entries))
         entry = next(e for e in entries if e.get("ip_address") == "203.0.113.55")
         self.assertEqual(entry.get("extended_request_info"), info)
+        self.assertEqual(entry.get("reason"), "Test reason")
+        self.assertTrue(entry.get("reputation_reason", "").startswith("Test reason;"))
+        self.assertEqual(entry.get("score"), 10)
+        self.assertEqual(entry.get("offenses"), 1)
+        self.assertIsNotNone(entry.get("expires_at"))
 
 
 class BlacklistExtendedInfoCaptureTests(AIWAFTestCase):
@@ -95,6 +100,8 @@ class BlacklistExtendedInfoEdgeCaseTests(AIWAFStorageTestCase):
         entries = store.get_all()
         entry = next(e for e in entries if e.get("ip_address") == "203.0.113.56")
         self.assertEqual(entry.get("extended_request_info"), info)
+        self.assertEqual(entry.get("reason"), "Second")
+        self.assertGreaterEqual(entry.get("offenses", 0), 2)
 
 
 class BlacklistHeaderLimitsTests(AIWAFTestCase):

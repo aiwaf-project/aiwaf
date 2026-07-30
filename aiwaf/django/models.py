@@ -23,6 +23,14 @@ class BlacklistEntry(models.Model):
     ip_address = models.GenericIPAddressField(unique=True, db_index=True)
     reason     = models.CharField(max_length=100)
     extended_request_info = models.JSONField(blank=True, default=dict)
+    reputation_reason = models.CharField(max_length=500, blank=True, default="")
+    reasons = models.JSONField(blank=True, default=list)
+    score = models.IntegerField(default=0)
+    offenses = models.IntegerField(default=0)
+    blocked_at = models.FloatField(null=True, blank=True)
+    expires_at = models.FloatField(null=True, blank=True)
+    duration = models.IntegerField(null=True, blank=True)
+    permanent = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

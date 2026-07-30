@@ -392,7 +392,7 @@ def _iter_logs_from_model():
 
 
 def _should_use_rust_features() -> bool:
-    return getattr(settings, "AIWAF_USE_RUST", False) and rust_available()
+    return rust_available()
 
 
 def _extract_rust_features_parallel(records, static_keywords, chunk_size, max_workers):
@@ -757,7 +757,7 @@ def train(disable_ai=False, force_ai=False) -> None:
     # AI Model Training (optional)
     blocked_count = 0
     force_ai = force_ai or getattr(settings, "AIWAF_FORCE_AI_TRAINING", False)
-    use_rust_ai = bool(getattr(settings, "AIWAF_USE_RUST", False)) and rust_isolation_forest_available()
+    use_rust_ai = rust_isolation_forest_available()
     if not disable_ai and not force_ai and parsed_count < MIN_AI_LOGS:
         logger.info(f"AI training skipped: {parsed_count} log lines < {MIN_AI_LOGS}. Falling back to keyword-only.")
         disable_ai = True

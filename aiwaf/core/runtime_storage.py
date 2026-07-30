@@ -10,6 +10,7 @@ from abc import ABC, abstractmethod
 from typing import Set, Dict, Optional, List, Any
 from pathlib import Path
 import logging
+from .reputation import FIRST_BLOCK_SECONDS, evaluate_reputation, format_block_reason
 
 logger = logging.getLogger(__name__)
 
@@ -501,18 +502,35 @@ class BlacklistStore:
             reason: Reason for blocking
             duration: Block duration in seconds (None for permanent)
         """
+        now = time.time()
+        existing = self.get_block_info(ip) or {}
+        if not isinstance(existing, dict):
+            existing = {"reason": str(existing), "reasons": [str(existing)]}
+        decision = evaluate_reputation(existing=existing, reason=reason, now=now)
+        if duration is None:
+            effective_duration = decision.duration or FIRST_BLOCK_SECONDS
+        elif duration <= 0:
+            effective_duration = None
+        else:
+            effective_duration = duration
+        expires_at = now + effective_duration if effective_duration else None
         block_data = {
             'ip': ip,
             'reason': reason,
-            'blocked_at': time.time(),
-            'duration': duration,
-            'permanent': duration is None
+            'reputation_reason': format_block_reason(decision),
+            'reasons': decision.reasons,
+            'score': decision.score,
+            'offenses': decision.offenses,
+            'blocked_at': now,
+            'duration': effective_duration,
+            'expires_at': expires_at,
+            'permanent': effective_duration is None
         }
         if extended_request_info is not None:
             block_data["extended_request_info"] = extended_request_info
         
         # Store the block
-        self.storage.set(f"blocked:{ip}", block_data, ttl=duration)
+        self.storage.set(f"blocked:{ip}", block_data, ttl=effective_duration)
         
         # Add to block log
         block_log = self.storage.get("block_log") or []
@@ -541,7 +559,22 @@ class BlacklistStore:
     
     def get_block_info(self, ip: str) -> Optional[Dict[str, Any]]:
         """Get block information for an IP."""
-        return self.storage.get(f"blocked:{ip}")
+        value = self.storage.get(f"blocked:{ip}")
+        if value is None or isinstance(value, dict):
+            return value
+        # Pre-metadata runtime stores sometimes persisted only the reason string.
+        return {
+            "ip": ip,
+            "reason": str(value),
+            "reputation_reason": "legacy_blacklist",
+            "reasons": ["legacy_blacklist", str(value)],
+            "score": 100,
+            "offenses": 1,
+            "blocked_at": None,
+            "expires_at": None,
+            "duration": None,
+            "permanent": True,
+        }
     
     def get_blocked_ips(self) -> List[str]:
         """Get all currently blocked IPs."""
@@ -559,6 +592,8 @@ class BlacklistStore:
         current_time = time.time()
         
         for entry in block_log:
+            if not isinstance(entry, dict):
+                entry = {"reason": str(entry), "blocked_at": 0}
             reason = entry.get('reason', 'unknown')
             reason_counts[reason] = reason_counts.get(reason, 0) + 1
             

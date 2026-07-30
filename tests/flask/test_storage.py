@@ -9,6 +9,7 @@ from aiwaf.flask.storage import (
     add_geo_blocked_country, remove_geo_blocked_country,
     is_country_geo_blocked, get_geo_blocked_countries
 )
+from aiwaf.flask.db_models import BlacklistedIP
 
 def test_add_ip_whitelist(app_context):
     """Test adding IP to whitelist."""
@@ -33,6 +34,14 @@ def test_add_ip_blacklist(app_context):
     
     add_ip_blacklist(ip, reason)
     assert is_ip_blacklisted(ip)
+
+    entry = BlacklistedIP.query.filter_by(ip=ip).first()
+    assert entry is not None
+    assert entry.reason == reason
+    assert entry.reputation_reason.startswith(reason)
+    assert entry.score == 10
+    assert entry.offenses == 1
+    assert entry.expires_at > entry.blocked_at
 
 def test_remove_ip_blacklist(app_context):
     """Test removing IP from blacklist."""
@@ -142,6 +151,20 @@ def test_csv_storage_blacklist_extended_request_info_column(csv_app_context):
     content = csv_file.read_text(encoding="utf-8")
     header = content.splitlines()[0]
     assert "extended_request_info" in header
+
+
+def test_csv_storage_blacklist_reputation_metadata(csv_app_context):
+    from aiwaf.flask.storage import _read_csv_blacklist
+
+    ip = "10.10.10.3"
+    add_ip_blacklist(ip, "scanner", extended_request_info={"path": "/scan"})
+
+    entry = _read_csv_blacklist()[ip]
+    assert entry["reason"] == "scanner"
+    assert entry["score"] == 20
+    assert entry["offenses"] == 1
+    assert entry["expires_at"] > entry["blocked_at"]
+    assert entry["extended_request_info"] == {"path": "/scan"}
 
 def test_csv_storage_keywords(csv_app_context):
     """Test CSV storage for keywords."""

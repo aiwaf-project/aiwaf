@@ -7,6 +7,7 @@ import random
 import tempfile
 import concurrent.futures
 from pathlib import Path
+from aiwaf.core.storage_schema import BLACKLIST_CSV, CSV_HEADERS
 from aiwaf.flask.storage import (
     add_ip_whitelist, is_ip_whitelisted, add_ip_blacklist, 
     is_ip_blacklisted, add_keyword, _get_data_dir
@@ -311,7 +312,7 @@ class TestConcurrentCSVAccess:
         with open(blacklist_file, 'r') as f:
             lines = f.readlines()
             assert len(lines) > 1, "Blacklist file appears corrupted"
-            assert 'ip,reason,added_date,extended_request_info' in lines[0], "Blacklist header corrupted"
+            assert lines[0].strip().split(",") == CSV_HEADERS[BLACKLIST_CSV], "Blacklist header corrupted"
         
         # Check keywords file
         keywords_file = data_dir / "keywords.csv"

@@ -37,6 +37,33 @@ def test_blacklisted_ip_creation(app_context):
     assert ip_entry.reason == 'suspicious activity'
     assert ip_entry.extended_request_info["path"] == "/login"
 
+
+def test_blacklisted_ip_reputation_metadata_fields(app_context):
+    """Test blacklist model has reputation metadata fields."""
+    ip_entry = BlacklistedIP(
+        ip='10.0.0.2',
+        reason='scanner',
+        reputation_reason='scanner; score=20; offenses=1',
+        reasons=['scanner'],
+        score=20,
+        offenses=1,
+        blocked_at=1000.0,
+        expires_at=1900.0,
+        duration=900,
+        permanent=False,
+    )
+    db.session.add(ip_entry)
+    db.session.commit()
+
+    saved = BlacklistedIP.query.filter_by(ip='10.0.0.2').first()
+    assert saved.reputation_reason == 'scanner; score=20; offenses=1'
+    assert saved.reasons == ['scanner']
+    assert saved.score == 20
+    assert saved.offenses == 1
+    assert saved.expires_at == 1900.0
+    assert saved.duration == 900
+    assert saved.permanent is False
+
 def test_blacklisted_ip_unique_constraint(app_context):
     """Test that duplicate IPs are not allowed in blacklist."""
     ip1 = BlacklistedIP(ip='10.0.0.1', reason='test')

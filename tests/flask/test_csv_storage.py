@@ -4,6 +4,7 @@ import shutil
 import csv
 import os
 from pathlib import Path
+from aiwaf.core.storage_schema import BLACKLIST_CSV, CSV_HEADERS
 from aiwaf.flask.storage import (
     add_ip_whitelist, is_ip_whitelisted, 
     add_ip_blacklist, is_ip_blacklisted, remove_ip_blacklist,
@@ -125,7 +126,7 @@ def test_csv_file_creation(csv_app_context):
     with open(blacklist_file, 'r') as f:
         reader = csv.reader(f)
         headers = next(reader)
-        assert headers == ['ip', 'reason', 'added_date', 'extended_request_info']
+        assert headers == CSV_HEADERS[BLACKLIST_CSV]
     
     # Check keywords file
     keywords_file = data_dir / 'keywords.csv'

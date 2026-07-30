@@ -309,7 +309,8 @@ class TrainerFunctionsTestCase(AIWAFTestCase):
                 self.map_calls += 1
                 return list(map(fn, iterable))
 
-        with patch("aiwaf.django.trainer.ThreadPoolExecutor", FakeExecutor), \
+        with patch("aiwaf.django.trainer.rust_available", return_value=False), \
+             patch("aiwaf.django.trainer.ThreadPoolExecutor", FakeExecutor), \
              patch("aiwaf.django.trainer.path_exists_in_django", return_value=False), \
              patch("aiwaf.django.trainer.is_exempt_path", return_value=False):
             result = self.trainer_module._generate_feature_dicts(parsed, ip_404, ip_times)

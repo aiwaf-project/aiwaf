@@ -389,7 +389,7 @@ class FlaskAITrainer:
         feature_dicts = []
         records = core_build_records(parsed, ip_404, self.path_exists_in_flask, is_path_exempt, STATUS_IDX)
 
-        use_rust = self.get_config("AIWAF_USE_RUST", False) and rust_available()
+        use_rust = rust_available()
         rust_streaming_enabled = use_rust and rust_supports_chunked_features()
         chunk_size_cfg = self.get_config(
             "AIWAF_RUST_FEATURE_CHUNK_SIZE",
@@ -581,8 +581,7 @@ class FlaskAITrainer:
 
                 contamination = self.get_config("AIWAF_AI_CONTAMINATION", 0.05)
                 use_rust_iforest = (
-                    self.get_config("AIWAF_USE_RUST", False)
-                    and rust_available()
+                    rust_available()
                     and rust_isolation_forest_available()
                     and self.get_config("AIWAF_RUST_ISOLATION_FOREST", True)
                 )

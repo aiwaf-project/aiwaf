@@ -15,8 +15,10 @@ import os
 import json
 import csv
 import logging
+import time
 from collections import defaultdict
 from ..core.keyword_fallback import KeywordFallbackStore
+from ..core.reputation import FIRST_BLOCK_SECONDS, evaluate_reputation, format_block_reason
 from ..core.storage_interfaces import BlacklistStore, ExemptionStore, KeywordStore
 from ..core.storage_schema import (
     DEFAULT_DATA_DIR,
@@ -41,6 +43,17 @@ _fallback_store = KeywordFallbackStore(_fallback_storage_path)
 logger = logging.getLogger("aiwaf.django.storage")
 
 _blacklist_columns_cache = None
+_BLACKLIST_CURRENT_COLUMNS = {
+    "extended_request_info",
+    "reputation_reason",
+    "reasons",
+    "score",
+    "offenses",
+    "blocked_at",
+    "expires_at",
+    "duration",
+    "permanent",
+}
 
 
 def _blacklist_table_columns():
@@ -71,7 +84,21 @@ def _blacklist_has_extended_request_info_column() -> bool:
     return "extended_request_info" in cols
 
 
-def _block_ip_legacy_schema(ip, reason):
+def _blacklist_has_current_columns() -> bool:
+    cols = _blacklist_table_columns()
+    return _BLACKLIST_CURRENT_COLUMNS.issubset(cols)
+
+
+def _is_expired_timestamp(value) -> bool:
+    if not value:
+        return False
+    try:
+        return float(value) <= time.time()
+    except (TypeError, ValueError):
+        return False
+
+
+def _block_ip_legacy_schema(ip, reason, extended_request_info=None):
     """Block an IP when the BlacklistEntry schema is missing newer columns.
 
     Uses raw SQL to avoid selecting/inserting missing columns.
@@ -84,18 +111,63 @@ def _block_ip_legacy_schema(ip, reason):
     qn = connection.ops.quote_name
     table = qn(BlacklistEntry._meta.db_table)
 
+    existing = {}
+    now = time.time()
+
     insert_cols = ["ip_address", "reason"]
     insert_vals = [ip, reason]
+    update_pairs = ["reason = %s"]
+    update_vals = [reason]
 
     if "created_at" in cols:
         insert_cols.append("created_at")
         insert_vals.append(timezone.now())
+    if "extended_request_info" in cols:
+        insert_cols.append("extended_request_info")
+        insert_vals.append(json.dumps(extended_request_info or {}, separators=(",", ":"), ensure_ascii=False))
+        if extended_request_info is not None:
+            update_pairs.append(f"{qn('extended_request_info')} = %s")
+            update_vals.append(json.dumps(extended_request_info, separators=(",", ":"), ensure_ascii=False))
 
     with connection.cursor() as cursor:
-        cursor.execute(f"SELECT 1 FROM {table} WHERE ip_address = %s LIMIT 1", [ip])
-        exists = cursor.fetchone() is not None
+        select_cols = [column for column in ("reason", "reasons", "score", "offenses") if column in cols]
+        if select_cols:
+            select_sql = ", ".join(qn(column) for column in select_cols)
+            cursor.execute(f"SELECT {select_sql} FROM {table} WHERE ip_address = %s LIMIT 1", [ip])
+            row = cursor.fetchone()
+            exists = row is not None
+            if row:
+                existing = dict(zip(select_cols, row))
+                if isinstance(existing.get("reasons"), str):
+                    try:
+                        existing["reasons"] = json.loads(existing["reasons"])
+                    except Exception:
+                        existing["reasons"] = [existing["reasons"]]
+        else:
+            cursor.execute(f"SELECT 1 FROM {table} WHERE ip_address = %s LIMIT 1", [ip])
+            exists = cursor.fetchone() is not None
+
+        decision = evaluate_reputation(existing=existing, reason=reason, now=now)
+        effective_duration = decision.duration or FIRST_BLOCK_SECONDS
+        optional_values = {
+            "reputation_reason": format_block_reason(decision),
+            "reasons": json.dumps(decision.reasons, separators=(",", ":"), ensure_ascii=False),
+            "score": decision.score,
+            "offenses": decision.offenses,
+            "blocked_at": now,
+            "expires_at": now + effective_duration if effective_duration else None,
+            "duration": effective_duration,
+            "permanent": effective_duration is None,
+        }
+        for column, value in optional_values.items():
+            if column in cols:
+                insert_cols.append(column)
+                insert_vals.append(value)
+                update_pairs.append(f"{qn(column)} = %s")
+                update_vals.append(value)
+
         if exists:
-            cursor.execute(f"UPDATE {table} SET reason = %s WHERE ip_address = %s", [reason, ip])
+            cursor.execute(f"UPDATE {table} SET {', '.join(update_pairs)} WHERE ip_address = %s", [*update_vals, ip])
             return
 
         cols_sql = ", ".join(qn(c) for c in insert_cols)
@@ -108,9 +180,19 @@ def _is_blocked_legacy_schema(ip):
     if BlacklistEntry is None:
         return False
 
+    cols = _blacklist_table_columns()
     qn = connection.ops.quote_name
     table = qn(BlacklistEntry._meta.db_table)
     with connection.cursor() as cursor:
+        if "expires_at" in cols:
+            cursor.execute(f"SELECT expires_at FROM {table} WHERE ip_address = %s LIMIT 1", [ip])
+            row = cursor.fetchone()
+            if row is None:
+                return False
+            if _is_expired_timestamp(row[0]):
+                cursor.execute(f"DELETE FROM {table} WHERE ip_address = %s", [ip])
+                return False
+            return True
         cursor.execute(f"SELECT 1 FROM {table} WHERE ip_address = %s LIMIT 1", [ip])
         return cursor.fetchone() is not None
 
@@ -145,8 +227,20 @@ def _get_all_blacklist_entries_legacy_schema():
 
     cols = _blacklist_table_columns()
     select_cols = ["ip_address", "reason"]
-    if "created_at" in cols:
-        select_cols.append("created_at")
+    for column in (
+        "created_at",
+        "extended_request_info",
+        "reputation_reason",
+        "reasons",
+        "score",
+        "offenses",
+        "blocked_at",
+        "expires_at",
+        "duration",
+        "permanent",
+    ):
+        if column in cols:
+            select_cols.append(column)
 
     qn = connection.ops.quote_name
     table = qn(BlacklistEntry._meta.db_table)
@@ -158,7 +252,12 @@ def _get_all_blacklist_entries_legacy_schema():
     results = []
     for row in rows:
         item = dict(zip(select_cols, row))
-        item["extended_request_info"] = {}
+        item.setdefault("extended_request_info", {})
+        if isinstance(item.get("reasons"), str):
+            try:
+                item["reasons"] = json.loads(item["reasons"])
+            except Exception:
+                item["reasons"] = [item["reasons"]]
         results.append(item)
     return results
 
@@ -277,13 +376,19 @@ class ModelBlacklistStore:
         _import_models()
         if BlacklistEntry is None:
             return False
-        if not _blacklist_has_extended_request_info_column():
+        if not _blacklist_has_current_columns():
             try:
                 return _is_blocked_legacy_schema(ip)
             except Exception:
                 return False
         try:
-            return BlacklistEntry.objects.filter(ip_address=ip).exists()
+            entry = BlacklistEntry.objects.filter(ip_address=ip).first()
+            if not entry:
+                return False
+            if _is_expired_timestamp(getattr(entry, "expires_at", None)):
+                entry.delete()
+                return False
+            return True
         except Exception:
             return False
 
@@ -294,30 +399,74 @@ class ModelBlacklistStore:
         if BlacklistEntry is None:
             logger.warning("Cannot block IP %s, models not available", ip)
             return
-        if not _blacklist_has_extended_request_info_column():
+        if not _blacklist_has_current_columns():
             try:
-                _block_ip_legacy_schema(ip, reason)
+                _block_ip_legacy_schema(ip, reason, extended_request_info=extended_request_info)
             except Exception as e:
                 logger.error("Error blocking IP %s (legacy schema): %s", ip, e, exc_info=True)
             return
         try:
+            now = time.time()
+            existing_obj = BlacklistEntry.objects.filter(ip_address=ip).first()
+            if existing_obj and _is_expired_timestamp(getattr(existing_obj, "expires_at", None)):
+                existing_obj.delete()
+                existing_obj = None
+            existing = {}
+            if existing_obj:
+                existing = {
+                    "reason": existing_obj.reason,
+                    "reasons": existing_obj.reasons or [],
+                    "score": existing_obj.score or 0,
+                    "offenses": existing_obj.offenses or 0,
+                    "extended_request_info": existing_obj.extended_request_info or {},
+                }
+            decision = evaluate_reputation(existing=existing, reason=reason, now=now)
+            effective_duration = decision.duration or FIRST_BLOCK_SECONDS
             obj, created = BlacklistEntry.objects.get_or_create(
                 ip_address=ip,
                 defaults={
                     'reason': reason,
                     'created_at': timezone.now(),
                     'extended_request_info': extended_request_info or {},
+                    'reputation_reason': format_block_reason(decision),
+                    'reasons': decision.reasons,
+                    'score': decision.score,
+                    'offenses': decision.offenses,
+                    'blocked_at': now,
+                    'expires_at': now + effective_duration if effective_duration else None,
+                    'duration': effective_duration,
+                    'permanent': effective_duration is None,
                 }
             )
-            if (not created and extended_request_info
-                    and not getattr(obj, "extended_request_info", None)):
-                obj.extended_request_info = extended_request_info
-                obj.save(update_fields=["extended_request_info"])
+            if not created:
+                obj.reason = reason
+                obj.reputation_reason = format_block_reason(decision)
+                obj.reasons = decision.reasons
+                obj.score = decision.score
+                obj.offenses = decision.offenses
+                obj.blocked_at = now
+                obj.expires_at = now + effective_duration if effective_duration else None
+                obj.duration = effective_duration
+                obj.permanent = effective_duration is None
+                if extended_request_info is not None:
+                    obj.extended_request_info = extended_request_info
+                obj.save(update_fields=[
+                    "reason",
+                    "reputation_reason",
+                    "reasons",
+                    "score",
+                    "offenses",
+                    "blocked_at",
+                    "expires_at",
+                    "duration",
+                    "permanent",
+                    "extended_request_info",
+                ])
         except OperationalError as e:
             # Compatibility for deployments created before extended_request_info existed.
             if "extended_request_info" in str(e):
                 try:
-                    _block_ip_legacy_schema(ip, reason)
+                    _block_ip_legacy_schema(ip, reason, extended_request_info=extended_request_info)
                     return
                 except Exception:
                     pass
@@ -331,7 +480,7 @@ class ModelBlacklistStore:
         _import_models()
         if BlacklistEntry is None:
             return
-        if not _blacklist_has_extended_request_info_column():
+        if not _blacklist_has_current_columns():
             try:
                 _unblock_ip_legacy_schema(ip)
             except Exception as e:
@@ -358,7 +507,7 @@ class ModelBlacklistStore:
         _import_models()
         if BlacklistEntry is None:
             return []
-        if not _blacklist_has_extended_request_info_column():
+        if not _blacklist_has_current_columns():
             try:
                 return _get_all_blocked_ips_legacy_schema()
             except Exception:
@@ -374,14 +523,25 @@ class ModelBlacklistStore:
         _import_models()
         if BlacklistEntry is None:
             return []
-        if not _blacklist_has_extended_request_info_column():
+        if not _blacklist_has_current_columns():
             try:
                 return _get_all_blacklist_entries_legacy_schema()
             except Exception:
                 return []
         try:
             return list(BlacklistEntry.objects.values(
-                'ip_address', 'reason', 'created_at', 'extended_request_info'
+                'ip_address',
+                'reason',
+                'created_at',
+                'extended_request_info',
+                'reputation_reason',
+                'reasons',
+                'score',
+                'offenses',
+                'blocked_at',
+                'expires_at',
+                'duration',
+                'permanent',
             ))
         except Exception:
             return []
@@ -392,7 +552,7 @@ class ModelBlacklistStore:
         _import_models()
         if BlacklistEntry is None:
             return 0
-        if not _blacklist_has_extended_request_info_column():
+        if not _blacklist_has_current_columns():
             try:
                 return _clear_all_blacklist_entries_legacy_schema()
             except Exception as e:
@@ -693,7 +853,7 @@ class CSVBlacklistStoreAdapter:
 
     @staticmethod
     def block_ip(ip, reason="Automated block", extended_request_info=None):
-        runtime_get_blacklist_store().block_ip(ip, reason)
+        runtime_get_blacklist_store().block_ip(ip, reason, extended_request_info=extended_request_info)
 
     @staticmethod
     def unblock_ip(ip):
@@ -721,7 +881,15 @@ class CSVBlacklistStoreAdapter:
                     "ip_address": ip,
                     "reason": info.get("reason", ""),
                     "created_at": info.get("blocked_at"),
-                    "extended_request_info": {},
+                    "extended_request_info": info.get("extended_request_info") or {},
+                    "reputation_reason": info.get("reputation_reason", ""),
+                    "reasons": info.get("reasons", []),
+                    "score": info.get("score", 0),
+                    "offenses": info.get("offenses", 0),
+                    "blocked_at": info.get("blocked_at"),
+                    "expires_at": info.get("expires_at"),
+                    "duration": info.get("duration"),
+                    "permanent": info.get("permanent", False),
                 }
             )
         return rows

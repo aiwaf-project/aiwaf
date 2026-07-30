@@ -10,6 +10,11 @@ def test_block_info_contains_basic_fields():
     assert info is not None
     assert info["ip"] == "203.0.113.77"
     assert info["reason"] == "unit-test reason"
+    assert info["reputation_reason"].startswith("unit-test reason;")
+    assert info["score"] == 10
+    assert info["offenses"] == 1
+    assert info["expires_at"] > info["blocked_at"]
+    assert info["permanent"] is False
 
 
 def test_block_info_can_store_extended_request_info():

@@ -60,6 +60,17 @@ class BasicImportTestCase(AIWAFTestCase):
         models = importlib.import_module("aiwaf.django.models")
         self.assertTrue(hasattr(models, "BlacklistEntry"))
         self.assertTrue(hasattr(models, "IPExemption"))
+        fields = {field.name for field in models.BlacklistEntry._meta.fields}
+        self.assertTrue({
+            "reputation_reason",
+            "reasons",
+            "score",
+            "offenses",
+            "blocked_at",
+            "expires_at",
+            "duration",
+            "permanent",
+        }.issubset(fields))
     
     def test_apps_import(self):
         """AppConfig can be imported for Django registration."""

@@ -6,8 +6,6 @@ import ipaddress
 import socket
 from typing import Any
 
-import whois
-
 
 def _resolve_domain(target: str) -> str:
     candidate = str(target).strip()
@@ -27,5 +25,7 @@ def _resolve_domain(target: str) -> str:
 
 
 def run_whois_lookup(target: str) -> Any:
+    import whois
+
     domain = _resolve_domain(target)
     return whois.whois(domain)

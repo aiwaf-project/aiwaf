@@ -55,7 +55,7 @@ class RustBackendToggleTests(AIWAFMiddlewareTestCase):
 
 class RustFallbackTests(AIWAFMiddlewareTestCase):
     @override_settings(AIWAF_USE_RUST=False)
-    def test_header_validation_falls_back_when_rust_disabled(self):
+    def test_installed_rust_is_used_even_when_legacy_flag_is_false(self):
         request = self.create_request(
             "/ok/",
             headers={
@@ -68,12 +68,14 @@ class RustFallbackTests(AIWAFMiddlewareTestCase):
             },
         )
 
-        with patch("aiwaf.django.middleware.rust_validate_headers") as rust_fn:
+        with patch("aiwaf.django.middleware.rust_available", return_value=True), patch(
+            "aiwaf.django.middleware.rust_validate_headers", return_value=None
+        ) as rust_fn:
             middleware = HeaderValidationMiddleware(self.mock_get_response)
             response = middleware.process_request(request)
 
         self.assertIsNone(response)
-        rust_fn.assert_not_called()
+        rust_fn.assert_called_once()
 
     @override_settings(AIWAF_USE_RUST=True)
     def test_header_validation_falls_back_when_rust_unavailable(self):
@@ -105,7 +107,14 @@ class RustFallbackTests(AIWAFMiddlewareTestCase):
     def test_header_validation_rust_receives_required_headers(self):
         request = self.create_request(
             "/ok/",
-            headers={"REMOTE_ADDR": "10.0.0.2"},
+            headers={
+                "REMOTE_ADDR": "10.0.0.2",
+                "HTTP_USER_AGENT": "Mozilla/5.0",
+                "HTTP_ACCEPT": "text/html",
+                "HTTP_ACCEPT_LANGUAGE": "en-US,en;q=0.9",
+                "HTTP_ACCEPT_ENCODING": "gzip, deflate",
+                "HTTP_CONNECTION": "keep-alive",
+            },
         )
 
         with patch("aiwaf.django.middleware.rust_available", return_value=True), patch(

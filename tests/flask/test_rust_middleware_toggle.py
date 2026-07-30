@@ -46,7 +46,7 @@ def test_header_validation_uses_rust_when_enabled(monkeypatch, tmp_path):
 
 
 @pytest.mark.skipif(not RUST_PACKAGE_INSTALLED, reason="aiwaf_rust package not installed")
-def test_header_validation_skips_rust_when_csv_disabled(monkeypatch, tmp_path):
+def test_header_validation_uses_installed_rust_when_csv_disabled(monkeypatch, tmp_path):
     called = {"value": False}
 
     def fake_validate(headers, required_headers=None, min_score=None):
@@ -61,7 +61,7 @@ def test_header_validation_skips_rust_when_csv_disabled(monkeypatch, tmp_path):
     with app.test_client() as client:
         client.get("/", headers={"User-Agent": "Mozilla/5.0", "Accept": "text/html"})
 
-    assert called["value"] is False
+    assert called["value"] is True
 
 
 @pytest.mark.skipif(not RUST_PACKAGE_INSTALLED, reason="aiwaf_rust package not installed")

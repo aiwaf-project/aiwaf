@@ -129,6 +129,8 @@ def classify_route(path: str, *, methods: Iterable[str] | None = None, metadata:
         result["api_signals"] = list(metadata["api_signals"])
     if metadata.get("payload_type"):
         result["payload_type"] = str(metadata["payload_type"])
+    if metadata.get("payload_fields"):
+        result["payload_fields"] = list(metadata["payload_fields"])
     if metadata.get("form_confidence") is not None:
         result["form_confidence"] = metadata["form_confidence"]
     if metadata.get("form_signals"):
