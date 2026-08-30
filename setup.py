@@ -13,7 +13,8 @@ setup(
     long_description_content_type="text/markdown",
     author="Aayush Gauba",
     url="https://github.com/aayushgauba/aiwaf",
-    packages=find_packages(exclude=["tests*", "docs*"]),
+    packages=find_packages(where="py", exclude=["tests*", "docs*"]),
+    package_dir={"": "py"},
     python_requires=">=3.8",
     install_requires=[
         "numpy>2",

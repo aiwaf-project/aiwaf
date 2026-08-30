@@ -19,7 +19,7 @@ def test_model_path_simple():
             """Get the default model path relative to the package."""
             # Get the directory where this test file is located
             repo_root = Path(__file__).resolve().parents[2]
-            trainer_dir = repo_root / 'aiwaf' / 'flask'
+            trainer_dir = repo_root / 'py' / 'aiwaf' / 'flask'
             resources_dir = trainer_dir / 'resources'
             
             # Ensure resources directory exists
@@ -70,7 +70,7 @@ def test_model_path_simple():
                     print(f"   {item.name}")
         
         # Test package structure for installation
-        package_dir = Path(__file__).resolve().parents[2] / 'aiwaf' / 'flask'
+        package_dir = Path(__file__).resolve().parents[2] / 'py' / 'aiwaf' / 'flask'
         print(f"\n Package Structure Check:")
         print(f"   Package dir exists: {package_dir.exists()}")
         

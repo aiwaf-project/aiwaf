@@ -1,8 +1,9 @@
-name: Build and Publish
+name: Publish Python package to PyPI
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "python-v*"
   workflow_dispatch:
 
 permissions:
@@ -22,7 +23,7 @@ jobs:
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip
-          pip install build
+          python -m pip install build
 
       - name: Build wheel and sdist
         run: python -m build
@@ -41,6 +42,7 @@ jobs:
       id-token: write
     environment:
       name: pypi
+      url: https://pypi.org/p/aiwaf
     steps:
       - name: Download distributions
         uses: actions/download-artifact@v4

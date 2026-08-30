@@ -1,0 +1,10 @@
+{
+  "name": "aiwaf-monorepo",
+  "private": true,
+  "scripts": {
+    "test": "npm run test:python && npm run test:js",
+    "test:python": "python manage.py test tests.django && python -m pytest tests/core tests/flask tests/fast tests/integration -q",
+    "test:js": "npm --prefix js test",
+    "pack:js": "npm pack ./js --dry-run"
+  }
+}

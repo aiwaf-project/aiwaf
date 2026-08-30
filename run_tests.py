@@ -14,8 +14,9 @@ from django.test.utils import get_runner
 def run_tests():
     """Run AIWAF Django unit tests"""
     
-    # Add the project root to Python path
+    # Add the source tree and project root to Python path.
     project_root = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, os.path.join(project_root, "py"))
     sys.path.insert(0, project_root)
     
     # Configure Django settings

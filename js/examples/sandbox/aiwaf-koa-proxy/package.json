@@ -1,0 +1,16 @@
+{
+  "name": "aiwaf-koa-proxy-sandbox",
+  "version": "1.0.0",
+  "private": true,
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "aiwaf-js": "file:../../..",
+    "koa": "^2.15.4",
+    "koa-bodyparser": "^4.4.1",
+    "koa-proxies": "^0.12.4"
+  }
+}

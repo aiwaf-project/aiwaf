@@ -1,0 +1,16 @@
+{
+  "name": "aiwaf-fastify-proxy-sandbox",
+  "version": "1.0.0",
+  "private": true,
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "aiwaf-js": "file:../../..",
+    "fastify": "^4.29.1",
+    "@fastify/middie": "^8.0.0",
+    "http-proxy-middleware": "^3.0.0"
+  }
+}

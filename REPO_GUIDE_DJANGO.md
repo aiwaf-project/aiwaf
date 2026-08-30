@@ -18,13 +18,13 @@ The package is published as `aiwaf` and includes optional extras for GeoIP and R
 
 Key paths:
 
-- `aiwaf/`: main package code
-- `aiwaf/core/`: shared, framework-agnostic helpers (exemptions, utils, geoip, logs, training, training_logic, training_features, whois, storage_csv, storage_schema, storage_ops, storage_csv_impl, keyword_fallback, storage_interfaces, model_artifacts) and Rust bindings
-- `aiwaf/django/`: Django entrypoint (middleware exports)
-- `aiwaf/flask/`: Flask entrypoint (integration exports)
-- `aiwaf/django/management/commands/`: Django management commands
-- `aiwaf/django/resources/model.pkl`: bundled baseline model artifact
-- `aiwaf/core/geolock/ipinfo_lite.mmdb`: bundled GeoIP database
+- `py/aiwaf/`: main Python package code
+- `py/aiwaf/core/`: shared, framework-agnostic helpers (exemptions, utils, geoip, logs, training, training_logic, training_features, whois, storage_csv, storage_schema, storage_ops, storage_csv_impl, keyword_fallback, storage_interfaces, model_artifacts) and Rust bindings
+- `py/aiwaf/django/`: Django entrypoint (middleware exports)
+- `py/aiwaf/flask/`: Flask entrypoint (integration exports)
+- `py/aiwaf/django/management/commands/`: Django management commands
+- `py/aiwaf/django/resources/model.json`: bundled baseline model artifact
+- `py/aiwaf/core/geolock/ipinfo_lite.mmdb`: bundled GeoIP database
 - `tests/`: Django-based test suite
 - `README.md`: user-facing feature and setup documentation
 - `INSTALLATION.md`: step-by-step installation/troubleshooting
@@ -48,7 +48,7 @@ import aiwaf.flask as aiwaf
 
 ### 3.1 Middleware-Centric Protection
 
-Main runtime checks live in `aiwaf/django/middleware.py` and are designed to be chained in Django `MIDDLEWARE`.
+Main runtime checks live in `py/aiwaf/django/middleware.py` and are designed to be chained in Django `MIDDLEWARE`.
 
 Important middleware classes:
 
@@ -65,7 +65,7 @@ Blocking generally raises `PermissionDenied("blocked")` via internal helper logi
 
 ### 3.2 Training and Learning Pipeline
 
-`aiwaf/django/trainer.py` handles feature extraction and model/keyword updates:
+`py/aiwaf/django/trainer.py` handles feature extraction and model/keyword updates:
 
 - Reads logs from:
   - configured `AIWAF_ACCESS_LOG` (including rotated/gzipped files), or
@@ -78,7 +78,7 @@ Blocking generally raises `PermissionDenied("blocked")` via internal helper logi
 
 ### 3.3 Storage Abstraction
 
-`aiwaf/django/storage.py` provides store wrappers with model-backed persistence and fallback behavior.
+`py/aiwaf/django/storage.py` provides store wrappers with model-backed persistence and fallback behavior.
 
 It supports operations for:
 
@@ -88,7 +88,7 @@ It supports operations for:
 - Dynamic keywords
 - Feature samples
 
-`aiwaf/django/model_store.py` handles model artifact loading/saving with multiple backends:
+`py/aiwaf/django/model_store.py` handles model artifact loading/saving with multiple backends:
 
 - `file` (default): filesystem path
 - `db`: `AIModelArtifact` table
@@ -98,7 +98,7 @@ Optional fallback-to-file behavior is supported.
 
 ### 3.4 Optional Rust Backend
 
-`aiwaf/core/rust_backend.py` tries to import `aiwaf_rust`. If unavailable, functions return graceful fallbacks.
+`py/aiwaf/core/rust_backend.py` tries to import `aiwaf_rust`. If unavailable, functions return graceful fallbacks.
 
 Rust-assisted functions:
 
@@ -110,7 +110,7 @@ Python paths remain the default and always available.
 
 ## 4. Data Model (Django ORM)
 
-Defined in `aiwaf/django/models.py`:
+Defined in `py/aiwaf/django/models.py`:
 
 - `BlacklistEntry`: blocked IPs + reason + optional request context
 - `IPExemption`: allowlisted IPs
@@ -131,7 +131,7 @@ The package expects flat `AIWAF_*` Django settings (for example, rate, model sto
 
 ### 5.2 Legacy Compatibility
 
-`aiwaf/django/settings_compat.py` maps older nested `AIWAF_SETTINGS` keys into flat settings once at startup. This preserves backward compatibility without overriding explicitly defined modern settings.
+`py/aiwaf/django/settings_compat.py` maps older nested `AIWAF_SETTINGS` keys into flat settings once at startup. This preserves backward compatibility without overriding explicitly defined modern settings.
 
 ### 5.3 High-Impact Settings to Understand First
 
@@ -173,7 +173,7 @@ The package expects flat `AIWAF_*` Django settings (for example, rate, model sto
 
 ## 7. Management Commands
 
-Located in `aiwaf/django/management/commands/`:
+Located in `py/aiwaf/django/management/commands/`:
 
 - Exemptions/paths:
   - `add_exemption`, `add_ipexemption`, `add_pathexemption`, `aiwaf_pathshell`
@@ -198,7 +198,7 @@ Project metadata is in `pyproject.toml`:
 
 - Python `>=3.8`
 - Django `>=3.2`
-- core learning deps (`numpy`, `pandas`, `scikit-learn`, `joblib`)
+- core learning deps (`numpy`, `pandas`, `scikit-learn`)
 - optional extras: `learning`, `geoblock`, `rust`
 
 ### 8.2 Running Tests
@@ -223,7 +223,7 @@ Test suite coverage includes middleware behavior, storage backends, training log
 
 ### Add a New Middleware Rule
 
-1. Implement logic in `aiwaf/django/middleware.py` (or helper module if reusable).
+1. Implement logic in `py/aiwaf/django/middleware.py` (or helper module if reusable).
 2. Respect exemption checks (`is_exempt`, IP exemptions, path rules).
 3. Emit useful debug context through existing logger conventions.
 4. Add tests under `tests/` for allow + block + edge conditions.
@@ -231,7 +231,7 @@ Test suite coverage includes middleware behavior, storage backends, training log
 
 ### Add a New Training Feature
 
-1. Update extraction logic in `aiwaf/django/trainer.py`.
+1. Update extraction logic in `py/aiwaf/django/trainer.py`.
 2. Keep rust fallback parity if feature touches rust-extractable data.
 3. Ensure model serialization compatibility (`model_store.py`).
 4. Add migration/docs only if schema changes are needed.
@@ -239,7 +239,7 @@ Test suite coverage includes middleware behavior, storage backends, training log
 
 ### Add a New Management Command
 
-1. Place command in `aiwaf/django/management/commands/`.
+1. Place command in `py/aiwaf/django/management/commands/`.
 2. Keep command idempotent where possible.
 3. Reuse storage/model abstractions rather than raw ad-hoc queries.
 4. Add focused tests for success and failure paths.
@@ -265,9 +265,9 @@ If you are new to this codebase, start in this order:
 
 1. `README.md`
 2. `INSTALLATION.md`
-3. `aiwaf/django/middleware.py`
-4. `aiwaf/django/trainer.py`
-5. `aiwaf/django/storage.py` and `aiwaf/django/models.py`
+3. `py/aiwaf/django/middleware.py`
+4. `py/aiwaf/django/trainer.py`
+5. `py/aiwaf/django/storage.py` and `py/aiwaf/django/models.py`
 6. relevant tests under `tests/` for the area you plan to modify
 
 ## 13. README Draft (Can Be Reused in `README.md`)
@@ -291,13 +291,13 @@ Core outcomes:
 
 Package layout (high-level):
 
-- `aiwaf/core/`
+- `py/aiwaf/core/`
   - Framework-agnostic Rust bindings and shared helpers (exemptions, utils, geoip, logs, training, training_logic, training_features, whois, storage_csv, storage_schema, storage_ops, storage_csv_impl, keyword_fallback, storage_interfaces, model_artifacts, constants)
-- `aiwaf/django/`
+- `py/aiwaf/django/`
   - Django entrypoint that exports middleware classes
-- `aiwaf/flask/`
+- `py/aiwaf/flask/`
   - Flask entrypoint that exports the Flask integration
-- `aiwaf/django/middleware.py`
+- `py/aiwaf/django/middleware.py`
   - Runtime protection middleware classes:
     - `JsonExceptionMiddleware`
     - `GeoBlockMiddleware`
@@ -307,32 +307,32 @@ Package layout (high-level):
     - `AIAnomalyMiddleware`
     - `HoneypotTimingMiddleware`
     - `UUIDTamperMiddleware`
-- `aiwaf/django/trainer.py`
+- `py/aiwaf/django/trainer.py`
   - Offline detection/training logic, feature extraction, dynamic keyword learning, model refresh
-- `aiwaf/django/storage.py`
+- `py/aiwaf/django/storage.py`
   - Persistence wrappers for blacklist/exemptions/keywords/features
-- `aiwaf/django/model_store.py`
+- `py/aiwaf/django/model_store.py`
   - Model artifact backend abstraction (`file`, `db`, `cache`)
-- `aiwaf/django/models.py`
+- `py/aiwaf/django/models.py`
   - ORM models used by middleware, training, and admin/ops commands
-- `aiwaf/core/rust_backend.py`
+- `py/aiwaf/core/rust_backend.py`
   - Optional bridge to Rust extension (`aiwaf_rust`) with safe Python fallback
-- `aiwaf/django/geoip.py`
+- `py/aiwaf/django/geoip.py`
   - GeoIP lookup helpers backed by bundled MMDB file
-- `aiwaf/django/middleware_logger.py`
+- `py/aiwaf/django/middleware_logger.py`
   - Middleware request logging support for observability and training fallback data
-- `aiwaf/django/blacklist_manager.py`, `aiwaf/django/utils.py`, `aiwaf/django/decorators.py`
+- `py/aiwaf/django/blacklist_manager.py`, `py/aiwaf/django/utils.py`, `py/aiwaf/django/decorators.py`
   - Utility and helper layers used across runtime logic
-- `aiwaf/django/management/commands/`
+- `py/aiwaf/django/management/commands/`
   - Operational CLI commands for setup, debug, exemptions, retraining, cleanup
 
 ### 13.3 Data and Artifacts
 
-- `aiwaf/django/resources/model.pkl`
+- `py/aiwaf/django/resources/model.json`
   - Bundled baseline model artifact
-- `aiwaf/core/geolock/ipinfo_lite.mmdb`
+- `py/aiwaf/core/geolock/ipinfo_lite.mmdb`
   - Local GeoIP database used for country detection
-- Database models (`aiwaf/django/models.py`):
+- Database models (`py/aiwaf/django/models.py`):
   - `BlacklistEntry`, `IPExemption`, `ExemptPath`, `DynamicKeyword`, `FeatureSample`, `RequestLog`, `AIModelArtifact`, `GeoBlockedCountry`
 
 ### 13.4 Request Processing Flow
@@ -388,7 +388,7 @@ Primary configuration is through flat Django settings prefixed with `AIWAF_` (fo
 
 Compatibility layer:
 
-- `aiwaf/django/settings_compat.py` maps legacy nested `AIWAF_SETTINGS` values into modern flat keys at startup.
+- `py/aiwaf/django/settings_compat.py` maps legacy nested `AIWAF_SETTINGS` values into modern flat keys at startup.
 
 ### 13.8 The Rust Package (`aiwaf-rust`) and How It Fits
 
@@ -405,7 +405,7 @@ How to install with rust support:
 pip install "aiwaf[rust]"
 ```
 
-Rust-accelerated operations exposed through `aiwaf/core/rust_backend.py`:
+Rust-accelerated operations exposed through `py/aiwaf/core/rust_backend.py`:
 
 - `validate_headers(...)`
 - `extract_features(...)`
@@ -429,7 +429,7 @@ print(rust_available())  # True when aiwaf_rust is installed and importable
 
 - Python `>=3.8`
 - Django `>=3.2`
-- Core libraries: `numpy`, `pandas`, `scikit-learn`, `joblib`
+- Core libraries: `numpy`, `pandas`, `scikit-learn`
 - Networking/ops helpers: `requests`, `python-whois`
 - Geo support: `geoip2`
 - Optional extras:

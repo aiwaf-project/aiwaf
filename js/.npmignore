@@ -1,0 +1,14 @@
+examples/
+sandbox/
+test/
+logs/
+node_modules/
+migrations/
+aiwaf.sqlite
+test-access.log
+test-anomaly.js
+test-complete-waf.js
+test-simple.js
+test-debug-*.js
+test-debug-*.json
+*.log

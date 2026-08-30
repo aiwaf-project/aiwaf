@@ -34,8 +34,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -182,3 +182,9 @@ examples/sandbox/results_direct_*.json
 examples/sandbox/results_protected_*.json
 examples/sandbox/comparison_modes_*.json
 examples/sandbox/comparison_aggregate_*.json
+
+# JavaScript package runtime/build artifacts
+/node_modules/
+js/node_modules/
+js/logs/
+js/aiwaf.sqlite

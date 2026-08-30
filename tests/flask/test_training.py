@@ -72,7 +72,7 @@ if __name__ == '__main__':
         print(" Next steps:")
         print("   1. Install AI dependencies: pip install aiwaf-flask[ai]")
         print("   2. Run with AI: python train_aiwaf.py --log-dir test_logs")
-        print("   3. Check generated model: aiwaf/flask/resources/model.json")
+        print("   3. Check generated model: py/aiwaf/flask/resources/model.json")
     else:
         print("\n Training test failed")
         sys.exit(1)

@@ -6,13 +6,15 @@ from pathlib import Path
 
 def _ensure_repo_root_first() -> None:
     repo_root = Path(__file__).resolve().parent
-    repo_root_str = str(repo_root)
-    try:
-        while repo_root_str in sys.path:
-            sys.path.remove(repo_root_str)
-    except Exception:
-        pass
-    sys.path.insert(0, repo_root_str)
+    source_root = repo_root / "py"
+    for path in (repo_root, source_root):
+        path_str = str(path)
+        try:
+            while path_str in sys.path:
+                sys.path.remove(path_str)
+        except Exception:
+            pass
+        sys.path.insert(0, path_str)
 
 
 def _purge_aiwaf_modules() -> None:

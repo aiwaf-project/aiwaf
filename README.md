@@ -5,6 +5,15 @@
 
 AIWAF provides context-aware protection with rate limiting, anomaly detection, honeypots, UUID tamper protection, smart keyword learning, file-extension probing detection, exempt path/IP awareness, and scheduled retraining.
 
+This monorepo contains both published packages:
+
+- `py/aiwaf/` and the root Python packaging files publish `aiwaf` to PyPI.
+- `js/` publishes `aiwaf-js` to npm and supports Express, Fastify, Hapi, Koa, Next.js, NestJS, AdonisJS, and Sails.
+
+Install the JavaScript package with `npm install aiwaf-js`. Its documentation and development commands are in [`js/README.md`](js/README.md).
+
+For local JavaScript development, run `npm ci` and `npm test` from `js/`. Releases are independent: push a `python-v*` tag (for example, `python-v1.0.8`) to publish the Python package to PyPI, or push a `js-v*` tag (for example, `js-v1.0.1`) to publish `aiwaf-js` to npm. Both publish workflows can also be started manually from GitHub Actions.
+
 ## Latest Enhancements
 
 - Reputation-based IP blocking with weighted offenses and progressive block durations
@@ -57,13 +66,18 @@ Important:
 ## Package Structure
 
 ```text
-aiwaf/
-  core/                         # framework-agnostic helpers, training, storage abstractions
-  core/geolock/ipinfo_lite.mmdb # bundled GeoIP database
-  django/                       # Django adapter (middleware, models, trainer, commands)
-  flask/                        # Flask adapter (integration class, middleware, CLI helpers)
-  fast/                         # FastAPI adapter (middleware, decorators, CLI helpers)
+py/
+  aiwaf/                        # Python package (import name remains `aiwaf`)
+    core/                       # framework-agnostic helpers and storage
+    django/                     # Django adapter
+    flask/                      # Flask adapter
+    fast/                       # FastAPI adapter
+js/                             # JavaScript package, tests, and framework adapters
+tests/                          # Python test suites
+examples/                       # Python examples and sandbox tooling
 ```
+
+Contributor setup, test commands, and release conventions are documented in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 Framework entry points:
 
@@ -269,7 +283,7 @@ GeoIP:
 
 ```python
 AIWAF_GEO_BLOCK_ENABLED = False
-AIWAF_GEOIP_DB_PATH = "aiwaf/core/geolock/ipinfo_lite.mmdb"
+AIWAF_GEOIP_DB_PATH = "py/aiwaf/core/geolock/ipinfo_lite.mmdb"
 AIWAF_GEO_BLOCK_COUNTRIES = ["CN", "RU"]
 AIWAF_GEO_ALLOW_COUNTRIES = []
 AIWAF_GEO_CACHE_SECONDS = 3600
@@ -815,12 +829,12 @@ Interpretation guidance:
 
 Before publishing a new package version:
 
-1. run test suites for both adapters
+1. run the Python and JavaScript test suites
 2. validate sandbox comparison (`run-and-compare.py -n 3` minimum)
-3. bump package version in `setup.py`
+3. bump the Python version in both `pyproject.toml` and `setup.py`, or the JavaScript version in `js/package.json`
 4. build artifacts (`python -m build`)
 5. smoke-test wheel install in clean virtualenv
-6. verify `README.md` and extras (`django`, `flask`) match actual package behavior
+6. verify the README and package metadata match actual behavior
 
 ---
 

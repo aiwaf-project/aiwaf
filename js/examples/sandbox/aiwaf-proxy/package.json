@@ -1,0 +1,15 @@
+{
+  "name": "aiwaf-proxy-sandbox",
+  "version": "1.0.0",
+  "private": true,
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "aiwaf-js": "file:../../..",
+    "express": "^4.21.2",
+    "http-proxy-middleware": "^3.0.0"
+  }
+}

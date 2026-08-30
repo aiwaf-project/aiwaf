@@ -86,7 +86,7 @@ def test_model_path_resolution():
         print(f" Absolute model path: {abs_path}")
         
         # Check if it's in the package directory
-        package_dir = Path(__file__).resolve().parents[2] / 'aiwaf' / 'flask'
+        package_dir = Path(__file__).resolve().parents[2] / 'py' / 'aiwaf' / 'flask'
         expected_path = package_dir / 'resources' / 'model.json'
         print(f" Expected package path: {expected_path}")
         print(f" Package model exists: {expected_path.exists()}")

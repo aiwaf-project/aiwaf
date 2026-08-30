@@ -21,7 +21,7 @@ def test_ai_anomaly_middleware():
         'AIWAF_DATA_DIR': 'test_ai_data',
         'AIWAF_WINDOW_SECONDS': 30,  # Shorter window for testing
         'AIWAF_DYNAMIC_TOP_N': 5,
-        'AIWAF_MODEL_PATH': 'aiwaf/flask/resources/model.json',
+        'AIWAF_MODEL_PATH': 'py/aiwaf/flask/resources/model.json',
         'TESTING': True
     })
     

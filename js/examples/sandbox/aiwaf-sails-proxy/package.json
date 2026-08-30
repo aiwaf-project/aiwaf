@@ -1,0 +1,13 @@
+{
+  "name": "aiwaf-sails-proxy-sandbox",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "aiwaf-js": "file:../../..",
+    "http-proxy-middleware": "^3.0.0"
+  }
+}
