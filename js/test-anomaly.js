@@ -46,7 +46,7 @@ const testCases = [
 ];
 
 async function runTests() {
-  console.log('🔍 Testing Anomaly Detection\n');
+  console.log('Testing Anomaly Detection\n');
   console.log('Model Info:', anomalyDetector.getModelInfo());
   console.log();
 
@@ -61,7 +61,7 @@ async function runTests() {
           console.log(`${testCase.name}:`);
           console.log(`  Path: ${testCase.req.path}`);
           console.log(`  Features: [${features.join(', ')}]`);
-          console.log(`  Anomalous: ${isAnomalous ? '🚨 YES' : '✅ NO'}`);
+          console.log(`  Anomalous: ${isAnomalous ? 'YES' : 'NO'}`);
           console.log();
         }
         

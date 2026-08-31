@@ -4,7 +4,7 @@ const blacklistManager = require('./lib/blacklistManager');
 const rateLimiter = require('./lib/rateLimiter');
 
 async function simpleTest() {
-  console.log('🧪 Simple WAF Component Test\n');
+  console.log('Simple WAF Component Test\n');
   
   // Initialize components
   await blacklistManager.initialize();
@@ -29,7 +29,7 @@ async function simpleTest() {
   const normalFeatures = await extractFeatures(normalReq);
   console.log(`   Normal request features: [${normalFeatures.join(', ')}]`);
   const normalAnomaly = anomalyDetector.isAnomalous(normalFeatures, 0.5);
-  console.log(`   Normal request anomalous: ${normalAnomaly ? '🚨 YES' : '✅ NO'}`);
+  console.log(`   Normal request anomalous: ${normalAnomaly ? 'YES' : 'NO'}`);
   
   // Test suspicious request
   const suspiciousReq = {
@@ -42,7 +42,7 @@ async function simpleTest() {
   const suspiciousFeatures = await extractFeatures(suspiciousReq);
   console.log(`   Suspicious request features: [${suspiciousFeatures.join(', ')}]`);
   const suspiciousAnomaly = anomalyDetector.isAnomalous(suspiciousFeatures, 0.5);
-  console.log(`   Suspicious request anomalous: ${suspiciousAnomaly ? '🚨 YES' : '✅ NO'}`);
+  console.log(`   Suspicious request anomalous: ${suspiciousAnomaly ? 'YES' : 'NO'}`);
   
   console.log('\n2. Testing rate limiting...');
   
@@ -60,7 +60,7 @@ async function simpleTest() {
   const blockIP = '192.168.1.300';
   await blacklistManager.block(blockIP, 'Test block');
   const isBlocked = await blacklistManager.isBlocked(blockIP);
-  console.log(`   IP ${blockIP} blocked: ${isBlocked ? '✅ YES' : '❌ NO'}`);
+  console.log(`   IP ${blockIP} blocked: ${isBlocked ? 'YES' : 'NO'}`);
   
   console.log('\n4. Model information...');
   const modelInfo = anomalyDetector.getModelInfo();
@@ -70,7 +70,7 @@ async function simpleTest() {
     console.log(`   Feature count: ${modelInfo.metadata.featureCount}`);
   }
   
-  console.log('\n✅ Simple test complete!');
+  console.log('\nSimple test complete!');
   
   // Cleanup
   rateLimiter.cleanup();

@@ -11,13 +11,13 @@ function getRedisUrl() {
 async function connect() {
   const redisUrl = getRedisUrl();
   if (!redisUrl) {
-    console.warn('⚠️ No REDIS_URL set. Redis disabled.');
+    console.warn('No REDIS_URL set. Redis disabled.');
     return;
   }
 
   try {
     client = createClient({ url: redisUrl });
-    client.on('error', err => console.warn('⚠️ Redis error:', err));
+    client.on('error', err => console.warn('Redis error:', err));
     await client.connect();
     isReady = true;
     console.log('Redis connected.');

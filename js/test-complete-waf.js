@@ -7,7 +7,7 @@ const { extractFeatures, init: initFeatures, markRequestStart } = require('./lib
 const anomalyDetector = require('./lib/anomalyDetector');
 
 async function setupTestEnvironment() {
-  console.log('🔧 Setting up test environment...');
+  console.log('Setting up test environment...');
   
   // Initialize all components
   await blacklistManager.initialize();
@@ -22,11 +22,11 @@ async function setupTestEnvironment() {
   
   anomalyDetector.init();
   
-  console.log('✅ Test environment ready');
+  console.log('Test environment ready');
 }
 
 async function testCompleteWAF() {
-  console.log('\n🧪 Testing Complete WAF Pipeline\n');
+  console.log('\nTesting Complete WAF Pipeline\n');
   
   await setupTestEnvironment();
   
@@ -50,19 +50,19 @@ async function testCompleteWAF() {
   let response = await request(app)
     .get('/')
     .expect(200);
-  console.log('   ✅ Normal request passed');
+  console.log('   Normal request passed');
   
   response = await request(app)
     .get('/api/users')
     .expect(200);
-  console.log('   ✅ API request passed');
+  console.log('   API request passed');
   
   console.log('\n2. Testing suspicious requests...');
   
   try {
     response = await request(app)
       .get('/admin.php');
-    console.log(`   PHP request: ${response.status} ${response.status === 403 ? '(Blocked by WAF ✅)' : '(Allowed)'}`);
+    console.log(`   PHP request: ${response.status} ${response.status === 403 ? '(Blocked by WAF)' : '(Allowed)'}`);
   } catch (err) {
     console.log(`   PHP request: Error - ${err.message}`);
   }
@@ -70,7 +70,7 @@ async function testCompleteWAF() {
   try {
     response = await request(app)
       .get('/wp-admin/admin-ajax.php');
-    console.log(`   WordPress request: ${response.status} ${response.status === 403 ? '(Blocked by WAF ✅)' : '(Allowed)'}`);
+    console.log(`   WordPress request: ${response.status} ${response.status === 403 ? '(Blocked by WAF)' : '(Allowed)'}`);
   } catch (err) {
     console.log(`   WordPress request: Error - ${err.message}`);
   }
@@ -110,30 +110,30 @@ async function testCompleteWAF() {
   
   console.log('\n5. Testing anomaly detection...');
   const isAnomalous = anomalyDetector.isAnomalous(features);
-  console.log(`   Anomaly detected: ${isAnomalous ? '🚨 YES' : '✅ NO'}`);
+  console.log(`   Anomaly detected: ${isAnomalous ? 'YES' : 'NO'}`);
   
   console.log('\n6. Testing blacklist management...');
   const testBlockIP = '192.168.1.999';
   await blacklistManager.block(testBlockIP, 'Test block');
   const isBlocked = await blacklistManager.isBlocked(testBlockIP);
-  console.log(`   IP ${testBlockIP} blocked: ${isBlocked ? '✅ YES' : '❌ NO'}`);
+  console.log(`   IP ${testBlockIP} blocked: ${isBlocked ? 'YES' : 'NO'}`);
   
   const blockedIPs = await blacklistManager.getBlockedIPs();
   console.log(`   Total blocked IPs: ${blockedIPs.length}`);
   
   await blacklistManager.unblock(testBlockIP);
   const stillBlocked = await blacklistManager.isBlocked(testBlockIP);
-  console.log(`   IP ${testBlockIP} after unblock: ${stillBlocked ? '❌ Still blocked' : '✅ Unblocked'}`);
+  console.log(`   IP ${testBlockIP} after unblock: ${stillBlocked ? 'Still blocked' : 'Unblocked'}`);
   
   console.log('\n7. Testing model info...');
   const modelInfo = anomalyDetector.getModelInfo();
-  console.log(`   Model trained: ${modelInfo.trained ? '✅ YES' : '❌ NO'}`);
+  console.log(`   Model trained: ${modelInfo.trained ? 'YES' : 'NO'}`);
   if (modelInfo.metadata) {
     console.log(`   Samples trained on: ${modelInfo.metadata.samplesCount}`);
     console.log(`   Created at: ${modelInfo.metadata.createdAt}`);
   }
   
-  console.log('\n🎉 WAF Pipeline Test Complete!');
+  console.log('\nWAF Pipeline Test Complete!');
   
   // Cleanup
   rateLimiter.cleanup();

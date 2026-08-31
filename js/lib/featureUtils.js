@@ -124,7 +124,7 @@ async function extractFeatures(req, res = null) {
       const cached = await redis.get(cacheKey);
       if (cached) return JSON.parse(cached);
     } catch (err) {
-      console.warn('⚠️ Redis read failed. Falling back.', err.message);
+      console.warn('Redis read failed. Falling back.', err.message);
     }
   }
 
@@ -162,7 +162,7 @@ async function extractFeatures(req, res = null) {
     try {
       await redis.set(cacheKey, JSON.stringify(features), { EX: ttl });
     } catch (err) {
-      console.warn('⚠️ Redis write failed. Ignoring.', err.message);
+      console.warn('Redis write failed. Ignoring.', err.message);
     }
   }
 

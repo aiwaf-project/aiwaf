@@ -114,7 +114,7 @@ module.exports = {
         await blacklistManager.block(ip, 'flood');
       }
     } catch (err) {
-      console.warn('⚠️ Cache error in record().', err.message);
+      console.warn('Cache error in record().', err.message);
     }
   },
 
@@ -123,7 +123,7 @@ module.exports = {
     try {
       if (await blacklistManager.isBlocked(ip)) return true;
     } catch (err) {
-      console.warn('⚠️ Blacklist check error:', err.message);
+      console.warn('Blacklist check error:', err.message);
     }
 
     try {
@@ -133,10 +133,12 @@ module.exports = {
       const within = timestamps.filter(t => now - t < effective.WINDOW_SEC * 1000);
       return within.length > effective.MAX_REQ;
     } catch (err) {
-      console.warn('⚠️ Cache error in isBlocked().', err.message);
+      console.warn('Cache error in isBlocked().', err.message);
       return false; // Fail open
     }
   },
+
+  cleanupExpired: cleanupOldTimestamps,
 
   // Cleanup method for graceful shutdown
   cleanup() {

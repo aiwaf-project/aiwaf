@@ -692,7 +692,7 @@ class AIWAFManager:
             
             # Top paths
             if stats.get('top_paths'):
-                print(f"\n� Most Requested Paths:")
+                print("\nMost Requested Paths:")
                 for path, count in stats['top_paths'][:5]:
                     print(f"   {path}: {count} requests")
             
