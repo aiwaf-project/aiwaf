@@ -100,9 +100,20 @@ function tryLoadMmdbReader(mmdbPath) {
 
 module.exports = {
   init(opts = {}) {
+    const packagedDefault = path.resolve(__dirname, '..', 'geolock', 'ipinfo_lite.mmdb');
+    const monorepoDefault = path.resolve(
+      __dirname,
+      '..',
+      '..',
+      'py',
+      'aiwaf',
+      'core',
+      'geolock',
+      'ipinfo_lite.mmdb'
+    );
     const resolvedPath = opts.AIWAF_GEO_MMDB_PATH
       ? path.resolve(opts.AIWAF_GEO_MMDB_PATH)
-      : path.resolve(__dirname, '..', 'geolock', 'ipinfo_lite.mmdb');
+      : (fs.existsSync(packagedDefault) ? packagedDefault : monorepoDefault);
     config = {
       enabled: !!opts.AIWAF_GEO_BLOCK_ENABLED,
       blocked: (opts.AIWAF_GEO_BLOCK_COUNTRIES || []).map(normalizeCountry),

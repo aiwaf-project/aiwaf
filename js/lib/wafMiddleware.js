@@ -11,6 +11,7 @@ const geoBlocker = require('./geoBlocker');
 const middlewareLogger = require('./middlewareLogger');
 const exemptions = require('./exemptions');
 const requestLogStore = require('./requestLogStore');
+const { extractExtendedRequestInfo } = require('./runtimeUtils');
 const { extractFeatures, init: initFeatureUtils, markRequestStart, STATIC_KW } = require('./featureUtils');
 const { normalizeSettings } = require('./settingsCompat');
 const {
@@ -201,6 +202,13 @@ module.exports = function aiwaf(rawOpts = {}) {
     }
     const routePlan = createRoutePlan(path, pathRules, req.aiwafRoute || {});
     const shouldApply = name => enabledMiddlewares.has(normalizeMiddlewareName(name)) && routePlan.shouldApply(name);
+    const blockIp = reason => blacklistManager.block(ip, reason, {
+      extendedRequestInfo: extractExtendedRequestInfo(req, {
+        enabled: opts.AIWAF_CAPTURE_EXTENDED_REQUEST_INFO,
+        maxHeaders: opts.AIWAF_EXTENDED_INFO_MAX_HEADERS,
+        maxValueLength: opts.AIWAF_EXTENDED_INFO_MAX_VALUE_LENGTH
+      }) || {}
+    });
     
     // Debug: Log first character of path to ensure it's being captured
     if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
@@ -231,7 +239,7 @@ module.exports = function aiwaf(rawOpts = {}) {
         if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
           console.error(`[AIWAF-BLOCK-METHOD] method=${method} not in allowed=${allowed.join(',')}`);
         }
-        await blacklistManager.block(ip, `method_not_allowed:${method}`);
+        await blockIp(`method_not_allowed:${method}`);
         return deny(405, 'blocked', `method_not_allowed:${method}`);
       }
     }
@@ -256,7 +264,7 @@ module.exports = function aiwaf(rawOpts = {}) {
         if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
           console.error(`[AIWAF-BLOCK-HEADER] reason=${headerReason}`);
         }
-        await blacklistManager.block(ip, headerReason);
+        await blockIp(headerReason);
         return deny(403, 'blocked', headerReason);
       }
     }
@@ -276,7 +284,7 @@ module.exports = function aiwaf(rawOpts = {}) {
         if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
           console.error(`[AIWAF-BLOCK-WASM-HEADER] reason=${headerWasmReason}`);
         }
-        await blacklistManager.block(ip, `wasm_header:${headerWasmReason}`);
+        await blockIp(`wasm_header:${headerWasmReason}`);
         return deny(403, 'blocked', `wasm_header:${headerWasmReason}`);
       }
 
@@ -290,7 +298,7 @@ module.exports = function aiwaf(rawOpts = {}) {
           if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
             console.error(`[AIWAF-BLOCK-WASM-URL] reason=${urlWasmReason}`);
           }
-          await blacklistManager.block(ip, `wasm_url:${urlWasmReason}`);
+          await blockIp(`wasm_url:${urlWasmReason}`);
           return deny(403, 'blocked', `wasm_url:${urlWasmReason}`);
         }
 
@@ -314,7 +322,7 @@ module.exports = function aiwaf(rawOpts = {}) {
               if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
                 console.error(`[AIWAF-BLOCK-WASM-CONTENT] reason=${contentWasmReason}`);
               }
-              await blacklistManager.block(ip, `wasm_content:${contentWasmReason}`);
+              await blockIp(`wasm_content:${contentWasmReason}`);
               return deny(403, 'blocked', `wasm_content:${contentWasmReason}`);
             }
           }
@@ -332,7 +340,7 @@ module.exports = function aiwaf(rawOpts = {}) {
             if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
               console.error(`[AIWAF-BLOCK-WASM-RECENT] reason=${recentWasmReason}`);
             }
-            await blacklistManager.block(ip, `wasm_recent:${recentWasmReason}`);
+            await blockIp(`wasm_recent:${recentWasmReason}`);
             return deny(403, 'blocked', `wasm_recent:${recentWasmReason}`);
           }
         }
@@ -345,7 +353,7 @@ module.exports = function aiwaf(rawOpts = {}) {
         if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
           console.error(`[AIWAF-BLOCK-GEO] reason=${geoResult.reason}`);
         }
-        await blacklistManager.block(ip, geoResult.reason || 'geo_block');
+        await blockIp(geoResult.reason || 'geo_block');
         return deny(403, 'blocked', geoResult.reason || 'geo_block', geoResult.country);
       }
     }
@@ -356,7 +364,7 @@ module.exports = function aiwaf(rawOpts = {}) {
         if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
           console.error(`[AIWAF-BLOCK-HONEYPOT] reason=${honeypotResult.reason}`);
         }
-        await blacklistManager.block(ip, honeypotResult.reason || 'honeypot');
+        await blockIp(honeypotResult.reason || 'honeypot');
         const status = honeypotResult.statusCode || 403;
         const code = honeypotResult.errorCode || 'bot_detected';
         return deny(status, code, honeypotResult.reason || 'honeypot');
@@ -384,7 +392,7 @@ module.exports = function aiwaf(rawOpts = {}) {
         if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
           console.error(`[AIWAF-BLOCK-STATIC-KW] match=${staticMatch}`);
         }
-        await blacklistManager.block(ip, `static:${staticMatch}`);
+        await blockIp(`static:${staticMatch}`);
         return deny(403, 'blocked', `static:${staticMatch}`);
       }
 
@@ -393,7 +401,7 @@ module.exports = function aiwaf(rawOpts = {}) {
         if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
           console.error(`[AIWAF-BLOCK-DYNAMIC-KW] match=${dynamicMatch}`);
         }
-        await blacklistManager.block(ip, `dynamic:${dynamicMatch}`);
+        await blockIp(`dynamic:${dynamicMatch}`);
         return deny(403, 'blocked', `dynamic:${dynamicMatch}`);
       }
     }
@@ -402,7 +410,7 @@ module.exports = function aiwaf(rawOpts = {}) {
       if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
         console.error(`[AIWAF-BLOCK-UUID]`);
       }
-      await blacklistManager.block(ip, 'uuid');
+      await blockIp('uuid');
       return deny(403, 'blocked', 'uuid');
     }
 
@@ -437,7 +445,7 @@ module.exports = function aiwaf(rawOpts = {}) {
           if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
             console.error(`[AIWAF-ANOMALY-BLOCKING] reason=${reason}`);
           }
-          await blacklistManager.block(ip, reason);
+          await blockIp(reason);
           return deny(403, 'blocked', 'anomaly');
         }
       } else if (!anomalyDetector.isModelSufficientlyTrained()) {

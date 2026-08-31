@@ -105,6 +105,7 @@ describe('AIWAF-JS Middleware', () => {
 
   it('exposes route middleware planning from the package entry point', () => {
     expect(aiwaf.shouldApplyMiddleware('/api/x', 'rate_limit', [])).toBe(true);
+    expect(aiwaf.reputation.reasonWeight('flood')).toBe(25);
   });
 
   it('auto-detects whether the application exposes UUID routes', async () => {

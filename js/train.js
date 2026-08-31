@@ -148,9 +148,19 @@ function normalizeTokens(value) {
 }
 
 const LOGIN_PATH_PREFIXES = normalizeTokens(process.env.AIWAF_LOGIN_PATH_PREFIXES || '/admin/login/,/login/,/accounts/login/,/auth/login/,/signin/');
+const PACKAGED_GEO_MMDB_PATH = path.resolve(__dirname, 'geolock', 'ipinfo_lite.mmdb');
+const MONOREPO_GEO_MMDB_PATH = path.resolve(
+  __dirname,
+  '..',
+  'py',
+  'aiwaf',
+  'core',
+  'geolock',
+  'ipinfo_lite.mmdb'
+);
 const GEO_MMDB_PATH = process.env.AIWAF_GEO_MMDB_PATH
   ? path.resolve(process.env.AIWAF_GEO_MMDB_PATH)
-  : path.resolve(__dirname, 'geolock', 'ipinfo_lite.mmdb');
+  : (fs.existsSync(PACKAGED_GEO_MMDB_PATH) ? PACKAGED_GEO_MMDB_PATH : MONOREPO_GEO_MMDB_PATH);
 
 let geoReader = null;
 function loadGeoReader() {

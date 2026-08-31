@@ -1,12 +1,13 @@
 {
     "name": "aiwaf-js",
     "version": "1.0.0",
-    "description": "Adaptive Web Application Firewall middleware for Node.js (Express, Fastify, Hapi, Next.js)",
+    "description": "AIWAF Web Application Firewall for JavaScript applications and major Node.js frameworks",
     "main": "index.js",
     "files": [
         "index.js",
         "bin/",
         "lib/",
+        "geolock/",
         "resources/",
         "utils/",
         "train.js",

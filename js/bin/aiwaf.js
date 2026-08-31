@@ -3,6 +3,7 @@
 const path = require('path');
 const { spawn } = require('child_process');
 const pathManifest = require('../lib/pathManifest');
+const fs = require('fs');
 
 function print(obj) {
   process.stdout.write(`${JSON.stringify(obj, null, 2)}\n`);
@@ -29,8 +30,125 @@ function runTrain() {
 }
 
 function readJsonFile(filePath) {
-  const fs = require('fs');
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+function writeJsonFile(filePath, payload) {
+  const resolved = path.resolve(filePath);
+  fs.mkdirSync(path.dirname(resolved), { recursive: true });
+  const temporary = `${resolved}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+  fs.renameSync(temporary, resolved);
+  return resolved;
+}
+
+function parseDuration(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const match = String(value).trim().toLowerCase().match(/^(\d+)(s|m|h|d)?$/);
+  if (!match) throw new Error('Duration must be like 900s, 15m, 24h, or 1d');
+  const units = { s: 1, m: 60, h: 3600, d: 86400 };
+  return Number(match[1]) * units[match[2] || 's'];
+}
+
+async function collectOperationalState() {
+  const blacklistManager = require('../lib/blacklistManager');
+  const exemptionStore = require('../lib/exemptionStore');
+  const geoStore = require('../lib/geoStore');
+  const dynamicKeywordStore = require('../lib/dynamicKeywordStore');
+  const modelStore = require('../lib/modelStore');
+  const [blacklist, ipExemptions, pathExemptions, geo, dynamicKeywords, model] = await Promise.all([
+    blacklistManager.exportRecords(),
+    exemptionStore.listIps(),
+    exemptionStore.listPaths(),
+    geoStore.listBlockedCountries(),
+    dynamicKeywordStore.list(100000),
+    modelStore.load(process.env)
+  ]);
+  return {
+    schema_version: '1.0',
+    exported_at: new Date().toISOString(),
+    blacklist,
+    ip_exemptions: ipExemptions,
+    path_exemptions: pathExemptions,
+    geo_blocked_countries: geo,
+    dynamic_keywords: dynamicKeywords,
+    model
+  };
+}
+
+async function exportOperationalState(filePath = 'aiwaf-export.json') {
+  const state = await collectOperationalState();
+  return print({ ok: true, output: writeJsonFile(filePath, state), counts: {
+    blacklist: state.blacklist.length,
+    ip_exemptions: state.ip_exemptions.length,
+    path_exemptions: state.path_exemptions.length,
+    geo: state.geo_blocked_countries.length,
+    dynamic_keywords: state.dynamic_keywords.length
+  } });
+}
+
+async function importOperationalState(filePath) {
+  if (!filePath) throw new Error('Import file is required');
+  const state = readJsonFile(filePath);
+  const blacklistManager = require('../lib/blacklistManager');
+  const exemptionStore = require('../lib/exemptionStore');
+  const geoStore = require('../lib/geoStore');
+  const dynamicKeywordStore = require('../lib/dynamicKeywordStore');
+  const modelStore = require('../lib/modelStore');
+  const imported = { blacklist: await blacklistManager.importRecords(state.blacklist || []) };
+  for (const row of state.ip_exemptions || []) await exemptionStore.addIp(row.ip_address || row.ip, row.reason);
+  for (const row of state.path_exemptions || []) await exemptionStore.addPath(row.path_prefix || row.path, row.reason);
+  for (const row of state.geo_blocked_countries || []) await geoStore.addBlockedCountry(row.country_code || row.country, row.reason);
+  for (const row of state.dynamic_keywords || []) await dynamicKeywordStore.add(row.keyword, row.count);
+  if (state.model) await modelStore.save(process.env, state.model, state.model.metadata || {});
+  imported.ip_exemptions = (state.ip_exemptions || []).length;
+  imported.path_exemptions = (state.path_exemptions || []).length;
+  imported.geo = (state.geo_blocked_countries || []).length;
+  imported.dynamic_keywords = (state.dynamic_keywords || []).length;
+  return print({ ok: true, imported });
+}
+
+async function operationalStatus() {
+  const blacklistManager = require('../lib/blacklistManager');
+  const exemptionStore = require('../lib/exemptionStore');
+  const geoStore = require('../lib/geoStore');
+  const dynamicKeywordStore = require('../lib/dynamicKeywordStore');
+  const requestLogStore = require('../lib/requestLogStore');
+  const modelStore = require('../lib/modelStore');
+  const [blacklist, ips, paths, geo, keywords, logs, model] = await Promise.all([
+    blacklistManager.getStatistics(), exemptionStore.listIps(), exemptionStore.listPaths(),
+    geoStore.listBlockedCountries(), dynamicKeywordStore.list(100000), requestLogStore.recent(1),
+    modelStore.load(process.env)
+  ]);
+  return print({
+    status: 'enabled',
+    blacklist,
+    exemptions: { ips: ips.length, paths: paths.length },
+    geo_blocked_countries: geo.length,
+    dynamic_keywords: keywords.length,
+    request_logging: { has_records: logs.length > 0 },
+    model: { loaded: !!model, metadata: model?.metadata || null },
+    wasm: require('../lib/wasmAdapter').getWasmStatus()
+  });
+}
+
+async function operationalStats(limit = 5000) {
+  const blacklistManager = require('../lib/blacklistManager');
+  const requestLogStore = require('../lib/requestLogStore');
+  const [blacklist, logs] = await Promise.all([blacklistManager.getStatistics(), requestLogStore.recent(limit)]);
+  const statuses = {};
+  const paths = {};
+  let blocked = 0;
+  logs.forEach(row => {
+    statuses[String(row.status || 0)] = (statuses[String(row.status || 0)] || 0) + 1;
+    paths[row.path || '/'] = (paths[row.path || '/'] || 0) + 1;
+    if (row.blocked === true || row.blocked === 1 || String(row.blocked).toLowerCase() === 'true') blocked += 1;
+  });
+  return print({
+    blacklist,
+    requests: { total: logs.length, blocked, statuses },
+    top_paths: Object.entries(paths).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([requestPath, count]) => ({ path: requestPath, count }))
+  });
 }
 
 function parseManifestArgs(args = []) {
@@ -57,8 +175,9 @@ async function diagnoseIp(ip) {
   const blacklistManager = require('../lib/blacklistManager');
   const exemptionStore = require('../lib/exemptionStore');
   const blocked = await blacklistManager.isBlocked(ip);
+  const blockInfo = await blacklistManager.getBlockInfo(ip);
   const exempt = await exemptionStore.isIpExempt(ip);
-  print({ ip, blocked, exempt });
+  print({ ip, blocked, exempt, block_info: blockInfo });
 }
 
 function runPathShell() {
@@ -153,7 +272,9 @@ async function main() {
         'list blacklist|exemptions|geo|request-logs',
         'list dynamic-keywords',
         'list model-info',
-        'add blacklist <ip> [reason]',
+        'list recent-blocks [hours]',
+        'list top-reasons [limit]',
+        'add blacklist <ip> [reason] [--duration 24h|--permanent]',
         'add ip-exemption <ip> [reason]',
         'add path-exemption <pathPrefix> [reason]',
         'add dynamic-keyword <keyword> [count]',
@@ -166,6 +287,14 @@ async function main() {
         'geo summary',
         'clear blacklist|request-logs',
         'clear dynamic-keywords',
+        'status',
+        'stats [request-limit]',
+        'logs analyze [limit]',
+        'blacklist migrate [--duration 24h]',
+        'blacklist cleanup',
+        'export [output.json]',
+        'import <input.json>',
+        'model info|export|import|clear [file]',
         'train',
         'manifest --framework <name> --routes <routes.json> [--output .aiwaf/paths.json]',
         'whois <domain|ip>',
@@ -180,6 +309,47 @@ async function main() {
   if (cmd === 'train') return runTrain();
   if (cmd === 'pathshell') return runPathShell();
   if (cmd === 'reset') return runReset([subcmd, ...args].filter(Boolean));
+  if (cmd === 'status') return operationalStatus();
+  if (cmd === 'stats') return operationalStats(Number(subcmd || 5000));
+  if (cmd === 'export') return exportOperationalState(subcmd || 'aiwaf-export.json');
+  if (cmd === 'import') return importOperationalState(subcmd);
+
+  if (cmd === 'logs' && subcmd === 'analyze') {
+    return operationalStats(Number(args[0] || 5000));
+  }
+
+  if (cmd === 'blacklist' && subcmd === 'cleanup') {
+    const blacklistManager = require('../lib/blacklistManager');
+    return print({ ok: true, cleaned: await blacklistManager.cleanupExpired() });
+  }
+
+  if (cmd === 'blacklist' && subcmd === 'migrate') {
+    const durationIndex = args.indexOf('--duration');
+    const duration = durationIndex >= 0 ? parseDuration(args[durationIndex + 1]) : null;
+    const blacklistManager = require('../lib/blacklistManager');
+    return print({ ok: true, ...(await blacklistManager.migrateLegacy({ duration })) });
+  }
+
+  if (cmd === 'model') {
+    const modelStore = require('../lib/modelStore');
+    if (subcmd === 'info') {
+      const model = await modelStore.load(process.env);
+      return print({ loaded: !!model, metadata: model?.metadata || null });
+    }
+    if (subcmd === 'export') {
+      const model = await modelStore.load(process.env);
+      if (!model) return print({ ok: false, error: 'model not found' });
+      return print({ ok: true, output: writeJsonFile(args[0] || 'aiwaf-model.json', model) });
+    }
+    if (subcmd === 'import') {
+      const model = readJsonFile(args[0]);
+      await modelStore.save(process.env, model, model.metadata || {});
+      return print({ ok: true, imported: true });
+    }
+    if (subcmd === 'clear') {
+      return print({ ok: true, removed: await modelStore.remove(process.env) });
+    }
+  }
 
   if (cmd === 'manifest') {
     const options = parseManifestArgs([subcmd, ...args].filter(Boolean));
@@ -232,6 +402,16 @@ async function main() {
     return print({ loaded: true, metadata: model.metadata || null });
   }
 
+  if (cmd === 'list' && subcmd === 'recent-blocks') {
+    const blacklistManager = require('../lib/blacklistManager');
+    return print(await blacklistManager.getRecentBlocks(Number(args[0] || 24)));
+  }
+
+  if (cmd === 'list' && subcmd === 'top-reasons') {
+    const blacklistManager = require('../lib/blacklistManager');
+    return print(await blacklistManager.getTopBlockedReasons(Number(args[0] || 10)));
+  }
+
   if (cmd === 'add' && subcmd === 'ip-exemption') {
     const exemptionStore = require('../lib/exemptionStore');
     const [ip, ...reasonParts] = args;
@@ -241,8 +421,13 @@ async function main() {
 
   if (cmd === 'add' && subcmd === 'blacklist') {
     const blacklistManager = require('../lib/blacklistManager');
-    const [ip, ...reasonParts] = args;
-    await blacklistManager.block(ip, reasonParts.join(' ') || 'manual');
+    const [ip, ...values] = args;
+    const durationIndex = values.indexOf('--duration');
+    const permanent = values.includes('--permanent');
+    const duration = durationIndex >= 0 ? parseDuration(values[durationIndex + 1]) : undefined;
+    const reasonParts = values.filter((value, index) => value !== '--permanent'
+      && value !== '--duration' && index !== durationIndex + 1);
+    await blacklistManager.block(ip, reasonParts.join(' ') || 'manual', { duration, permanent });
     return print({ ok: true, ip });
   }
 
@@ -345,5 +530,12 @@ main()
     process.exit(1);
   })
   .finally(async () => {
-    // no-op
+    const command = process.argv[2];
+    if (!['pathshell', 'train'].includes(command)) {
+      try {
+        await require('../utils/db').destroy();
+      } catch (err) {
+        // The requested operation has already completed; cleanup is best effort.
+      }
+    }
   });

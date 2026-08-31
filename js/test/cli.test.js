@@ -3,8 +3,18 @@ const fs = require('fs');
 const os = require('os');
 
 function setupMocks() {
+  const db = { destroy: jest.fn(async () => {}) };
+  jest.doMock('../utils/db', () => db);
   jest.doMock('../lib/blacklistManager', () => ({
     getBlockedIPs: jest.fn(async () => [{ ip_address: '203.0.113.1' }]),
+    getStatistics: jest.fn(async () => ({ total: 1, active: 1 })),
+    getBlockInfo: jest.fn(async () => ({ score: 80 })),
+    getRecentBlocks: jest.fn(async () => [{ ip_address: '203.0.113.1' }]),
+    getTopBlockedReasons: jest.fn(async () => [{ reason: 'scanner', count: 1 }]),
+    exportRecords: jest.fn(async () => [{ ip_address: '203.0.113.1' }]),
+    importRecords: jest.fn(async rows => rows.length),
+    cleanupExpired: jest.fn(async () => 1),
+    migrateLegacy: jest.fn(async () => ({ total: 1, changed: 1 })),
     clear: jest.fn(async () => 3),
     isBlocked: jest.fn(async () => true),
     block: jest.fn(async () => true),
@@ -34,7 +44,9 @@ function setupMocks() {
   }));
 
   jest.doMock('../lib/modelStore', () => ({
-    load: jest.fn(async () => ({ metadata: { createdAt: 'now' } }))
+    load: jest.fn(async () => ({ metadata: { createdAt: 'now' } })),
+    save: jest.fn(async () => {}),
+    remove: jest.fn(async () => true)
   }));
 
   jest.doMock('../lib/dynamicKeywordStore', () => ({
@@ -64,7 +76,8 @@ function setupMocks() {
     modelStore: require('../lib/modelStore'),
     dynamicKeywordStore: require('../lib/dynamicKeywordStore'),
     pathManifest: require('../lib/pathManifest'),
-    childProcess: require('child_process')
+    childProcess: require('child_process'),
+    db
   };
 }
 
@@ -121,7 +134,10 @@ describe('aiwaf CLI routing', () => {
     runWithArgv(['node', path.join('bin', 'aiwaf.js'), 'remove', 'dynamic-keyword', 'probe']);
 
     await new Promise(resolve => setTimeout(resolve, 0));
-    expect(mocks.blacklistManager.block).toHaveBeenCalledWith('203.0.113.9', 'manual');
+    expect(mocks.blacklistManager.block).toHaveBeenCalledWith('203.0.113.9', 'manual', {
+      duration: undefined,
+      permanent: false
+    });
     expect(mocks.blacklistManager.unblock).toHaveBeenCalledWith('203.0.113.9');
     expect(mocks.dynamicKeywordStore.add).toHaveBeenCalledWith('probe', 4);
     expect(mocks.dynamicKeywordStore.remove).toHaveBeenCalledWith('probe');
@@ -180,5 +196,58 @@ describe('aiwaf CLI routing', () => {
       output,
       { routes: [{ method: 'GET', path: '/api/test' }] }
     );
+  });
+
+  it('routes status, statistics, cleanup, and blacklist migration', async () => {
+    const mocks = setupMocks();
+    runWithArgv(['node', 'aiwaf.js', 'status']);
+    runWithArgv(['node', 'aiwaf.js', 'stats', '100']);
+    runWithArgv(['node', 'aiwaf.js', 'blacklist', 'cleanup']);
+    runWithArgv(['node', 'aiwaf.js', 'blacklist', 'migrate', '--duration', '24h']);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(mocks.blacklistManager.getStatistics).toHaveBeenCalled();
+    expect(mocks.blacklistManager.cleanupExpired).toHaveBeenCalled();
+    expect(mocks.blacklistManager.migrateLegacy).toHaveBeenCalledWith({ duration: 86400 });
+  });
+
+  it('routes reputation reports and explicit permanent blocks', async () => {
+    const mocks = setupMocks();
+    runWithArgv(['node', 'aiwaf.js', 'list', 'recent-blocks', '12']);
+    runWithArgv(['node', 'aiwaf.js', 'list', 'top-reasons', '5']);
+    runWithArgv(['node', 'aiwaf.js', 'add', 'blacklist', '203.0.113.50', 'manual', '--permanent']);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(mocks.blacklistManager.getRecentBlocks).toHaveBeenCalledWith(12);
+    expect(mocks.blacklistManager.getTopBlockedReasons).toHaveBeenCalledWith(5);
+    expect(mocks.blacklistManager.block).toHaveBeenCalledWith('203.0.113.50', 'manual', {
+      duration: undefined,
+      permanent: true
+    });
+  });
+
+  it('exports and imports complete operational state', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aiwaf-export-test-'));
+    const output = path.join(dir, 'state.json');
+    const mocks = setupMocks();
+    runWithArgv(['node', 'aiwaf.js', 'export', output]);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(fs.existsSync(output)).toBe(true);
+    runWithArgv(['node', 'aiwaf.js', 'import', output]);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(mocks.blacklistManager.importRecords).toHaveBeenCalled();
+    expect(mocks.modelStore.save).toHaveBeenCalled();
+  });
+
+  it('routes model lifecycle operations', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aiwaf-model-cli-'));
+    const output = path.join(dir, 'model.json');
+    const mocks = setupMocks();
+    runWithArgv(['node', 'aiwaf.js', 'model', 'info']);
+    runWithArgv(['node', 'aiwaf.js', 'model', 'export', output]);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    runWithArgv(['node', 'aiwaf.js', 'model', 'import', output]);
+    runWithArgv(['node', 'aiwaf.js', 'model', 'clear']);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(mocks.modelStore.save).toHaveBeenCalled();
+    expect(mocks.modelStore.remove).toHaveBeenCalled();
   });
 });

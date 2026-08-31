@@ -17,6 +17,7 @@ const modelSecurity = require('./lib/modelSecurity');
 const blockResponses = require('./lib/blockResponses');
 const KeywordFallbackStore = require('./lib/keywordFallbackStore');
 const whois = require('./lib/whois');
+const reputation = require('./lib/reputation');
 
 function withMiddlewares(selection) {
   return (opts = {}) => createExpressMiddleware({
@@ -52,6 +53,7 @@ module.exports.modelSecurity = modelSecurity;
 module.exports.blockResponses = blockResponses;
 module.exports.KeywordFallbackStore = KeywordFallbackStore;
 module.exports.whois = whois;
+module.exports.reputation = reputation;
 module.exports.extractExpressRoutes = pathManifest.extractExpressRoutes;
 module.exports.extractFastifyRoutes = pathManifest.extractFastifyRoutes;
 module.exports.extractHapiRoutes = pathManifest.extractHapiRoutes;

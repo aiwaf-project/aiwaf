@@ -17,13 +17,27 @@ function escapeCsv(value) {
 }
 
 function parseCsvLine(line) {
-  return (line.match(/("([^"]|"")*"|[^,]+)/g) || []).map(part => {
-    const trimmed = String(part || '').trim();
-    if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
-      return trimmed.slice(1, -1).replace(/""/g, '"');
+  const cells = [];
+  let value = '';
+  let quoted = false;
+  for (let index = 0; index < String(line).length; index += 1) {
+    const char = String(line)[index];
+    if (char === '"') {
+      if (quoted && String(line)[index + 1] === '"') {
+        value += '"';
+        index += 1;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (char === ',' && !quoted) {
+      cells.push(value.trim());
+      value = '';
+    } else {
+      value += char;
     }
-    return trimmed;
-  });
+  }
+  cells.push(value.trim());
+  return cells;
 }
 
 function readRows(filePath, headers) {
@@ -33,15 +47,18 @@ function readRows(filePath, headers) {
   if (raw.length === 0) return [];
 
   const fileHeader = parseCsvLine(raw[0]);
-  const startIndex = fileHeader.join(',') === headers.join(',') ? 1 : 0;
+  const hasHeader = fileHeader.some(header => headers.includes(header));
+  const sourceHeaders = hasHeader ? fileHeader : headers;
+  const startIndex = hasHeader ? 1 : 0;
   const rows = [];
 
   for (let i = startIndex; i < raw.length; i += 1) {
     const cells = parseCsvLine(raw[i]);
     if (cells.length === 0) continue;
     const row = {};
-    headers.forEach((header, index) => {
-      row[header] = cells[index] ?? '';
+    headers.forEach(header => {
+      const index = sourceHeaders.indexOf(header);
+      row[header] = index >= 0 ? (cells[index] ?? '') : '';
     });
     rows.push(row);
   }

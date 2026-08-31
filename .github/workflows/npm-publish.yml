@@ -35,6 +35,12 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Stage shared package assets
+        run: |
+          cp ../README.md README.md
+          mkdir -p geolock
+          cp ../py/aiwaf/core/geolock/ipinfo_lite.mmdb geolock/ipinfo_lite.mmdb
+
       - name: Publish
         run: npm publish --access public
         env:

@@ -124,6 +124,20 @@ module.exports = {
     }
   },
 
+  async remove(opts = {}) {
+    const storage = opts.AIWAF_MODEL_STORAGE || 'file';
+    const cacheKey = getCacheKey(opts);
+    if (storage === 'cache') return cache.delete(cacheKey);
+    if (storage === 'db') {
+      await ensureDb();
+      return db('model_artifacts').del();
+    }
+    const modelPath = getModelPath(opts);
+    if (!fs.existsSync(modelPath)) return false;
+    fs.unlinkSync(modelPath);
+    return true;
+  },
+
   cacheGet,
   cacheSet
 };

@@ -74,4 +74,25 @@ describe('geoBlocker MMDB lookup', () => {
     expect(result.blocked).toBe(false);
     expect(result.country).toBe('');
   });
+
+  it('uses the shared monorepo MMDB when no packaged copy exists', () => {
+    const openSync = jest.fn(() => ({ get: jest.fn() }));
+    jest.doMock('maxmind', () => ({ openSync }));
+
+    jest.isolateModules(() => {
+      const geoBlocker = require('../lib/geoBlocker');
+      geoBlocker.init({ AIWAF_GEO_BLOCK_ENABLED: true });
+    });
+
+    expect(openSync).toHaveBeenCalledWith(path.resolve(
+      __dirname,
+      '..',
+      '..',
+      'py',
+      'aiwaf',
+      'core',
+      'geolock',
+      'ipinfo_lite.mmdb'
+    ));
+  });
 });

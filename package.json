@@ -1,6 +1,7 @@
 {
   "name": "aiwaf-monorepo",
   "private": true,
+  "description": "Self-learning Web Application Firewall for Python and JavaScript applications",
   "scripts": {
     "test": "python aiwaf_test.py",
     "test:coverage": "python aiwaf_test.py --coverage",

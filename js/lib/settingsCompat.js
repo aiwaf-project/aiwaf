@@ -120,6 +120,9 @@ function normalizeSettings(rawOpts = {}) {
     AIWAF_MIDDLEWARE_LOG_DB: toBool(firstDefined(rawOpts.AIWAF_MIDDLEWARE_LOG_DB, rawOpts.middlewareLogDb, legacy.logging?.dbEnabled, process.env.AIWAF_MIDDLEWARE_LOG_DB), false),
     AIWAF_MIDDLEWARE_LOG_CSV: toBool(firstDefined(rawOpts.AIWAF_MIDDLEWARE_LOG_CSV, rawOpts.middlewareLogCsv, legacy.logging?.csvEnabled, process.env.AIWAF_MIDDLEWARE_LOG_CSV), false),
     AIWAF_MIDDLEWARE_LOG_CSV_PATH: firstDefined(rawOpts.AIWAF_MIDDLEWARE_LOG_CSV_PATH, rawOpts.middlewareLogCsvPath, legacy.logging?.csvPath, process.env.AIWAF_MIDDLEWARE_LOG_CSV_PATH, 'logs/aiwaf-requests.csv'),
+    AIWAF_CAPTURE_EXTENDED_REQUEST_INFO: toBool(firstDefined(rawOpts.AIWAF_CAPTURE_EXTENDED_REQUEST_INFO, rawOpts.captureExtendedRequestInfo, legacy.logging?.captureExtendedRequestInfo, process.env.AIWAF_CAPTURE_EXTENDED_REQUEST_INFO), false),
+    AIWAF_EXTENDED_INFO_MAX_HEADERS: toNumber(firstDefined(rawOpts.AIWAF_EXTENDED_INFO_MAX_HEADERS, rawOpts.extendedInfoMaxHeaders, process.env.AIWAF_EXTENDED_INFO_MAX_HEADERS), 50),
+    AIWAF_EXTENDED_INFO_MAX_VALUE_LENGTH: toNumber(firstDefined(rawOpts.AIWAF_EXTENDED_INFO_MAX_VALUE_LENGTH, rawOpts.extendedInfoMaxValueLength, process.env.AIWAF_EXTENDED_INFO_MAX_VALUE_LENGTH), 512),
 
     AIWAF_MIN_AI_LOGS: toNumber(firstDefined(rawOpts.AIWAF_MIN_AI_LOGS, rawOpts.minAiLogs, legacy.training?.minAiLogs, process.env.AIWAF_MIN_AI_LOGS), 0),
     AIWAF_ENABLE_KEYWORD_LEARNING: toBool(firstDefined(rawOpts.AIWAF_ENABLE_KEYWORD_LEARNING, rawOpts.enableKeywordLearning, legacy.keywords?.enableLearning, process.env.AIWAF_ENABLE_KEYWORD_LEARNING), true),

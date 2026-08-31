@@ -15,6 +15,8 @@ describe('modelStore', () => {
     const loaded = await modelStore.load({ AIWAF_MODEL_STORAGE: 'file', AIWAF_MODEL_PATH: modelPath });
     expect(loaded.nTrees).toBe(1);
     expect(loaded.metadata.createdAt).toBe('now');
+    expect(await modelStore.remove({ AIWAF_MODEL_STORAGE: 'file', AIWAF_MODEL_PATH: modelPath })).toBe(true);
+    expect(fs.existsSync(modelPath)).toBe(false);
   });
 
   it('supports cache storage', async () => {
@@ -23,6 +25,7 @@ describe('modelStore', () => {
 
     const loaded = await modelStore.load({ AIWAF_MODEL_STORAGE: 'cache', AIWAF_MODEL_CACHE_KEY: 'test-cache' });
     expect(loaded.nTrees).toBe(2);
+    expect(await modelStore.remove({ AIWAF_MODEL_STORAGE: 'cache', AIWAF_MODEL_CACHE_KEY: 'test-cache' })).toBe(true);
   });
 });
 
