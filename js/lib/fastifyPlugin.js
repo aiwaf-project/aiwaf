@@ -12,6 +12,7 @@ function createExpressLikeResponse(reply) {
       raw.statusCode = code;
     },
     status(code) {
+      res.statusCode = code;
       reply.code(code);
       return res;
     },

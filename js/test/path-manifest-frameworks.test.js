@@ -57,6 +57,34 @@ describe('path manifest framework extractors', () => {
     expect(fs.existsSync(output)).toBe(true);
     expect(manifest.framework).toBe('fastify');
     expect(manifest.routes['/api/users'].category).toBe('api');
+
+    for (const framework of ['express', 'sails', 'hapi', 'koa', 'next', 'nest', 'adonis']) {
+      const frameworkOutput = path.join(tempDir, `${framework}.json`);
+      const generated = generateFrameworkManifest(framework, [], frameworkOutput, {
+        routes: [{ method: 'GET', path: `/api/${framework}`, handler: apiHandler }]
+      });
+      expect(generated.framework).toBe(framework);
+      expect(fs.existsSync(frameworkOutput)).toBe(true);
+    }
+  });
+
+  it('falls back to source inspection and infers handler methods', () => {
+    jest.resetModules();
+    jest.doMock('../lib/sourceAst', () => ({
+      analyzeHandlerAst: jest.fn(() => ({ available: false, methods: ['PATCH'] }))
+    }));
+    jest.isolateModules(() => {
+      const manifestApi = require('../lib/pathManifest');
+      const api = manifestApi.detectApiEndpoint(function handler(req, res) {
+        return res.json({ name: req.body.name });
+      }, '/fallback', []);
+      expect(api.isApi).toBe(true);
+      const [, entry] = manifestApi.routeEntryFor({
+        routePath: '/inferred',
+        handler: function inferred(req, res) { return res.json(req.body); }
+      });
+      expect(entry.methods).toEqual(['PATCH']);
+    });
   });
 
   it('CLI manifest command writes route JSON manifests', () => {

@@ -1,44 +1,31 @@
-from aiwaf.core.blacklist_migration import migrate_runtime_storage
-from aiwaf.core.runtime_storage import BlacklistStore, MemoryStorage
+from aiwaf.core.blacklist_migration import legacy_metadata, migrate_csv_directory
+from aiwaf.core.storage_csv_impl import append_blacklist, ensure_all
 
 
-def test_runtime_migration_backfills_legacy_blocks_as_permanent():
-    storage = MemoryStorage()
-    storage.set("blocked:203.0.113.1", {"ip": "203.0.113.1", "reason": "old scanner"})
-    storage.set(
-        "blocked:203.0.113.2",
-        {"reason": "current", "reputation_reason": "current", "score": 20},
+def test_migrate_csv_directory_reports_total_and_legacy(tmp_path):
+    ensure_all(tmp_path)
+    append_blacklist(
+        tmp_path,
+        "203.0.113.3",
+        "old",
+        "",
+        {"reputation_reason": "legacy_blacklist", "permanent": True},
     )
-
-    total, changed = migrate_runtime_storage(storage)
-    migrated = storage.get("blocked:203.0.113.1")
-
-    assert (total, changed) == (2, 1)
-    assert migrated["reason"] == "old scanner"
-    assert migrated["reputation_reason"] == "legacy_blacklist"
-    assert migrated["score"] == 100
-    assert migrated["offenses"] == 1
-    assert migrated["permanent"] is True
-    assert migrated["expires_at"] is None
+    assert migrate_csv_directory(tmp_path) == (1, 1)
 
 
-def test_runtime_migration_is_idempotent():
-    storage = MemoryStorage()
-    storage.set("blocked:203.0.113.3", "old block")
+def test_legacy_metadata_normalizes_reason_and_timestamp():
+    metadata = legacy_metadata("  imported block  ", now=123.5)
 
-    assert migrate_runtime_storage(storage) == (1, 1)
-    assert migrate_runtime_storage(storage) == (1, 0)
-
-
-def test_unmigrated_runtime_reason_remains_blocked_and_can_be_updated():
-    storage = MemoryStorage()
-    storage.set("blocked:203.0.113.4", "legacy reason")
-    blacklist = BlacklistStore(storage)
-
-    assert blacklist.is_blocked("203.0.113.4")
-    assert blacklist.get_block_info("203.0.113.4")["reason"] == "legacy reason"
-
-    blacklist.block_ip("203.0.113.4", "scanner")
-    updated = blacklist.get_block_info("203.0.113.4")
-    assert updated["offenses"] == 2
-    assert "legacy reason" in updated["reasons"]
+    assert metadata == {
+        "reason": "imported block",
+        "reputation_reason": "legacy_blacklist",
+        "reasons": ["legacy_blacklist", "imported block"],
+        "score": 100,
+        "offenses": 1,
+        "blocked_at": 123.5,
+        "expires_at": None,
+        "duration": None,
+        "permanent": True,
+    }
+    assert legacy_metadata("", now=1)["reason"] == "legacy block"

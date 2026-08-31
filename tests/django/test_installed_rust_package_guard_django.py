@@ -10,7 +10,10 @@ def _is_installed_site_package(path: Path) -> bool:
 
 class InstalledRustPackageGuardTests(SimpleTestCase):
     def test_aiwaf_rust_import_can_be_forced_to_installed_package(self):
-        import aiwaf_rust
+        try:
+            import aiwaf_rust
+        except ImportError:
+            self.skipTest("aiwaf_rust is an optional extension and is not installed")
 
         rust_path = Path(aiwaf_rust.__file__).resolve()
         repo_root = Path(__file__).resolve().parents[1]

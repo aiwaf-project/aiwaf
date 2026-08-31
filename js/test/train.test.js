@@ -18,6 +18,57 @@ describe('trainer parity', () => {
     jest.resetModules();
   });
 
+  afterEach(() => {
+    delete process.env.AIWAF_MIDDLEWARE_LOG_PATH;
+    delete process.env.AIWAF_MIDDLEWARE_LOG_CSV_PATH;
+  });
+
+  it('reads JSONL, CSV, and database middleware event fallbacks', async () => {
+    const missingAccessPath = path.join(process.cwd(), 'logs', `missing-${Date.now()}.log`);
+    const jsonlPath = `${missingAccessPath}.jsonl`;
+    const csvPath = `${missingAccessPath}.csv`;
+    fs.writeFileSync(jsonlPath, `${JSON.stringify({
+      timestamp: new Date().toISOString(), ip: '203.0.113.21', path: '/jsonl?x=1', status: 200
+    })}\nmalformed\n`, 'utf8');
+    fs.writeFileSync(csvPath,
+      'timestamp,ip,method,path,status,responseTime\n2026-01-01T00:00:00Z,203.0.113.22,GET,/csv,200,3\n',
+      'utf8');
+    process.env.AIWAF_ACCESS_LOG = missingAccessPath;
+    process.env.AIWAF_MIN_TRAIN_LOGS = '1';
+    process.env.AIWAF_MIN_AI_LOGS = '10000';
+
+    const recent = jest.fn(async () => [{
+        ip_address: '203.0.113.23', path: '/db', status: 200,
+        response_time_ms: 4, created_at: new Date().toISOString()
+      }]);
+    jest.doMock('../lib/requestLogStore', () => ({ recent }));
+    jest.doMock('../lib/modelStore', () => ({ save: jest.fn(async () => {}) }));
+    jest.doMock('../lib/dynamicKeywordStore', () => ({ add: jest.fn(), remove: jest.fn() }));
+    jest.doMock('../lib/exemptionStore', () => ({
+      initialize: jest.fn(), listPaths: jest.fn(async () => []), listIps: jest.fn(async () => [])
+    }));
+    jest.doMock('../lib/blacklistManager', () => ({
+      unblock: jest.fn(), block: jest.fn(), getBlockedIPs: jest.fn(async () => [])
+    }));
+
+    const runTrainer = async (jsonPath, csvEventPath) => {
+      process.env.AIWAF_MIDDLEWARE_LOG_PATH = jsonPath;
+      process.env.AIWAF_MIDDLEWARE_LOG_CSV_PATH = csvEventPath;
+      await new Promise(resolve => {
+        jest.isolateModules(() => {
+          require('../train');
+          setTimeout(resolve, 75);
+        });
+      });
+      jest.resetModules();
+    };
+
+    await runTrainer(jsonlPath, `${csvPath}.missing`);
+    await runTrainer(`${jsonlPath}.missing`, csvPath);
+    await runTrainer(`${jsonlPath}.missing`, `${csvPath}.missing`);
+    expect(recent).toHaveBeenCalled();
+  });
+
   it('learns keywords when AI training is skipped', async () => {
     const logPath = writeLog([
       makeLine('203.0.113.1', '/wp-admin/secret'),

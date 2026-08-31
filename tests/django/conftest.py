@@ -28,11 +28,10 @@ def _assert_aiwaf_from_installed_package():
 def _assert_aiwaf_rust_from_installed_package():
     try:
         import aiwaf_rust
-    except Exception as exc:
-        raise RuntimeError(
-            "aiwaf-rust package is required for this test run, but module "
-            "'aiwaf_rust' is not importable"
-        ) from exc
+    except Exception:
+        # The Rust extension is optional. Tests marked requires_rust are
+        # skipped below when it is not installed.
+        return
 
     module_file = getattr(aiwaf_rust, "__file__", None)
     if not module_file:
@@ -69,6 +68,7 @@ def pytest_configure(config):
 
 def pytest_runtest_setup(item):
     if "requires_rust" in item.keywords and not _rust_available():
-        raise RuntimeError(
-            "aiwaf-rust package (module aiwaf_rust) is required for requires_rust tests"
+        pytest.skip(
+            "This test requires the optional aiwaf_rust extension; "
+            "install the rust extra to run it"
         )

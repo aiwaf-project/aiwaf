@@ -1,6 +1,8 @@
 """
 Core utility functions for AIWAF
 """
+import ipaddress
+
 from typing import Optional, Set, List
 from fastapi import Request
 import logging

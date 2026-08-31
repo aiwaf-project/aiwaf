@@ -75,15 +75,15 @@ class Command(BaseCommand):
             
             # Test exemption store
             exemption_store = get_exemption_store()
-            self.stdout.write(f"Exemption Store: {exemption_store.__name__}")
+            self.stdout.write(f"Exemption Store: {type(exemption_store).__name__}")
             
             # Test blacklist store
             blacklist_store = get_blacklist_store()
-            self.stdout.write(f"Blacklist Store: {blacklist_store.__name__}")
+            self.stdout.write(f"Blacklist Store: {type(blacklist_store).__name__}")
             
             # Test keyword store
             keyword_store = get_keyword_store()
-            self.stdout.write(f"Keyword Store: {keyword_store.__name__}")
+            self.stdout.write(f"Keyword Store: {type(keyword_store).__name__}")
             
         except Exception as e:
             self.stdout.write(self.style.ERROR(f" Storage import failed: {e}"))

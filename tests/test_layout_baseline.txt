@@ -1,0 +1,2 @@
+# Source modules that still need canonically named test modules.
+# New entries fail CI; remove entries as test modules are normalized.

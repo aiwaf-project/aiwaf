@@ -11,6 +11,26 @@ from aiwaf.core import header_validation
 RUST_PACKAGE_INSTALLED = importlib.util.find_spec("aiwaf_rust") is not None
 
 
+@pytest.mark.skipif(not RUST_PACKAGE_INSTALLED, reason="aiwaf_rust package not installed")
+def test_real_rust_isolation_forest_surface_is_discoverable():
+    assert rust_backend.rust_available() is True
+    rust_class = rust_backend.get_isolation_forest_class()
+    assert rust_class is not None
+
+    model = rust_class(
+        n_estimators=4,
+        max_samples="auto",
+        contamination="auto",
+        max_features=1.0,
+        bootstrap=False,
+        random_state=1,
+        warm_start=False,
+    )
+    model.fit([[0.0], [0.1], [1.0], [1.1]])
+    restored = rust_backend.load_isolation_forest(model.to_json())
+    assert restored is not None
+
+
 def test_python_header_validation_blocks_missing():
     environ = {"HTTP_USER_AGENT": "Mozilla/5.0"}
     reason = header_validation.validate_headers_python(environ)

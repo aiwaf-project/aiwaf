@@ -76,10 +76,10 @@ class Command(BaseCommand):
         disable_ai = options.get('disable_ai', False)
         
         if disable_ai:
-            self.stdout.write("� AI model training disabled - keyword learning only")
+            self.stdout.write("AI model training disabled - keyword learning only")
             self.stdout.write(" Starting keyword training...")
         else:
-            self.stdout.write("� Starting model training...")
+            self.stdout.write("Starting model training...")
         
         try:
             from aiwaf.django.trainer import train

@@ -2,7 +2,6 @@ const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const { IsolationForest } = require('./isolationForest');
-console.log(require('../node_modules/aiwaf-wasm/package.json').version);
 let wasmModule = null;
 let wasmLoadAttempted = false;
 let wasmLoadError = null;
@@ -58,6 +57,10 @@ async function loadWasmFromPackageModule() {
 async function loadWasm() {
   if (wasmLoadAttempted) return wasmModule;
   wasmLoadAttempted = true;
+  if (process.env.AIWAF_DISABLE_WASM === '1') {
+    wasmModule = null;
+    return wasmModule;
+  }
   try {
     // Optional dependency: aiwaf-wasm
     // eslint-disable-next-line global-require, import/no-extraneous-dependencies

@@ -141,7 +141,7 @@ def main():
         print("\n Individual test files:")
         print("   python manage.py test tests.test_basic_import_django")
         print("   python manage.py test tests.test_header_validation_django")
-        print("   python manage.py test tests.test_middleware_protection_django")
+        print("   python manage.py test tests.django.test_middleware")
         
     else:
         print(f"\n  {total - passed} validation steps failed")

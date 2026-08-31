@@ -14,14 +14,23 @@ describe('WASM adapter integration (real package)', () => {
   }
 
   it('loads aiwaf-wasm and validates headers with a plain object', async () => {
-    const { validateHeaders } = await loadRealAdapter();
+    const { createIsolationForest, getWasmStatus, validateHeaders } = await loadRealAdapter();
 
     const result = await validateHeaders(
-      { accept: 'text/html', 'user-agent': 'Mozilla/5.0' },
+      {
+        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'accept-encoding': 'gzip, deflate',
+        'accept-language': 'en-US,en;q=0.9',
+        connection: 'keep-alive',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0 Safari/537.36'
+      },
       { requiredHeaders: ['accept', 'user-agent'], minScore: 3 }
     );
 
     expect(result).toBeNull();
+    const model = await createIsolationForest({ nTrees: 4, sampleSize: 4, seed: 1 });
+    expect(model.__aiwafWasm).toBe(true);
+    expect(getWasmStatus()).toEqual({ loaded: true, error: null });
   });
 
   it('covers real aiwaf-wasm model and feature exports when available', async () => {

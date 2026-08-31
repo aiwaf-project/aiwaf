@@ -270,6 +270,31 @@ def test_exemption_utilities():
     print("    Utility functions test passed!\n")
 
 
+def test_low_level_exemption_state_and_route_helpers():
+    from aiwaf.flask import exemption_decorators as decorators
+
+    app = Flask(__name__)
+
+    @app.route("/required")
+    @aiwaf_require_protection("logging")
+    @aiwaf_exempt_from("rate_limit")
+    def required():
+        return "ok"
+
+    with app.test_request_context("/required"):
+        g.aiwaf_exempt = False
+        g.aiwaf_exempt_middlewares = {"rate_limit"}
+        g.aiwaf_required_middlewares = {"logging"}
+        assert decorators.is_request_exempt("rate_limit")
+        assert decorators.get_exempt_middlewares() == {"rate_limit"}
+        assert decorators.is_middleware_required("logging")
+        assert decorators._check_route_exemption("rate_limit")
+        assert decorators._check_route_required("logging")
+        assert decorators._normalize_middleware_name("RateLimitMiddleware") == "rate_limit"
+        decorators.reset_exemption_status()
+        assert not decorators.is_request_exempt()
+
+
 def test_complex_exemption_combinations():
     """Test complex combinations of exemption decorators"""
     print(" Testing complex exemption combinations")

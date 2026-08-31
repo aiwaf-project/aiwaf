@@ -11,7 +11,7 @@ function createExpressLikeResponse(res) {
       res.statusCode = code;
     },
     status(code) {
-      res.statusCode = code;
+      wrapped.statusCode = code;
       wrapped._handled = true;
       return wrapped;
     },

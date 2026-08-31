@@ -11,6 +11,7 @@ function createExpressLikeResponse(h, rawRes) {
       rawRes.statusCode = code;
     },
     status(code) {
+      res.statusCode = code;
       res._statusCode = code;
       res._handled = true;
       return res;

@@ -8,8 +8,6 @@ let cleanupInterval;
 const defaultMemoryCache = new NodeCache({ stdTTL: 60, checkperiod: 120 }); // Auto cleanup every 2 minutes
 
 const fallbackCache = {
-  get: (key) => Promise.resolve(defaultMemoryCache.get(key)),
-  set: (key, value, ttl) => Promise.resolve(defaultMemoryCache.set(key, value, ttl)),
   lPush: async (key, value) => {
     const arr = defaultMemoryCache.get(key) || [];
     arr.unshift(value);

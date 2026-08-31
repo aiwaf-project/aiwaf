@@ -20,6 +20,19 @@ from fastapi.responses import JSONResponse
 from aiwaf.core.anomaly import HistoryEntry, evaluate_anomaly as core_evaluate_anomaly
 from aiwaf.core.logs import write_csv_log
 
+
+def _segment_has_malicious_context(path_lower: str, query_lower: str, seg: str) -> bool:
+    if not seg:
+        return False
+    if "../" in path_lower or "..\\" in path_lower:
+        return True
+    if seg in query_lower and any(
+        token in query_lower
+        for token in ("union", "select", "drop", "insert", "script", "alert", "eval")
+    ):
+        return True
+    return seg.startswith(".")
+
 from ..blacklist import BlacklistManager
 from ..decorators import should_apply_middleware
 from ..storage import get_exemption_store, get_keyword_store
@@ -116,16 +129,9 @@ class AIAnomalyMiddleware(BaseHTTPMiddleware):
                 pass
             return self._path_exists(candidate)
 
-        def _is_malicious_context(seg: str) -> bool:
-            if not seg:
-                return False
-            if "../" in path_lower or "..\\" in path_lower:
-                return True
-            if seg in query_lower and any(token in query_lower for token in ("union", "select", "drop", "insert", "script", "alert", "eval")):
-                return True
-            if seg.startswith("."):
-                return True
-            return False
+        is_malicious_context = lambda seg: _segment_has_malicious_context(
+            path_lower, query_lower, seg
+        )
 
         outcome = core_evaluate_anomaly(
             ip=ip,
@@ -141,7 +147,7 @@ class AIAnomalyMiddleware(BaseHTTPMiddleware):
             keyword_learning_enabled=bool(self.keyword_learning_enabled),
             path_exists=_path_exists,
             is_exempt_path=lambda _p: False,
-            is_malicious_context=_is_malicious_context,
+            is_malicious_context=is_malicious_context,
         )
 
         self.request_cache[key] = outcome.updated_history

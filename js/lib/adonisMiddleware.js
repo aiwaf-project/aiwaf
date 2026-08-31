@@ -13,10 +13,9 @@ function createExpressLikeResponse(ctx) {
       if (ctx.response) ctx.response.statusCode = code;
     },
     status(code) {
+      res.statusCode = code;
       if (ctx.response?.status) {
         ctx.response.status(code);
-      } else {
-        res.statusCode = code;
       }
       res._handled = true;
       return res;

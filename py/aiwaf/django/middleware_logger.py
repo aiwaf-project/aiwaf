@@ -23,7 +23,9 @@ def _import_models():
     
     try:
         from django.apps import apps
-        if apps.ready and apps.is_installed('aiwaf'):
+        if apps.ready and (
+            apps.is_installed("aiwaf") or apps.is_installed("aiwaf.django")
+        ):
             from .models import RequestLog
     except (ImportError, RuntimeError, Exception):
         # Keep models as None if can't import

@@ -13,7 +13,7 @@ def print_test_status():
     
     working_tests = [
         'test_basic_import_django.py',
-        'test_aiwaf_reset_django.py', 
+        'management/commands/test_aiwaf_reset.py',
         'test_conservative_path_validation_django.py',
         'test_csv_simple_django.py',
         'test_edge_case_fix_demo_django.py',
@@ -32,8 +32,8 @@ def print_test_status():
         'test_method_validation_simple_django.py',
         'test_middleware_enhanced_validation_django.py',
         'test_middleware_learning_fix_django.py',
-        'test_middleware_logger_django.py',
-        'test_middleware_protection_django.py',
+        'test_middleware_logger.py',
+        'test_middleware.py',
         'test_path_validation_flaw_django.py',
         'test_rate_limiting_django.py',
         'test_rate_limiting_pure_logic_django.py',
@@ -42,9 +42,9 @@ def print_test_status():
         'test_route_protection_simple_django.py',
         'test_simplified_honeypot_django.py',
         'test_storage_fix_django.py',
-        'test_storage_simple_django.py',
+        'test_storage.py',
         'test_trainer_enhancements_django.py',
-        'test_trainer_functions_django.py',  # Fixed trainer tests
+        'test_trainer.py',
         'test_unified_keyword_logic_django.py',
         'test_view_method_detection_django.py',
     ]

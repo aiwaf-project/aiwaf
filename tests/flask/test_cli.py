@@ -7,6 +7,7 @@ import tempfile
 import os
 import sys
 from pathlib import Path
+import json
 
 # Add repo root to path
 repo_root = Path(__file__).resolve().parents[2]
@@ -166,6 +167,55 @@ def test_cli_exempt_path_command(monkeypatch, tmp_path):
 
     monkeypatch.setattr(sys, "argv", ["aiwaf_console.py", "exempt-path", "remove", "/health"])
     main()
+
+
+def test_blacklist_legacy_and_import_operations(tmp_path):
+    from aiwaf.flask.cli import AIWAFManager
+
+    manager = AIWAFManager(str(tmp_path))
+    manager.add_to_blacklist("203.0.113.50", "test")
+    assert manager.remove_from_blacklist("203.0.113.50")
+    assert not manager.remove_from_blacklist("missing")
+    manager.storage["rewrite_blacklist"](
+        {"203.0.113.51": {"reason": "old", "reputation_reason": "legacy_blacklist", "reasons": ["legacy_blacklist"]}}
+    )
+    assert manager.legacy_blacklist()
+    manager.show_legacy_blacklist()
+    assert manager.migrate_blacklist() == 1
+    assert manager.convert_legacy_blacklist(3600) == 1
+    manager.storage["rewrite_blacklist"](
+        {"203.0.113.52": {"reason": "old", "reputation_reason": "legacy_blacklist", "reasons": ["legacy_blacklist"]}}
+    )
+    assert manager.convert_legacy_blacklist(clear=True) == 1
+    assert manager.clear_blacklist()
+
+    source = tmp_path / "import.json"
+    source.write_text(json.dumps({"whitelist": ["203.0.113.53"], "blacklist": {}, "keywords": ["admin"]}), encoding="utf-8")
+    assert manager.import_config(str(source))
+
+
+def test_training_diagnostics_app_loader_and_duration_dispatch(tmp_path, monkeypatch):
+    from types import ModuleType
+    from flask import Flask
+    from aiwaf.flask import cli as cli_module
+    from aiwaf.flask import trainer
+
+    manager = cli_module.AIWAFManager(str(tmp_path))
+    calls = []
+    monkeypatch.setattr(trainer, "train_from_logs", lambda app, disable_ai=False: calls.append(disable_ai))
+    assert manager.train_model(log_dir=str(tmp_path), disable_ai=True, verbose=True)
+    assert calls == [True]
+    monkeypatch.setattr(trainer, "get_default_model_path", lambda: str(tmp_path / "missing.json"))
+    assert manager.model_diagnostics(info=True) is False
+
+    module = ModuleType("sample_flask_app")
+    module.app = Flask("sample")
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    assert cli_module._load_flask_app("sample_flask_app:app") is module.app
+
+    monkeypatch.setenv("AIWAF_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(sys, "argv", ["aiwaf", "blacklist", "convert-legacy", "--duration", "1h"])
+    cli_module.main()
 
 if __name__ == '__main__':
     print(" AIWAF CLI Test Suite")

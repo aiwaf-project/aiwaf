@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def _ensure_repo_root_first() -> None:
     repo_root = Path(__file__).resolve().parent
@@ -68,6 +70,8 @@ def pytest_ignore_collect(collection_path, config):
 def pytest_collection_modifyitems(config, items):
     for item in items:
         path = Path(str(item.fspath)).as_posix()
+        if "rust" in Path(path).name.lower():
+            item.add_marker(pytest.mark.rust)
         if "/tests/flask/" in path:
             item.add_marker("flask")
         elif "/tests/django/" in path:

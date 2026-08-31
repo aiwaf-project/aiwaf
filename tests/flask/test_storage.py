@@ -185,3 +185,17 @@ def test_csv_storage_geo_blocked_countries(csv_app_context):
 
     remove_geo_blocked_country(country)
     assert not is_country_geo_blocked(country)
+def test_csv_blacklist_and_whitelist_helpers(tmp_path, monkeypatch):
+    from aiwaf.flask import storage
+
+    monkeypatch.setenv("AIWAF_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(storage, "_get_storage_mode", lambda: "csv")
+    storage._append_csv_blacklist("203.0.113.100", "test", {"path": "/"})
+    storage.add_ip_whitelist("203.0.113.101")
+    storage.remove_ip_whitelist("203.0.113.101")
+    storage._rewrite_csv_whitelist({"203.0.113.102"})
+    assert "203.0.113.102" in storage._read_csv_whitelist()
+
+    exemptions = storage.ExemptionStore()
+    exemptions.add_exempt("203.0.113.103")
+    assert exemptions.is_exempted("203.0.113.103")

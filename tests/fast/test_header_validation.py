@@ -2,6 +2,8 @@
 Tests for header validation middleware behavior.
 """
 import importlib.util
+
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -19,6 +21,9 @@ def _build_app() -> FastAPI:
 
 
 def test_aiwaf_rust_package_is_installed_for_header_validation_tests():
+    if importlib.util.find_spec("aiwaf_rust") is None:
+        pytest.skip("aiwaf_rust is an optional extension and is not installed")
+
     assert importlib.util.find_spec("aiwaf_rust") is not None, (
         "aiwaf_rust must be installed for Rust integration tests"
     )
@@ -123,3 +128,8 @@ def test_header_validation_stats_exposes_rust_flag(monkeypatch):
     middleware = HeaderValidationMiddleware(_build_app())
     stats = middleware.get_statistics()
     assert stats["rust_backend_enabled"] is True
+def test_missing_header_helper_returns_required_names():
+    from aiwaf.fast.middleware.header_validation import HeaderValidationMiddleware
+
+    middleware = HeaderValidationMiddleware.__new__(HeaderValidationMiddleware)
+    assert "user-agent" in middleware._check_missing_headers({})

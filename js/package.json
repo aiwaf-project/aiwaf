@@ -21,6 +21,8 @@
         "retrain": "AIWAF_LOG_PATH=/var/log/nginx/access.log npm run train",
         "train": "node train.js",
         "test": "jest --runInBand",
+        "test:coverage": "jest --runInBand --coverage",
+        "test:wasm": "jest --runInBand --runTestsByPath test/wasmAdapter.test.js test/wasm-header-config.test.js test/wasm-header-input.test.js test/wasm-retrain-behavior.test.js test/wasm-waf-integration.test.js && node test/wasm-real.js",
         "aiwaf": "node bin/aiwaf.js",
         "perf:wasm": "node test/perf-wasm.js",
         "test:wasm-real": "node test/wasm-real.js"
@@ -50,7 +52,25 @@
     },
     "jest": {
         "globalTeardown": "<rootDir>/test/jest.teardown.js",
-        "forceExit": true
+        "forceExit": true,
+        "coverageProvider": "v8",
+        "testPathIgnorePatterns": [
+            "<rootDir>/test/wasm-adapter-real.test.js"
+        ],
+        "collectCoverageFrom": [
+            "index.js",
+            "train.js",
+            "lib/**/*.js",
+            "utils/**/*.js"
+        ],
+        "coverageThreshold": {
+            "global": {
+                "branches": 66,
+                "functions": 100,
+                "lines": 80,
+                "statements": 80
+            }
+        }
     },
     "optionalDependencies": {
         "maxmind": "^4.3.0"

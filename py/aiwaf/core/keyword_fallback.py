@@ -16,12 +16,16 @@ class KeywordFallbackStore:
 
     def _load(self):
         if os.path.exists(self.storage_path):
-            with open(self.storage_path, "r") as f:
-                data = json.load(f)
-                self._keywords = defaultdict(int, data)
+            try:
+                with open(self.storage_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    self._keywords = defaultdict(int, data)
+            except (OSError, json.JSONDecodeError):
+                self._keywords = defaultdict(int)
 
     def _save(self):
-        with open(self.storage_path, "w") as f:
+        with open(self.storage_path, "w", encoding="utf-8") as f:
             json.dump(dict(self._keywords), f, indent=2)
 
     def add(self, keyword: str, count: int = 1):

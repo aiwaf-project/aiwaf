@@ -14,6 +14,8 @@ Install the JavaScript package with `npm install aiwaf-js`. Its documentation an
 
 For local JavaScript development, run `npm ci` and `npm test` from `js/`. Releases are independent: push a `python-v*` tag (for example, `python-v1.0.8`) to publish the Python package to PyPI, or push a `js-v*` tag (for example, `js-v1.0.1`) to publish `aiwaf-js` to npm. Both publish workflows can also be started manually from GitHub Actions.
 
+Run the complete monorepo test suite with `python aiwaf_test.py`. Use `--python-only` or `--js-only` when working on one package.
+
 ## Latest Enhancements
 
 - Reputation-based IP blocking with weighted offenses and progressive block durations

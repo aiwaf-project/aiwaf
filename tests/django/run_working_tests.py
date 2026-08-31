@@ -19,7 +19,7 @@ def run_working_tests():
     # Tests that are currently working
     working_tests = [
         'tests.test_basic_import_django',
-        'tests.test_aiwaf_reset_django',
+        'tests.django.management.commands.test_aiwaf_reset',
         'tests.test_conservative_path_validation_django',
         'tests.test_csv_simple_django',
         'tests.test_edge_case_fix_demo_django', 
@@ -38,8 +38,8 @@ def run_working_tests():
         'tests.test_method_validation_simple_django',
         'tests.test_middleware_enhanced_validation_django',
         'tests.test_middleware_learning_fix_django',
-        'tests.test_middleware_logger_django',
-        'tests.test_middleware_protection_django',
+        'tests.django.test_middleware_logger',
+        'tests.django.test_middleware',
         'tests.test_path_validation_flaw_django',
         'tests.test_rate_limiting_django',
         'tests.test_rate_limiting_pure_logic_django',
@@ -48,7 +48,7 @@ def run_working_tests():
         'tests.test_route_protection_simple_django',
         'tests.test_simplified_honeypot_django',
         'tests.test_storage_fix_django',
-        'tests.test_storage_simple_django',
+        'tests.django.test_storage',
         'tests.test_trainer_enhancements_django',
         'tests.test_unified_keyword_logic_django',
         'tests.test_view_method_detection_django',

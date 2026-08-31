@@ -20,12 +20,41 @@ python -m pip install -e ".[django,flask,fastapi]"
 python -m pip install pytest httpx
 ```
 
-Run the test groups independently so Django's global application state does not leak into the other adapters:
+Run every Python and JavaScript test group from the repository root:
 
 ```bash
-python manage.py test tests.django
-python -m pytest tests/core tests/flask tests/fast tests/integration -q
+python aiwaf_test.py
 ```
+
+Use `--python-only` or `--js-only` for one language. The runner keeps Django in a separate process so its global application state does not leak into the other Python adapters.
+
+Run coverage with callable-level auditing, or run the native adapter contracts
+independently:
+
+```bash
+python aiwaf_test.py --coverage
+python aiwaf_test.py --rust-only
+python aiwaf_test.py --wasm-only
+```
+
+`--strict-function-coverage` is the 100% Python callable target. The normal
+coverage job enforces the current Python callable ratchet and JavaScript
+statement, branch, function, and line thresholds so coverage cannot regress as
+the remaining coverage debt is closed.
+
+Test modules mirror production module names. For example,
+`py/aiwaf/core/anomaly.py` is tested by `tests/core/test_anomaly.py`, while
+`js/lib/wasmAdapter.js` is tested by `js/test/wasmAdapter.test.js`. The
+monorepo runner checks this mapping before running tests and rejects any new
+source module that lacks its canonical test module.
+
+Test modules follow their source module names and adapter directories. For
+example, `py/aiwaf/core/anomaly.py` is owned by
+`tests/core/test_anomaly.py`; `py/aiwaf/flask/storage.py` is owned by
+`tests/flask/test_storage.py`; and `js/lib/wasmAdapter.js` is owned by a
+normalized `js/test/wasm-adapter.test.js`. Additional integration and regression
+files may supplement the canonical module test. The monorepo runner checks this
+layout before executing tests.
 
 Python package metadata lives in `pyproject.toml`. Keep the compatibility metadata in `setup.py` synchronized when changing dependencies or versions.
 
@@ -38,7 +67,7 @@ npm test
 npm pack --dry-run
 ```
 
-From the repository root, the equivalent test command is `npm run test:js`.
+From the repository root, the equivalent commands are `python aiwaf_test.py --js-only` and `npm run test:js`.
 
 ## Releases
 

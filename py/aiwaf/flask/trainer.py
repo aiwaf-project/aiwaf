@@ -128,27 +128,24 @@ class FlaskAITrainer:
         
         # Try exact resolution first
         try:
-            with self.app.test_request_context(f"/{candidate}"):
-                self.app.url_map.match(f"/{candidate}", method='GET')
-                return True
+            self.app.url_map.bind("").match(f"/{candidate}", method='GET')
+            return True
         except:
             pass
         
         # Try with trailing slash
         if not candidate.endswith("/"):
             try:
-                with self.app.test_request_context(f"/{candidate}/"):
-                    self.app.url_map.match(f"/{candidate}/", method='GET')
-                    return True
+                self.app.url_map.bind("").match(f"/{candidate}/", method='GET')
+                return True
             except:
                 pass
         
         # Try without trailing slash
         if candidate.endswith("/"):
             try:
-                with self.app.test_request_context(f"/{candidate.rstrip('/')}"):
-                    self.app.url_map.match(f"/{candidate.rstrip('/')}", method='GET')
-                    return True
+                self.app.url_map.bind("").match(f"/{candidate.rstrip('/')}", method='GET')
+                return True
             except:
                 pass
         
