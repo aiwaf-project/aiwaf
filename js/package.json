@@ -28,6 +28,9 @@
         "perf:wasm": "node test/perf-wasm.js",
         "test:wasm-real": "node test/wasm-real.js"
     },
+    "allowScripts": {
+        "sqlite3": true
+    },
     "dependencies": {
         "@babel/parser": "^7.29.2",
         "aiwaf-wasm": "^0.2.0",
