@@ -12,11 +12,11 @@ and scheduled retraining.
 This monorepo contains both published packages:
 
 - `py/aiwaf/` and the root Python packaging files publish `aiwaf` to PyPI.
-- `js/` publishes `aiwaf-js` to npm and supports Express, Fastify, Hapi, Koa, Next.js, NestJS, AdonisJS, and Sails.
+- `js/` publishes `aiwaf` to npm and supports Express, Fastify, Hapi, Koa, Next.js, NestJS, AdonisJS, and Sails.
 
-Install the JavaScript package with `npm install aiwaf-js`. Its usage, configuration, framework adapters, and operational commands are documented in [JavaScript Package](#javascript-package-aiwaf-js).
+Install the JavaScript package with `npm install aiwaf`. Its usage, configuration, framework adapters, and operational commands are documented in [JavaScript Package](#javascript-package-aiwaf).
 
-For local JavaScript development, run `npm ci` and `npm test` from `js/`. Releases are independent: push a `python-v*` tag (for example, `python-v1.0.8`) to publish the Python package to PyPI, or push a `js-v*` tag (for example, `js-v1.0.1`) to publish `aiwaf-js` to npm. Both publish workflows can also be started manually from GitHub Actions.
+For local JavaScript development, run `npm ci` and `npm test` from `js/`. Releases are independent: push a `python-v*` tag (for example, `python-v1.0.8`) to publish the Python package to PyPI, or push a `js-v*` tag (for example, `js-v1.0.1`) to publish `aiwaf` to npm. Both publish workflows can also be started manually from GitHub Actions.
 
 Run the complete monorepo test suite with `python aiwaf_test.py`. Use `--python-only` or `--js-only` when working on one package.
 
@@ -46,7 +46,7 @@ pip install aiwaf
 JavaScript:
 
 ```bash
-npm install aiwaf-js
+npm install aiwaf
 ```
 
 Optional framework extras:
@@ -1234,7 +1234,7 @@ Current behavior:
 
 ---
 
-## JavaScript Package (`aiwaf-js`)
+## JavaScript Package (`aiwaf`)
 
 The JavaScript package lives in `js/`. Unless a command explicitly installs the
 published package, run commands in this section after `cd js`.
@@ -1299,7 +1299,7 @@ Supported frameworks: Express (native), Fastify, Hapi, Koa, NestJS (Express/Fast
 ### Installation
 
 ```bash
-npm install aiwaf-js
+npm install aiwaf
 ```
 
 #### Optional WASM Acceleration
@@ -1315,7 +1315,7 @@ npm install aiwaf-wasm
 
 ```js
 const express = require('express');
-const aiwaf = require('aiwaf-js');
+const aiwaf = require('aiwaf');
 
 const app = express();
 app.use(express.json());
@@ -1378,7 +1378,7 @@ npm run aiwaf -- manifest --framework express --routes routes.json --output .aiw
 The Rust/WASM helper surface is available under `aiwaf.wasm` for advanced integrations:
 
 ```js
-const aiwaf = require('aiwaf-js');
+const aiwaf = require('aiwaf');
 
 const model = await aiwaf.wasm.createIsolationForest({ nTrees: 100 });
 const features = await aiwaf.wasm.extractWasmFeatures(records, ['.php', '.env']);
@@ -1408,7 +1408,7 @@ app.use(aiwaf({ AIWAF_MIDDLEWARES: ['auto'] }));
 
 ```js
 const fastify = require('fastify')({ logger: true });
-const aiwaf = require('aiwaf-js');
+const aiwaf = require('aiwaf');
 
 fastify.register(aiwaf.fastify, {
   staticKeywords: ['.php', '.env', '.git'],
@@ -1427,7 +1427,7 @@ fastify.listen({ port: 3000 });
 
 ```js
 const Hapi = require('@hapi/hapi');
-const aiwaf = require('aiwaf-js');
+const aiwaf = require('aiwaf');
 
 const server = Hapi.server({ port: 3000 });
 await server.register({
@@ -1451,7 +1451,7 @@ await server.start();
 ```js
 const Koa = require('koa');
 const bodyParser = require('koa-bodyparser');
-const aiwaf = require('aiwaf-js');
+const aiwaf = require('aiwaf');
 
 const app = new Koa();
 app.use(bodyParser());
@@ -1476,7 +1476,7 @@ app.listen(3000);
 
 ```ts
 import { Module, MiddlewareConsumer, NestModule } from '@nestjs/common';
-import aiwaf from 'aiwaf-js';
+import aiwaf from 'aiwaf';
 
 @Module({})
 export class AppModule implements NestModule {
@@ -1499,7 +1499,7 @@ If you need to guarantee ordering before other middleware/proxies, you can also 
 
 ```ts
 import { NestFactory } from '@nestjs/core';
-import aiwaf from 'aiwaf-js';
+import aiwaf from 'aiwaf';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
@@ -1524,7 +1524,7 @@ Use the Fastify plugin when running Nest with `FastifyAdapter`:
 ```ts
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter } from '@nestjs/platform-fastify';
-import aiwaf from 'aiwaf-js';
+import aiwaf from 'aiwaf';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
@@ -1547,7 +1547,7 @@ bootstrap();
 Use the `aiwaf.next` helper to wrap a Next.js API route handler.
 
 ```ts
-import aiwaf from 'aiwaf-js';
+import aiwaf from 'aiwaf';
 
 function handler(req, res) {
   res.status(200).json({ ok: true });
@@ -1568,7 +1568,7 @@ export default aiwaf.next(handler, {
 Register the middleware in your Adonis middleware stack:
 
 ```ts
-import aiwaf from 'aiwaf-js';
+import aiwaf from 'aiwaf';
 
 export const middleware = [
   () => aiwaf.adonis({
@@ -1587,7 +1587,7 @@ export const middleware = [
 Use the Express-compatible middleware in your Sails `config/http.js`:
 
 ```js
-const aiwaf = require('aiwaf-js');
+const aiwaf = require('aiwaf');
 
 module.exports.http = {
   middleware: {

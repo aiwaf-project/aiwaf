@@ -1,6 +1,6 @@
 {
-    "name": "aiwaf-js",
-    "version": "1.0.0",
+    "name": "aiwaf",
+    "version": "1.0.1",
     "description": "AIWAF Web Application Firewall for JavaScript applications and major Node.js frameworks",
     "main": "index.js",
     "files": [

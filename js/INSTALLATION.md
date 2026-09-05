@@ -13,7 +13,7 @@ This guide covers local setup, Redis setup, training setup, and common failure m
 For application use:
 
 ```bash
-npm install aiwaf-js
+npm install aiwaf
 ```
 
 For local development in this repository:
@@ -26,7 +26,7 @@ npm install
 
 ```js
 const express = require('express');
-const aiwaf = require('aiwaf-js');
+const aiwaf = require('aiwaf');
 
 const app = express();
 app.use(express.json());
