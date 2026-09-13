@@ -1,0 +1,112 @@
+name: Stage aiwaf-wasm to npm
+
+on:
+  push:
+    tags:
+      - "wasm-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: wasm-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+
+      - name: Use current npm CLI
+        run: npm install --global npm@latest
+
+      - name: Verify package version and tag
+        run: |
+          python3 - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          crate = tomllib.loads(Path("rust/crates/aiwaf_wasm/Cargo.toml").read_text())["package"]
+          lock = tomllib.loads(Path("rust/Cargo.lock").read_text())
+          locked = next(package for package in lock["package"] if package["name"] == "aiwaf-wasm")
+          assert crate["name"] == "aiwaf-wasm"
+          assert crate["version"] == locked["version"]
+          if os.environ["GITHUB_REF_TYPE"] == "tag":
+              assert os.environ["GITHUB_REF_NAME"] == f"wasm-v{crate['version']}"
+          print(f"Staging {crate['name']} {crate['version']}")
+          PY
+
+      - name: Install WebAssembly target and wasm-pack
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo install wasm-pack --locked
+
+      - name: Test Rust core
+        run: cargo test --manifest-path rust/Cargo.toml --locked -p aiwaf_core
+
+      - name: Test WebAssembly bindings
+        working-directory: rust/crates/aiwaf_wasm
+        run: wasm-pack test --node
+
+      - name: Build WebAssembly npm package
+        working-directory: rust/crates/aiwaf_wasm
+        run: wasm-pack build --release --target bundler
+
+      - name: Stage package metadata and canonical license
+        working-directory: rust
+        run: |
+          python3 scripts/patch_wasm_pkg.py
+          cp ../LICENSE crates/aiwaf_wasm/pkg/LICENSE
+
+      - name: Verify package metadata and files
+        working-directory: rust
+        run: |
+          python3 - <<'PY'
+          import json
+          import tomllib
+          from pathlib import Path
+
+          crate = tomllib.loads(Path("crates/aiwaf_wasm/Cargo.toml").read_text())["package"]
+          package_dir = Path("crates/aiwaf_wasm/pkg")
+          package = json.loads((package_dir / "package.json").read_text())
+          assert package["name"] == "aiwaf-wasm"
+          assert package["version"] == crate["version"]
+          assert package["repository"]["url"] == "git+https://github.com/aiwaf-project/aiwaf.git"
+          assert (package_dir / "LICENSE").read_bytes() == Path("../LICENSE").read_bytes()
+          for filename in ("README.md", "aiwaf_wasm.js", "aiwaf_wasm_bg.js", "aiwaf_wasm_bg.wasm"):
+              assert (package_dir / filename).is_file(), filename
+          PY
+
+      - name: Verify npm tarball contents
+        working-directory: rust/crates/aiwaf_wasm/pkg
+        run: |
+          npm pack --dry-run --json | node -e '
+          const fs = require("fs");
+          const pack = JSON.parse(fs.readFileSync(0, "utf8"))[0];
+          const files = new Set(pack.files.map(file => file.path));
+          const required = ["LICENSE", "README.md", "aiwaf_wasm.js", "aiwaf_wasm_bg.js", "aiwaf_wasm_bg.wasm"];
+          const missing = required.filter(file => !files.has(file));
+          if (pack.name !== "aiwaf-wasm" || missing.length) {
+            throw new Error(`Invalid npm package: ${pack.name}; missing ${missing.join(", ")}`);
+          }
+          console.log(`${pack.name}@${pack.version}: ${pack.files.length} files ready to stage`);
+          '
+
+      - name: Stage package for npm approval
+        working-directory: rust/crates/aiwaf_wasm/pkg
+        run: npm stage publish --access public

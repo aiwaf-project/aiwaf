@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 [project.urls]
-Source = "https://github.com/aayushgauba/aiwaf/tree/main/rust"
+Source = "https://github.com/aiwaf-project/aiwaf/tree/main/rust"
 
 [tool.maturin]
 manifest-path = "Cargo.toml"

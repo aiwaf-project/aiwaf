@@ -150,6 +150,25 @@ describe('wasmAdapter', () => {
     expect(extractWithState).toHaveBeenCalledWith([{ path: '/x' }], ['.php'], { previous: true });
   });
 
+  it('wraps the Rust keyword matcher and preserves no-match results', async () => {
+    const firstMatch = jest.fn(path => (path.includes('/.env') ? '.env' : null));
+    jest.doMock('aiwaf-wasm', () => ({
+      default: jest.fn(async () => {}),
+      KeywordMatcher: class {
+        constructor(keywords) {
+          expect(keywords).toEqual(['.env', 'admin']);
+        }
+        first_match(path) { return firstMatch(path); }
+      }
+    }));
+
+    const { createKeywordMatcher } = require('../lib/wasmAdapter');
+    const matcher = await createKeywordMatcher(['.env', 'admin']);
+    expect(matcher.firstMatch('/.env')).toBe('.env');
+    expect(matcher.firstMatch('/safe')).toBeNull();
+    expect(firstMatch).toHaveBeenCalledWith('/safe');
+  });
+
   it('wraps optional Rust record conversion helpers when present', async () => {
     const buildRecords = jest.fn(() => [{ path: '/built' }]);
     const rustPayload = jest.fn(() => [{ path_len: 6 }]);

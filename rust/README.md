@@ -460,7 +460,15 @@ The workflow builds:
 
 After tests and builds pass, it publishes only `aiwaf-rust` to PyPI using OIDC (`id-token: write`) and `pypa/gh-action-pypi-publish@release/v1`. It does not publish the separate `aiwaf-wasm` npm package.
 
-Before the first monorepo release, add a trusted publisher to the existing PyPI `aiwaf-rust` project with owner `aayushgauba`, repository `aiwaf`, workflow filename `rust-publish.yml`, and environment `pypi`. These values must exactly match the GitHub workflow. Then commit the `rust/` sources and root workflow, push the tag, and watch the `Publish Rust package to PyPI` action.
+The separate root workflow `.github/workflows/wasm-publish.yml` builds and tests
+`aiwaf-wasm`, then stages it for npm approval. Trigger it with a matching
+`wasm-v*` tag (for example, `wasm-v0.2.1`) or `workflow_dispatch`. Before the
+first run, configure an npm trusted publisher on the `aiwaf-wasm` package with
+owner `aiwaf-project`, repository `aiwaf`, workflow filename `wasm-publish.yml`,
+and GitHub environment `npm-publish`. Approve the staged package on npm after
+review; this workflow does not publish directly.
+
+Before the first monorepo release, add a trusted publisher to the existing PyPI `aiwaf-rust` project with owner `aiwaf-project`, repository `aiwaf`, workflow filename `rust-publish.yml`, and environment `pypi`. These values must exactly match the GitHub workflow. Then commit the `rust/` sources and root workflow, push the tag, and watch the `Publish Rust package to PyPI` action.
 
 ## Compatibility Policy
 

@@ -32,13 +32,15 @@ def main(argv: list[str]) -> int:
 
     data = json.loads(pkg_json.read_text(encoding="utf-8"))
     data["keywords"] = KEYWORDS
-    data.setdefault("license", "MIT")
-    data.setdefault("repository", {
+    data["license"] = "MIT"
+    data["repository"] = {
         "type": "git",
-        "url": "https://github.com/aiwaf/aiwaf-rust",
-    })
-    data.setdefault("homepage", "https://github.com/aiwaf/aiwaf-rust")
+        "url": "git+https://github.com/aiwaf-project/aiwaf.git",
+        "directory": "rust/crates/aiwaf_wasm",
+    }
+    data["homepage"] = "https://github.com/aiwaf-project/aiwaf/tree/main/rust/crates/aiwaf_wasm"
     data["readme"] = "README.md"
+    data["files"] = list(dict.fromkeys([*data.get("files", []), "README.md", "LICENSE"]))
 
     pkg_json.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 

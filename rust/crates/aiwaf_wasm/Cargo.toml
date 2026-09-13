@@ -3,6 +3,8 @@ name = "aiwaf-wasm"
 version = "0.2.1"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/aiwaf-project/aiwaf"
+readme = "README.md"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
