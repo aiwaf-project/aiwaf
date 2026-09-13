@@ -387,7 +387,7 @@ module.exports = function aiwaf(rawOpts = {}) {
     }
 
     if (shouldApply('ip_keyword_block')) {
-      const staticMatch = keywordDetector.check(path);
+      const staticMatch = await keywordDetector.checkAccelerated(path);
       if (staticMatch && !exemptions.shouldSkipKeyword(staticMatch, path)) {
         if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
           console.error(`[AIWAF-BLOCK-STATIC-KW] match=${staticMatch}`);
@@ -396,7 +396,7 @@ module.exports = function aiwaf(rawOpts = {}) {
         return deny(403, 'blocked', `static:${staticMatch}`);
       }
 
-      const dynamicMatch = dynamicKeyword.check(path);
+      const dynamicMatch = await dynamicKeyword.checkAccelerated(path);
       if (dynamicMatch && !exemptions.shouldSkipKeyword(dynamicMatch, path)) {
         if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
           console.error(`[AIWAF-BLOCK-DYNAMIC-KW] match=${dynamicMatch}`);
@@ -436,7 +436,7 @@ module.exports = function aiwaf(rawOpts = {}) {
           }))
           .filter(entry => now - entry.timestamp <= 5 * 60 * 1000);
 
-        const stats = anomalyDetector.analyzeRecentBehavior(recentData);
+        const stats = await anomalyDetector.analyzeRecentBehaviorAccelerated(recentData);
         if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
           console.error(`[AIWAF-ANOMALY-STATS] should_block=${stats?.should_block}`);
         }

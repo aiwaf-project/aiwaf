@@ -3,10 +3,11 @@ const path = require('path');
 const glob = require('glob');
 const zlib = require('zlib');
 const readline = require('readline');
-const { IsolationForest } = require('./lib/isolationForest');
+const { createIsolationForest } = require('./lib/wasmAdapter');
 const requestLogStore = require('./lib/requestLogStore');
 const modelStore = require('./lib/modelStore');
 const blacklistManager = require('./lib/blacklistManager');
+const { calculateTrainingFeatures } = require('./lib/trainingFeatures');
 
 const STATIC_KW = [
   '.php', '.xmlrpc', 'wp-', '.env', '.git', '.bak',
@@ -387,48 +388,6 @@ function parseDbEvent(event) {
   };
 }
 
-function calculateFeatures(parsedRequests) {
-  const ipRequests = new Map();
-  const ip404Counts = new Map();
-
-  for (const req of parsedRequests) {
-    if (!ipRequests.has(req.ip)) {
-      ipRequests.set(req.ip, []);
-    }
-    ipRequests.get(req.ip).push(req);
-
-    if (req.status === '404') {
-      ip404Counts.set(req.ip, (ip404Counts.get(req.ip) || 0) + 1);
-    }
-  }
-
-  const features = [];
-
-  for (const req of parsedRequests) {
-    const pathLen = req.path.length;
-
-    const kwHits = STATIC_KW.reduce(
-      (sum, kw) => sum + (req.path.toLowerCase().includes(kw) ? 1 : 0),
-      0
-    );
-
-    const statusIdx = STATUS_IDX.indexOf(req.status) >= 0
-      ? STATUS_IDX.indexOf(req.status)
-      : -1;
-
-    const respTime = req.responseTime;
-
-    const ipReqs = ipRequests.get(req.ip);
-    const burst = ipReqs.filter(item => Math.abs(item.timestamp.getTime() - req.timestamp.getTime()) <= 10000).length;
-
-    const total404 = ip404Counts.get(req.ip) || 0;
-
-    features.push([pathLen, kwHits, statusIdx, respTime, burst, total404]);
-  }
-
-  return features;
-}
-
 (async () => {
   try {
     const rawAccessLines = await readAccessLogLines();
@@ -497,7 +456,7 @@ function calculateFeatures(parsedRequests) {
 
     console.log(`Parsed ${parsedRequests.length} valid requests`);
 
-    const features = calculateFeatures(parsedRequests);
+    const features = await calculateTrainingFeatures(parsedRequests, STATIC_KW, STATUS_IDX);
     if (features.length === 0) {
       console.warn('No features generated.');
       return;
@@ -510,18 +469,18 @@ function calculateFeatures(parsedRequests) {
 
     let anomalyIps = new Set();
     if (parsedRequests.length >= MIN_AI_LOGS || FORCE_TRAINING) {
-      const model = new IsolationForest({ nTrees: 100, sampleSize: 256 });
+      const model = await createIsolationForest({ nTrees: 100, sampleSize: 256 });
       model.fit(features);
 
-      const modelData = {
-        ...model.toJSON(),
-        metadata: {
-          createdAt: new Date().toISOString(),
-          samplesCount: features.length,
-          featureCount: 6,
-          version: '1.1'
-        }
+      const metadata = {
+        createdAt: new Date().toISOString(),
+        samplesCount: features.length,
+        featureCount: 6,
+        version: '1.1'
       };
+      const modelData = model.__aiwafWasm
+        ? { model_type: 'aiwaf_wasm.IsolationForest', model_state: model.toJSON(), metadata }
+        : { ...model.toJSON(), metadata };
 
       await modelStore.save(process.env, modelData, modelData.metadata);
       console.log(`Trained on ${features.length} samples`);

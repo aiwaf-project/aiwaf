@@ -1,0 +1,22 @@
+[package]
+name = "aiwaf_rust"
+version = "0.2.1"
+edition = "2024"
+description = "Rust-powered WAF heuristics exposed to Python via PyO3"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/aayushgauba/aiwaf"
+keywords = ["waf", "security", "python", "pyo3"]
+categories = ["network-programming", "web-programming"]
+
+[lib]
+name = "aiwaf_rust"
+crate-type = ["cdylib"]
+
+[dependencies]
+aiwaf_core = { path = "crates/aiwaf_core" }
+pyo3 = { version = "0.21", features = ["extension-module", "abi3-py38", "macros"] }
+
+[workspace]
+members = ["crates/aiwaf_core", "crates/aiwaf_wasm"]
+default-members = ["crates/aiwaf_core", "crates/aiwaf_wasm"]

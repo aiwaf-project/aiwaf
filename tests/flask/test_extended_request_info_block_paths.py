@@ -71,8 +71,8 @@ def test_header_validation_block_attaches_extended_info(monkeypatch):
     app = _make_app()
     captured = _capture_blocks(monkeypatch)
     monkeypatch.setattr(
-        "aiwaf.flask.header_validation_middleware.rust_backend.rust_available",
-        lambda: False,
+        "aiwaf.flask.header_validation_middleware.rust_backend.evaluate_headers_full_default",
+        lambda *args, **kwargs: (False, None),
     )
     HeaderValidationMiddleware(app)
 

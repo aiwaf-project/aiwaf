@@ -30,10 +30,12 @@ async function loadWasmFromDisk() {
   return {
     AiwafIsolationForest: bg.IsolationForest,
     IsolationForest: bg.IsolationForest,
+    KeywordMatcher: bg.KeywordMatcher,
     validate_headers: bg.validate_headers,
     validate_headers_with_config: bg.validate_headers_with_config,
     analyze_recent_behavior: bg.analyze_recent_behavior,
     extract_features: bg.extract_features,
+    extract_training_features: bg.extract_training_features,
     extract_features_batch_with_state: bg.extract_features_batch_with_state,
     finalize_feature_state: bg.finalize_feature_state,
     build_records: bg.build_records,
@@ -219,8 +221,9 @@ function normalizeValidationResult(result, fallbackReason) {
 
 function normalizeRecentEntries(entries = []) {
   return (Array.isArray(entries) ? entries : []).map(entry => {
-    const rawTimestamp = Number(entry.timestamp ?? entry.timestamp_epoch ?? Date.now());
-    const timestamp = rawTimestamp > 1000000000000 ? rawTimestamp / 1000 : rawTimestamp;
+    const hasMilliseconds = entry.timestamp_ms !== undefined && entry.timestamp_ms !== null;
+    const rawTimestamp = Number(hasMilliseconds ? entry.timestamp_ms : (entry.timestamp ?? entry.timestamp_epoch ?? Date.now()));
+    const timestamp = (hasMilliseconds || rawTimestamp > 1000000000000) ? rawTimestamp / 1000 : rawTimestamp;
     return {
       path_lower: String(entry.path_lower || entry.path || '').toLowerCase(),
       timestamp: Number.isFinite(timestamp) ? timestamp : Date.now() / 1000,
@@ -382,6 +385,31 @@ async function extractWasmFeatures(records, staticKeywords = []) {
   }
 }
 
+async function extractWasmTrainingFeatures(records, staticKeywords = []) {
+  const mod = await loadWasm();
+  if (!mod || typeof mod.extract_training_features !== 'function') return null;
+  try {
+    return mod.extract_training_features(records || [], staticKeywords || []);
+  } catch (err) {
+    return null;
+  }
+}
+
+async function createKeywordMatcher(keywords = []) {
+  const mod = await loadWasm();
+  if (!mod || typeof mod.KeywordMatcher !== 'function') return null;
+  try {
+    const matcher = new mod.KeywordMatcher(keywords);
+    return {
+      firstMatch(path) {
+        return matcher.first_match(path) || null;
+      }
+    };
+  } catch (err) {
+    return null;
+  }
+}
+
 async function extractWasmFeaturesBatchWithState(records, staticKeywords = [], state = null) {
   const mod = await loadWasm();
   if (!mod || typeof mod.extract_features_batch_with_state !== 'function') return null;
@@ -473,6 +501,8 @@ module.exports = {
   validateRecent,
   analyzeRecentBehavior,
   extractWasmFeatures,
+  extractWasmTrainingFeatures,
+  createKeywordMatcher,
   extractWasmFeaturesBatchWithState,
   finalizeWasmFeatureState,
   buildWasmRecords,

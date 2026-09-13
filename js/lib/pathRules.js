@@ -106,11 +106,14 @@ function createRoutePlan(path, rules = [], context = {}) {
   const exempt = new Set((context.exemptMiddlewares || []).map(normalizeMiddlewareName));
   const fullyExempt = !!context.fullyExempt;
   const enabled = new Set();
+  const rule = getPathRule(path, rules);
+  const disabledValues = rule && (rule.DISABLE || rule.disable);
+  const disabled = new Set(Array.isArray(disabledValues) ? disabledValues.map(normalizeMiddlewareName) : []);
 
   ALL_MIDDLEWARES.forEach(name => {
     if (required.has(name)) {
       enabled.add(name);
-    } else if (isMiddlewareDisabledForPath(path, rules, name) || fullyExempt || exempt.has(name)) {
+    } else if (disabled.has(name) || fullyExempt || exempt.has(name)) {
       return;
     } else {
       enabled.add(name);
@@ -122,7 +125,9 @@ function createRoutePlan(path, rules = [], context = {}) {
       return enabled.has(normalizeMiddlewareName(name));
     },
     getOverrides(sectionKey) {
-      return getPathRuleOverrides(path, rules, sectionKey);
+      if (!rule || !sectionKey) return {};
+      const value = rule[String(sectionKey).toUpperCase()] || rule[String(sectionKey).toLowerCase()];
+      return value && typeof value === 'object' && !Array.isArray(value) ? { ...value } : {};
     },
     enabledMiddlewares: enabled
   };

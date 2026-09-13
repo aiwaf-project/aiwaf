@@ -1,0 +1,416 @@
+name: Build, Test, and Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-core:
+    name: Core Rust Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run core tests
+        run: cargo test -p aiwaf_core
+
+  test-python:
+    name: Python Integration Tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install build tools
+        run: python -m pip install -U pip maturin pytest
+      - name: Build wheel
+        run: maturin build --release --out dist
+      - name: Install wheel
+        run: python -m pip install dist/*.whl
+      - name: Run pytest
+        run: pytest -q
+
+  test-wasm:
+    name: WASM Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install wasm-pack
+        run: cargo install wasm-pack
+      - name: Run wasm tests
+        working-directory: crates/aiwaf_wasm
+        run: wasm-pack test --node
+
+  build-wasm:
+    name: Build wasm package
+    runs-on: ubuntu-latest
+    needs: [test-wasm]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install wasm-pack
+        run: cargo install wasm-pack
+      - name: Build wasm
+        working-directory: crates/aiwaf_wasm
+        run: wasm-pack build --release --target bundler
+      - name: Patch wasm package metadata
+        run: python3 scripts/patch_wasm_pkg.py
+      - name: Upload wasm package
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-pkg
+          path: crates/aiwaf_wasm/pkg
+
+  build-wheels:
+    name: Build wheels (${{ matrix.os }} / ${{ matrix.platform_id }})
+    runs-on: ${{ matrix.os }}
+    needs: [test-core, test-python]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.12"
+            platform_id: manylinux2014-x86_64
+            target: x86_64
+            manylinux: "2014"
+            wheel_args: ""
+            build_jobs: ""
+          - os: ubuntu-24.04-arm
+            python: "3.12"
+            platform_id: manylinux2014-aarch64
+            target: aarch64
+            manylinux: "2014"
+            wheel_args: ""
+            build_jobs: ""
+          - os: ubuntu-latest
+            python: "3.12"
+            platform_id: musllinux_1_2-x86_64
+            target: x86_64-unknown-linux-musl
+            manylinux: musllinux_1_2
+            wheel_args: ""
+            build_jobs: ""
+          - os: macos-14
+            python: "3.12"
+            platform_id: macos-arm64
+            target: aarch64-apple-darwin
+            manylinux: "off"
+            wheel_args: ""
+            build_jobs: ""
+          - os: macos-14
+            python: "3.12"
+            platform_id: macos-x86_64
+            target: x86_64-apple-darwin
+            manylinux: "off"
+            wheel_args: ""
+            build_jobs: ""
+          - os: windows-latest
+            python: "3.12"
+            platform_id: win-amd64
+            target: x86_64-pc-windows-msvc
+            manylinux: "off"
+            wheel_args: ""
+            build_jobs: 1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: setup-python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Clean dist
+        shell: bash
+        run: rm -rf dist
+
+      - name: Configure Windows SDL hardening
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          rustup toolchain install nightly-x86_64-pc-windows-msvc --profile minimal --component rust-src
+          echo "RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-msvc" >> "$GITHUB_ENV"
+          echo "CL=/sdl /guard:cf /guard:ehcont" >> "$GITHUB_ENV"
+          echo "CFLAGS=/sdl /guard:cf /guard:ehcont" >> "$GITHUB_ENV"
+          echo "CXXFLAGS=/sdl /guard:cf /guard:ehcont" >> "$GITHUB_ENV"
+          echo "LDFLAGS=/guard:cf /guard:ehcont /force:guardehcont" >> "$GITHUB_ENV"
+          echo "LINK=/guard:cf /guard:ehcont /force:guardehcont" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-C codegen-units=1 -C debuginfo=1 -C strip=none -C control-flow-guard=y -C link-arg=/guard:cf -C link-arg=/guard:ehcont -C link-arg=/force:guardehcont" >> "$GITHUB_ENV"
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [unstable]
+          build-std = ["std", "panic_unwind"]
+          EOF
+
+      - name: Build wheel (Linux container mode)
+        if: matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm'
+        uses: PyO3/maturin-action@v1
+        env:
+          CARGO_INCREMENTAL: 0
+          CARGO_TARGET_DIR: target/${{ matrix.os }}-${{ matrix.python }}-${{ matrix.platform_id }}
+        with:
+          command: build
+          args: --release --out dist ${{ matrix.wheel_args }}
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          maturin-version: "1.7.4"
+          sccache: false
+      - name: Build wheel (macOS)
+        if: matrix.os == 'macos-14'
+        uses: PyO3/maturin-action@v1
+        env:
+          CARGO_INCREMENTAL: 0
+          CARGO_TARGET_DIR: target/${{ matrix.os }}-${{ matrix.python }}-${{ matrix.platform_id }}
+          PYTHON_SYS_EXECUTABLE: ${{ steps.setup-python.outputs.python-path }}
+          PYO3_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        with:
+          command: build
+          args: --release --out dist --interpreter ${{ steps.setup-python.outputs.python-path }} ${{ matrix.wheel_args }}
+          target: ${{ matrix.target }}
+          manylinux: off
+          maturin-version: "1.7.4"
+          sccache: false
+      - name: Build wheel (Windows single job)
+        if: matrix.os == 'windows-latest'
+        uses: PyO3/maturin-action@v1
+        env:
+          CARGO_INCREMENTAL: 0
+          CARGO_TARGET_DIR: target/${{ matrix.os }}-${{ matrix.python }}-${{ matrix.platform_id }}
+          CARGO_BUILD_JOBS: 1
+          PYTHON_SYS_EXECUTABLE: ${{ steps.setup-python.outputs.python-path }}
+          PYO3_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        with:
+          command: build
+          args: --release --out dist --interpreter ${{ steps.setup-python.outputs.python-path }} ${{ matrix.wheel_args }}
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          maturin-version: "1.7.4"
+          sccache: false
+      - name: Install maturin CLI (for retries)
+        run: python -m pip install -U maturin
+      - name: Rebuild if CRC check fails
+        if: matrix.os != 'ubuntu-latest' && matrix.os != 'ubuntu-24.04-arm'
+        shell: bash
+        run: |
+          max_attempts=3
+          attempt=1
+          extra_maturin_args="--target ${{ matrix.target }} ${{ matrix.wheel_args }}"
+          while true; do
+            if python scripts/wheel_crc_check.py dist/*.whl; then
+              break
+            fi
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              echo "CRC still failing after $max_attempts attempts"
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            echo "CRC failure detected, rebuilding wheels (attempt $attempt/$max_attempts)..."
+            rm -rf dist "target/${{ matrix.os }}-${{ matrix.python }}-${{ matrix.platform_id }}" "target/retry-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.platform_id }}-${attempt}"
+            CARGO_TARGET_DIR="target/retry-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.platform_id }}-${attempt}" maturin build --release --out dist --interpreter "${PYTHON_SYS_EXECUTABLE}" ${extra_maturin_args}
+          done
+      - name: Inspect wheels (pre-normalize)
+        shell: bash
+        run: |
+          if command -v sha256sum >/dev/null 2>&1; then
+            hash_cmd() { sha256sum "$1"; }
+          else
+            hash_cmd() { shasum -a 256 "$1"; }
+          fi
+          for whl in dist/*.whl; do
+            echo "Inspecting $whl"
+            ls -l "$whl"
+            hash_cmd "$whl"
+            python scripts/inspect_zip.py "$whl" || true
+            python scripts/wheel_crc_check.py "$whl" || true
+          done
+      - name: Normalize wheels
+        shell: bash
+        run: |
+          for whl in dist/*.whl; do
+            if python scripts/check_zip_trailing.py "$whl"; then
+              echo "No trailing data in $whl; skipping normalize"
+            else
+              echo "Trailing data detected in $whl; normalizing"
+              python scripts/normalize_wheel.py "$whl"
+            fi
+          done
+      - name: Zip integrity check
+        shell: bash
+        run: |
+          if command -v sha256sum >/dev/null 2>&1; then
+            hash_cmd() { sha256sum "$1"; }
+          else
+            hash_cmd() { shasum -a 256 "$1"; }
+          fi
+          for whl in dist/*.whl; do
+            echo "Checking $whl"
+            ls -l "$whl"
+            hash_cmd "$whl"
+            python -m zipfile -t "$whl"
+            python scripts/check_zip_trailing.py "$whl"
+            python scripts/wheel_crc_check.py "$whl"
+          done
+      - name: Write wheel hashes
+        shell: bash
+        run: |
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum *.whl > SHA256SUMS-${{ matrix.os }}-${{ matrix.platform_id }}.txt
+          else
+            shasum -a 256 *.whl > SHA256SUMS-${{ matrix.os }}-${{ matrix.platform_id }}.txt
+          fi
+      - name: Verify wheels
+        run: |
+          python -m pip install -U twine pkginfo
+          twine check dist/*.whl
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-wheels-${{ matrix.os }}-${{ matrix.platform_id }}
+          path: dist
+          compression-level: 0
+
+  build-sdist:
+    name: Build sdist
+    runs-on: ubuntu-latest
+    needs: [test-core, test-python]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Clean dist
+        shell: bash
+        run: rm -rf dist
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - name: Zip integrity check
+        shell: bash
+        run: |
+          shopt -s nullglob
+          for zip in dist/*.zip; do
+            python -m zipfile -t "$zip"
+          done
+      - name: Verify sdist
+        run: |
+          ls -1 dist/*.tar.gz >/dev/null
+          python -m tarfile -t dist/*.tar.gz
+      - name: Verify LICENSE in sdist
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdist="$(ls dist/*.tar.gz)"
+          top_dir="$(tar -tzf "$sdist" | sed -n '1s#/.*##p')"
+          tar -tzf "$sdist" "${top_dir}/LICENSE" >/dev/null
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-sdist
+          path: dist
+          compression-level: 0
+
+  pypi-publish:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: [build-wheels, build-sdist, test-wasm]
+    permissions:
+      id-token: write
+    environment:
+      name: pypi
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clean dist
+        shell: bash
+        run: rm -rf dist
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rust-wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: Download sdist
+        uses: actions/download-artifact@v4
+        with:
+          name: rust-sdist
+          path: dist
+      - name: Remove attestation files
+        shell: bash
+        run: rm -f dist/*.publish.attestation
+      - name: Inspect wheels (post-download)
+        shell: bash
+        run: |
+          for whl in dist/*.whl; do
+            echo "Inspecting $whl"
+            ls -l "$whl"
+            sha256sum "$whl"
+            python scripts/inspect_zip.py "$whl"
+            python scripts/wheel_crc_check.py "$whl"
+          done
+      - name: Verify artifacts
+        shell: bash
+        run: |
+          ls -1 dist/*.tar.gz >/dev/null
+          for sums in dist/SHA256SUMS-*.txt; do
+            echo "Verifying hashes with $sums"
+            (cd dist && sha256sum -c "$(basename "$sums")")
+          done
+          for whl in dist/*.whl; do
+            echo "Checking $whl"
+            ls -l "$whl"
+            sha256sum "$whl"
+            python -m zipfile -t "$whl"
+            python scripts/check_zip_trailing.py "$whl"
+            python scripts/wheel_crc_check.py "$whl"
+          done
+          python -m pip install -U twine pkginfo
+          twine check dist/*.whl
+          python -m tarfile -t dist/*.tar.gz
+      - name: Move checksum files out of dist
+        shell: bash
+        run: |
+          mkdir -p dist_checksums
+          mv dist/SHA256SUMS-*.txt dist_checksums/ 2>/dev/null || true
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+
+  npm-publish:
+    name: Publish wasm to npm
+    runs-on: ubuntu-latest
+    needs: [build-wasm]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-pkg
+          path: pkg
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: https://registry.npmjs.org/
+      - name: Publish
+        working-directory: pkg
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public

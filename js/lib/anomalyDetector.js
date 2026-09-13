@@ -1,5 +1,10 @@
 const { IsolationForest } = require('./isolationForest');
-const { createIsolationForest, getWasmStatus } = require('./wasmAdapter');
+const {
+  createIsolationForest,
+  createIsolationForestFromJSON,
+  getWasmStatus,
+  analyzeRecentBehavior: analyzeRecentBehaviorWasm
+} = require('./wasmAdapter');
 const modelStore = require('./modelStore');
 const requestLogStore = require('./requestLogStore');
 const { STATIC_KW } = require('./featureUtils');
@@ -22,6 +27,15 @@ async function loadModel(opts = {}) {
   try {
     const modelData = await modelStore.load(opts);
     if (!modelData) return;
+
+    if (modelData.model_type === 'aiwaf_wasm.IsolationForest' && modelData.model_state) {
+      const restored = await createIsolationForestFromJSON(modelData.model_state);
+      if (!restored.__aiwafWasm) throw new Error('WASM model cannot be restored without aiwaf-wasm');
+      model = restored;
+      modelMetadata = modelData.metadata || null;
+      trained = true;
+      return;
+    }
 
     if (modelData.metadata) {
       modelMetadata = modelData.metadata;
@@ -70,6 +84,28 @@ function analyzeRecentBehavior(recentData = []) {
   const recentKwHits = [];
   let recent404s = 0;
   const recentBurstCounts = [];
+  const timestamps = recentData.map(entry => Number(entry.timestamp || 0)).sort((a, b) => a - b);
+
+  const lowerBound = target => {
+    let left = 0;
+    let right = timestamps.length;
+    while (left < right) {
+      const mid = (left + right) >>> 1;
+      if (timestamps[mid] < target) left = mid + 1;
+      else right = mid;
+    }
+    return left;
+  };
+  const upperBound = target => {
+    let left = 0;
+    let right = timestamps.length;
+    while (left < right) {
+      const mid = (left + right) >>> 1;
+      if (timestamps[mid] <= target) left = mid + 1;
+      else right = mid;
+    }
+    return left;
+  };
 
   for (const entry of recentData) {
     const entryTime = entry.timestamp || 0;
@@ -89,7 +125,7 @@ function analyzeRecentBehavior(recentData = []) {
       recent404s += 1;
     }
 
-    const entryBurst = recentData.filter(item => Math.abs(entryTime - (item.timestamp || 0)) <= 10000).length;
+    const entryBurst = upperBound(entryTime + 10000) - lowerBound(entryTime - 10000);
     recentBurstCounts.push(entryBurst);
   }
 
@@ -126,6 +162,28 @@ function analyzeRecentBehavior(recentData = []) {
     legitimate_404s: legitimate404s,
     should_block: shouldBlock
   };
+}
+
+async function analyzeRecentBehaviorAccelerated(recentData = []) {
+  // Older aiwaf-wasm releases classify these ordinary discovery paths as scans.
+  // Also keep the JS semantics for malformed timestamps or non-numeric statuses.
+  const safeForWasm = recentData.every(entry =>
+    typeof entry.status === 'number'
+    && Number.isFinite(entry.timestamp)
+    && !/robots\.txt|sitemap\.xml/.test(String(entry.path || '').toLowerCase())
+  );
+  if (recentData.length > 0 && safeForWasm) {
+    const entries = recentData.map(entry => ({
+      ...entry,
+      timestamp_ms: Number(entry.timestamp || 0),
+      kw_check: !exemptions.shouldSkipKeyword('', String(entry.path || ''))
+    }));
+    const stats = await analyzeRecentBehaviorWasm(entries, STATIC_KW);
+    if (stats && typeof stats.should_block === 'boolean' && Number.isFinite(Number(stats.avg_burst))) {
+      return stats;
+    }
+  }
+  return analyzeRecentBehavior(recentData);
 }
 
 module.exports = {
@@ -184,6 +242,7 @@ module.exports = {
   },
 
   analyzeRecentBehavior,
+  analyzeRecentBehaviorAccelerated,
   isScanningPath,
 
   maybeLearnKeyword(path, statusCode, opts = {}) {

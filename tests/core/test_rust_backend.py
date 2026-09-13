@@ -64,6 +64,15 @@ def test_validate_headers_returns_none_when_backend_missing(monkeypatch):
     assert rust_backend.validate_headers({"user-agent": "x"}) is None
 
 
+def test_full_header_policy_distinguishes_pass_from_missing_backend(monkeypatch):
+    monkeypatch.setattr(rust_backend, "aiwaf_rust", SimpleNamespace(
+        validate_headers_full_default=lambda headers, required, score: None
+    ))
+    assert rust_backend.evaluate_headers_full_default({}, [], 0) == (True, None)
+    monkeypatch.setattr(rust_backend, "aiwaf_rust", None)
+    assert rust_backend.evaluate_headers_full_default({}, [], 0) == (False, None)
+
+
 def test_validate_headers_prefers_config_api_over_legacy(monkeypatch):
     calls = {"config": 0, "legacy": 0}
 

@@ -9,16 +9,17 @@ with rate limiting, anomaly detection, honeypots, UUID tamper protection, smart
 keyword learning, file-extension probing detection, exempt path/IP awareness,
 and scheduled retraining.
 
-This monorepo contains both published packages:
+This monorepo contains three independently published packages:
 
 - `py/aiwaf/` and the root Python packaging files publish `aiwaf` to PyPI.
 - `js/` publishes `aiwaf` to npm and supports Express, Fastify, Hapi, Koa, Next.js, NestJS, AdonisJS, and Sails.
+- `rust/` publishes `aiwaf-rust` to PyPI as a separate package.
 
 Install the JavaScript package with `npm install aiwaf`. Its usage, configuration, framework adapters, and operational commands are documented in [JavaScript Package](#javascript-package-aiwaf).
 
-For local JavaScript development, run `npm ci` and `npm test` from `js/`. Releases are independent: push a `python-v*` tag (for example, `python-v1.0.8`) to publish the Python package to PyPI, or push a `js-v*` tag (for example, `js-v1.0.1`) to publish `aiwaf` to npm. Both publish workflows can also be started manually from GitHub Actions.
+For local JavaScript development, run `npm ci` and `npm test` from `js/`. Releases are independent: push a `python-v*` tag (for example, `python-v1.0.8`) to publish the Python package to PyPI, a `js-v*` tag (for example, `js-v1.0.1`) to publish `aiwaf` to npm, or a `rust-v*` tag (for example, `rust-v0.2.1`) to publish `aiwaf-rust` to PyPI. The publish workflows can also be started manually from GitHub Actions.
 
-Run the complete monorepo test suite with `python aiwaf_test.py`. Use `--python-only` or `--js-only` when working on one package.
+Run the Python and JavaScript test suites with `python aiwaf_test.py`. Use `--python-only` or `--js-only` when working on one package. For the Rust core, run `cargo test --manifest-path rust/Cargo.toml --locked -p aiwaf_core`.
 
 ## Latest Enhancements
 

@@ -35,25 +35,19 @@ class HeaderValidationMiddleware:
             req_method = (request.method or "GET").upper()
             configured_required = current_app.config.get("AIWAF_REQUIRED_HEADERS")
 
-            use_rust = rust_backend.rust_available()
             effective_required_headers = header_validation.resolve_required_headers(configured_required, req_method)
-            default_required_headers = header_validation.resolve_required_headers(None, req_method)
-            has_method_override = effective_required_headers != default_required_headers
             min_score = _get_min_quality_score(configured_required, req_method)
 
-            rust_reason = None
-            if use_rust and not has_method_override:
-                rust_reason = rust_backend.validate_headers(
-                    request.environ, effective_required_headers, min_score
-                )
-
-            reason = header_validation.evaluate_header_policy(
-                request.environ,
-                method=req_method,
-                config_required_headers=configured_required,
-                min_score=min_score,
+            used_rust, reason = rust_backend.evaluate_headers_full_default(
+                request.environ, effective_required_headers, min_score
             )
-            reason = reason or rust_reason
+            if not used_rust:
+                reason = header_validation.evaluate_header_policy(
+                    request.environ,
+                    method=req_method,
+                    config_required_headers=configured_required,
+                    min_score=min_score,
+                )
 
             if reason:
                 BlacklistManager.block(

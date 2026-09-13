@@ -144,6 +144,8 @@ describe('wasmAdapter', () => {
 
     expect(analyzeRecent).toHaveBeenNthCalledWith(1, [{ path_lower: '/x', timestamp: 10000, status: 404, kw_check: true }], []);
     expect(analyzeRecent).toHaveBeenNthCalledWith(2, [{ path_lower: '/x', timestamp: 20000, status: 0, kw_check: true }], ['.php']);
+    await analyzeRecentBehavior([{ path: '/x', timestamp_ms: 20000 }], ['.php']);
+    expect(analyzeRecent).toHaveBeenNthCalledWith(3, [{ path_lower: '/x', timestamp: 20, status: 0, kw_check: true }], ['.php']);
     expect(extractFeatures).toHaveBeenCalledWith([{ path: '/x' }], ['.php']);
     expect(extractWithState).toHaveBeenCalledWith([{ path: '/x' }], ['.php'], { previous: true });
   });

@@ -1,0 +1,194 @@
+name: Publish Rust package to PyPI
+
+on:
+  push:
+    tags:
+      - "rust-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify Rust release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check package identity and versions
+        working-directory: rust
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          crate = tomllib.loads(Path("Cargo.toml").read_text())["package"]
+          lock = tomllib.loads(Path("Cargo.lock").read_text())
+          locked = next(p for p in lock["package"] if p["name"] == "aiwaf_rust")
+          assert project["name"] == "aiwaf-rust"
+          assert crate["name"] == "aiwaf_rust"
+          assert project["version"] == crate["version"] == locked["version"]
+          if os.environ["GITHUB_REF_TYPE"] == "tag":
+              assert os.environ["GITHUB_REF_NAME"] == f"rust-v{project['version']}"
+          print(f"Releasing {project['name']} {project['version']}")
+          PY
+
+      - name: Test Rust core
+        run: cargo test --manifest-path rust/Cargo.toml --locked -p aiwaf_core
+
+  wheels:
+    name: Wheel (${{ matrix.platform }})
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: manylinux-x86_64
+            os: ubuntu-latest
+            family: linux
+            target: x86_64
+            manylinux: "2014"
+          - platform: manylinux-aarch64
+            os: ubuntu-24.04-arm
+            family: linux
+            target: aarch64
+            manylinux: "2014"
+          - platform: musllinux-x86_64
+            os: ubuntu-latest
+            family: linux
+            target: x86_64-unknown-linux-musl
+            manylinux: musllinux_1_2
+          - platform: macos-arm64
+            os: macos-15
+            family: native
+            target: aarch64-apple-darwin
+            manylinux: "off"
+          - platform: macos-x86_64
+            os: macos-15-intel
+            family: native
+            target: x86_64-apple-darwin
+            manylinux: "off"
+          - platform: windows-x86_64
+            os: windows-latest
+            family: native
+            target: x86_64-pc-windows-msvc
+            manylinux: "off"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage canonical license
+        shell: bash
+        run: cp LICENSE rust/LICENSE
+
+      - id: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build Linux wheel
+        if: matrix.family == 'linux'
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          working-directory: rust
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          maturin-version: v1.11.5
+          args: --release --locked --compatibility pypi --out dist
+
+      - name: Build macOS or Windows wheel
+        if: matrix.family == 'native'
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          working-directory: rust
+          target: ${{ matrix.target }}
+          maturin-version: v1.11.5
+          args: --release --locked --compatibility pypi --out dist --interpreter ${{ steps.python.outputs.python-path }}
+
+      - name: Check wheel archive
+        shell: bash
+        run: |
+          for wheel in rust/dist/*.whl; do
+            python -m zipfile -t "$wheel"
+          done
+
+      - name: Smoke-test wheel
+        if: matrix.platform != 'musllinux-x86_64'
+        shell: bash
+        run: |
+          python -m pip install pytest rust/dist/*.whl
+          python -m pytest -q rust/tests/test_python_api.py
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-wheel-${{ matrix.platform }}
+          path: rust/dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    name: Source distribution
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage canonical license
+        run: cp LICENSE rust/LICENSE
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          working-directory: rust
+          maturin-version: v1.11.5
+          args: --locked --out dist
+
+      - name: Check sdist archive
+        run: python -m tarfile -t rust/dist/*.tar.gz
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-sdist
+          path: rust/dist/*.tar.gz
+          if-no-files-found: error
+
+  pypi-publish:
+    name: Publish aiwaf-rust to PyPI
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/aiwaf-rust
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rust-wheel-*
+          path: dist
+          merge-multiple: true
+
+      - name: Download sdist
+        uses: actions/download-artifact@v4
+        with:
+          name: rust-sdist
+          path: dist
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

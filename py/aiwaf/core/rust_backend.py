@@ -58,6 +58,17 @@ def validate_headers(headers, required_headers=None, min_score=None) -> str | No
         return None
 
 
+def evaluate_headers_full_default(headers, required_headers, min_score):
+    """Return (used_rust, reason); distinguish a clean pass from backend failure."""
+    evaluator = getattr(aiwaf_rust, "validate_headers_full_default", None) if aiwaf_rust else None
+    if evaluator is None:
+        return False, None
+    try:
+        return True, evaluator(headers, required_headers, int(min_score))
+    except Exception:
+        return False, None
+
+
 def extract_features(records, static_keywords):
     if aiwaf_rust is None:
         return None

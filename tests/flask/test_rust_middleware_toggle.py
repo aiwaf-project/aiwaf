@@ -33,10 +33,9 @@ def test_header_validation_uses_rust_when_enabled(monkeypatch, tmp_path):
 
     def fake_validate(headers, required_headers=None, min_score=None):
         called["value"] = True
-        return None
+        return True, None
 
-    monkeypatch.setattr(rust_backend, "rust_available", lambda: True)
-    monkeypatch.setattr(rust_backend, "validate_headers", fake_validate)
+    monkeypatch.setattr(rust_backend, "evaluate_headers_full_default", fake_validate)
 
     app = _make_app(tmp_path)
     with app.test_client() as client:
@@ -51,10 +50,9 @@ def test_header_validation_uses_installed_rust_when_csv_disabled(monkeypatch, tm
 
     def fake_validate(headers, required_headers=None, min_score=None):
         called["value"] = True
-        return None
+        return True, None
 
-    monkeypatch.setattr(rust_backend, "rust_available", lambda: True)
-    monkeypatch.setattr(rust_backend, "validate_headers", fake_validate)
+    monkeypatch.setattr(rust_backend, "evaluate_headers_full_default", fake_validate)
 
     app = _make_app(tmp_path)
     app.config["AIWAF_USE_CSV"] = False
@@ -70,10 +68,9 @@ def test_header_validation_head_override_skips_required_headers(monkeypatch, tmp
 
     def fake_validate(headers, required_headers=None, min_score=None):
         called["value"] = True
-        return None
+        return True, None
 
-    monkeypatch.setattr(rust_backend, "rust_available", lambda: True)
-    monkeypatch.setattr(rust_backend, "validate_headers", fake_validate)
+    monkeypatch.setattr(rust_backend, "evaluate_headers_full_default", fake_validate)
 
     app = _make_app(tmp_path)
     app.config["AIWAF_REQUIRED_HEADERS"] = {"HEAD": []}
@@ -82,5 +79,5 @@ def test_header_validation_head_override_skips_required_headers(monkeypatch, tmp
         response = client.head("/")
 
     assert response.status_code == 200
-    # Method override uses Python path to honor per-method required-header config.
-    assert called["value"] is False
+    # The full policy accepts per-method required-header lists.
+    assert called["value"] is True

@@ -40,6 +40,7 @@ jobs:
       - name: Stage shared package assets
         run: |
           cp ../README.md README.md
+          cp ../LICENSE LICENSE
           mkdir -p geolock
           cp ../py/aiwaf/core/geolock/ipinfo_lite.mmdb geolock/ipinfo_lite.mmdb
 
