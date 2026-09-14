@@ -95,9 +95,14 @@ jobs:
       - name: Verify npm tarball contents
         working-directory: rust/crates/aiwaf_wasm/pkg
         run: |
+          set -o pipefail
           npm pack --dry-run --json | node -e '
           const fs = require("fs");
-          const pack = JSON.parse(fs.readFileSync(0, "utf8"))[0];
+          const result = JSON.parse(fs.readFileSync(0, "utf8"));
+          const pack = Array.isArray(result) ? result[0] : result["aiwaf-wasm"];
+          if (!pack || !Array.isArray(pack.files)) {
+            throw new Error(`npm pack returned no file list for aiwaf-wasm: ${JSON.stringify(result)}`);
+          }
           const files = new Set(pack.files.map(file => file.path));
           const required = ["LICENSE", "README.md", "aiwaf_wasm.js", "aiwaf_wasm_bg.js", "aiwaf_wasm_bg.wasm"];
           const missing = required.filter(file => !files.has(file));
