@@ -43,17 +43,30 @@ def rust_isolation_forest_from_json(state):
         return None
 
 
+def _to_rust_header_name(name):
+    """Accept both HTTP header names and WSGI environ keys."""
+    name = str(name).upper().replace("-", "_")
+    if name.startswith("HTTP_") or name in {"CONTENT_TYPE", "CONTENT_LENGTH", "SERVER_PROTOCOL"}:
+        return name
+    return f"HTTP_{name}"
+
+
 def validate_headers(headers, required_headers=None, min_score=None) -> str | None:
     if aiwaf_rust is None:
         return None
     try:
+        rust_headers = {_to_rust_header_name(key): value for key, value in headers.items()}
+        rust_required = (
+            [_to_rust_header_name(name) for name in required_headers]
+            if required_headers is not None else None
+        )
         if hasattr(aiwaf_rust, "validate_headers_with_config"):
             return aiwaf_rust.validate_headers_with_config(
-                headers,
-                required_headers,
+                rust_headers,
+                rust_required,
                 min_score,
             )
-        return aiwaf_rust.validate_headers(headers)
+        return aiwaf_rust.validate_headers(rust_headers)
     except Exception:
         return None
 

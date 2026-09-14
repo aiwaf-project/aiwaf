@@ -41,6 +41,30 @@ def test_validate_headers_uses_config_api_when_available(monkeypatch):
     assert reason == "bad headers"
 
 
+def test_validate_headers_normalizes_http_names_for_rust(monkeypatch):
+    captured = {}
+
+    def _capture(headers, required_headers, min_score):
+        captured.update(headers=headers, required=required_headers, score=min_score)
+        return None
+
+    monkeypatch.setattr(rust_backend, "aiwaf_rust", SimpleNamespace(validate_headers_with_config=_capture))
+    assert rust_backend.validate_headers(
+        {"user-agent": "Mozilla/5.0", "accept": "text/html", "SERVER_PROTOCOL": "HTTP/2"},
+        ["user-agent", "HTTP_ACCEPT"],
+        3,
+    ) is None
+    assert captured == {
+        "headers": {
+            "HTTP_USER_AGENT": "Mozilla/5.0",
+            "HTTP_ACCEPT": "text/html",
+            "SERVER_PROTOCOL": "HTTP/2",
+        },
+        "required": ["HTTP_USER_AGENT", "HTTP_ACCEPT"],
+        "score": 3,
+    }
+
+
 def test_validate_headers_falls_back_to_legacy_api(monkeypatch):
     backend = SimpleNamespace(
         validate_headers=lambda headers: "legacy bad headers",

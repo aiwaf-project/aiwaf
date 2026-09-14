@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.8
+
+- Require `aiwaf-rust>=0.2.1` for the optional Rust extra.
+- Normalize HTTP headers before Rust validation so valid FastAPI requests are not blocked.
+- Skip the Rust header validator when FastAPI's Rust path is disabled.
+
 ## 1.0.7
 
 - Added reputation-based IP blocking with weighted offenses, progressive

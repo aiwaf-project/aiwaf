@@ -73,6 +73,28 @@ def test_header_validation_falls_back_when_rust_returns_none(monkeypatch):
     assert response.json()["error"] == "blocked"
 
 
+def test_header_validation_skips_rust_when_disabled(monkeypatch):
+    monkeypatch.setattr(
+        "aiwaf.fast.middleware.header_validation.rust_available",
+        lambda: False,
+    )
+
+    def _unexpected_rust(*args, **kwargs):
+        raise AssertionError("Rust backend should not run when disabled")
+
+    monkeypatch.setattr(
+        "aiwaf.fast.middleware.header_validation.rust_validate_headers",
+        _unexpected_rust,
+    )
+    app = _build_app()
+    app.add_middleware(HeaderValidationMiddleware, block_suspicious=True)
+    response = TestClient(app).get(
+        "/api/data",
+        headers={"user-agent": "python-requests/2.31.0", "accept": "application/json"},
+    )
+    assert response.status_code == 403
+
+
 def test_header_validation_passes_config_to_rust_backend(monkeypatch):
     captured = {}
 

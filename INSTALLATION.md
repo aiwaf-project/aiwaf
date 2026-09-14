@@ -274,7 +274,7 @@ pip install aiwaf
 pip install "aiwaf[rust]"
 ```
 
-This pulls the separately-released Rust extension package (`aiwaf-rust>=0.1.9`).
+This pulls the separately-released Rust extension package (`aiwaf-rust>=0.2.1`).
 
 ```python
 AIWAF_MIDDLEWARE_CSV = True

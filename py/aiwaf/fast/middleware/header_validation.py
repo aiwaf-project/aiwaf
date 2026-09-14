@@ -139,11 +139,12 @@ class HeaderValidationMiddleware(BaseHTTPMiddleware):
             environ = self._to_core_environ(headers, request.scope)
 
             # Keep optional Rust fast-path, then apply core Python evaluator for parity.
-            violation_reason = rust_validate_headers(
-                headers,
-                required_headers=self.REQUIRED_HEADERS,
-                min_score=self.quality_threshold,
-            )
+            if rust_available():
+                violation_reason = rust_validate_headers(
+                    headers,
+                    required_headers=self.REQUIRED_HEADERS,
+                    min_score=self.quality_threshold,
+                )
             if (
                 violation_reason
                 and "Empty user agent" in violation_reason
