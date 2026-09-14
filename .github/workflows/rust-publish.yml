@@ -152,7 +152,7 @@ jobs:
           command: sdist
           working-directory: rust
           maturin-version: v1.11.5
-          args: --locked --out dist
+          args: --out dist
 
       - name: Check sdist archive
         run: python -m tarfile -t rust/dist/*.tar.gz
