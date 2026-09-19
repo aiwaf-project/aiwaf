@@ -25,12 +25,6 @@ def rust_isolation_forest_class():
     return getattr(aiwaf_rust, "IsolationForest", None)
 
 
-def rust_route_matcher_class():
-    if aiwaf_rust is None:
-        return None
-    return getattr(aiwaf_rust, "RouteMatcher", None)
-
-
 def is_rust_isolation_forest(obj) -> bool:
     if aiwaf_rust is None or obj is None:
         return False
