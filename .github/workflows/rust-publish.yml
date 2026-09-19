@@ -14,9 +14,9 @@ jobs:
     name: Verify Rust release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -83,7 +83,7 @@ jobs:
             manylinux: "off"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Stage canonical package assets
         shell: bash
@@ -92,7 +92,7 @@ jobs:
           cp LICENSE rust/LICENSE
 
       - id: python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -132,7 +132,7 @@ jobs:
           python -m pytest -q rust/tests/test_python_api.py
 
       - name: Upload wheel
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: rust-wheel-${{ matrix.platform }}
           path: rust/dist/*.whl
@@ -143,7 +143,7 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Stage canonical package assets
         run: |
@@ -162,7 +162,7 @@ jobs:
         run: python -m tarfile -t rust/dist/*.tar.gz
 
       - name: Upload sdist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: rust-sdist
           path: rust/dist/*.tar.gz
@@ -180,14 +180,14 @@ jobs:
       id-token: write
     steps:
       - name: Download wheels
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: rust-wheel-*
           path: dist
           merge-multiple: true
 
       - name: Download sdist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: rust-sdist
           path: dist

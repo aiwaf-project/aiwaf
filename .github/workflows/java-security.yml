@@ -28,7 +28,7 @@ jobs:
   dependency-and-sbom:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -44,7 +44,7 @@ jobs:
         run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
       - name: Restore Dependency-Check database
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/dependency-check-data
           key: dependency-check-${{ runner.os }}-12.2.2-${{ steps.dependency-check-date.outputs.date }}
@@ -61,14 +61,25 @@ jobs:
           -DnvdDatafeedUrl=https://dependency-check.github.io/DependencyCheck_Builder/nvd_cache/nvdcve-{0}.json.gz
       - name: Upload Dependency-Check report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: java-dependency-check-report
           path: java/target/dependency-check-report.html
           if-no-files-found: warn
       - name: Generate CycloneDX SBOM
-        run: mvn -B -f java/pom.xml org.cyclonedx:cyclonedx-maven-plugin:2.9.2:makeAggregateBom
-      - uses: actions/upload-artifact@v4
+        working-directory: java
+        run: >
+          mvn -B org.cyclonedx:cyclonedx-maven-plugin:2.9.3:makeBom
+          -Dcyclonedx.skipNotDeployed=false
+          -DoutputDirectory="${{ github.workspace }}/java/target"
+          -DoutputFormat=all
+          -DoutputName=bom
+      - name: Verify CycloneDX SBOM
+        shell: bash
+        run: |
+          test -s java/target/bom.json
+          test -s java/target/bom.xml
+      - uses: actions/upload-artifact@v6
         with:
           name: java-cyclonedx-sbom
           path: |
@@ -79,7 +90,7 @@ jobs:
   secret-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - name: Gitleaks
@@ -93,7 +104,7 @@ jobs:
       security-events: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: github/codeql-action/init@v4
         with:
           languages: java-kotlin
