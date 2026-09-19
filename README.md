@@ -462,7 +462,7 @@ cp ../LICENSE crates/aiwaf_wasm/pkg/LICENSE
 
 ## Java package
 
-AIWAF Java 1.0.0 targets Java 17, Spring Framework 6.2, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
+AIWAF Java 1.0.0 targets Java 17, Spring Framework 7.0, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
 
 ### Core engine
 
