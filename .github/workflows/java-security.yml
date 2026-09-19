@@ -37,13 +37,35 @@ jobs:
           cache-dependency-path: java/pom.xml
       - name: Test
         run: mvn -B -f java/pom.xml test
+
+      - name: Set Dependency-Check cache key
+        id: dependency-check-date
+        shell: bash
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Dependency-Check database
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/dependency-check-data
+          key: dependency-check-${{ runner.os }}-12.2.2-${{ steps.dependency-check-date.outputs.date }}
+          restore-keys: |
+            dependency-check-${{ runner.os }}-12.2.2-
+
       - name: Dependency vulnerability gate
-        env:
-          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: >
           mvn -B -f java/pom.xml org.owasp:dependency-check-maven:12.2.2:check
           -DfailBuildOnCVSS=7
-          -DnvdApiKeyEnvironmentVariable=NVD_API_KEY
+          -DfailOnError=true
+          -DdataDirectory="${{ runner.temp }}/dependency-check-data"
+          -DnvdValidForHours=24
+          -DnvdDatafeedUrl=https://dependency-check.github.io/DependencyCheck_Builder/nvd_cache/nvdcve-{0}.json.gz
+      - name: Upload Dependency-Check report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-dependency-check-report
+          path: java/target/dependency-check-report.html
+          if-no-files-found: warn
       - name: Generate CycloneDX SBOM
         run: mvn -B -f java/pom.xml org.cyclonedx:cyclonedx-maven-plugin:2.9.2:makeAggregateBom
       - uses: actions/upload-artifact@v4
