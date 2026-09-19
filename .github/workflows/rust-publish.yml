@@ -85,9 +85,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Stage canonical license
+      - name: Stage canonical package assets
         shell: bash
-        run: cp LICENSE rust/LICENSE
+        run: |
+          cp README.md rust/README.md
+          cp LICENSE rust/LICENSE
 
       - id: python
         uses: actions/setup-python@v5
@@ -143,8 +145,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Stage canonical license
-        run: cp LICENSE rust/LICENSE
+      - name: Stage canonical package assets
+        run: |
+          cp README.md rust/README.md
+          cp LICENSE rust/LICENSE
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1

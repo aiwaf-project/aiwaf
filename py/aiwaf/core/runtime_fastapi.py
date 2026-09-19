@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any, Set, List
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 
+from aiwaf import __version__ as AIWAF_VERSION
 from .runtime_config import AIWAFConfig, initialize_config
 from .runtime_storage import initialize_storage, get_exemption_store, get_geo_block_store
 from .runtime_blacklist import BlacklistManager
@@ -382,7 +383,7 @@ class AIWAF:
         """
         stats = {
             'aiwaf': {
-                'version': '1.0.0',
+                'version': AIWAF_VERSION,
                 'enabled_features': [
                     feature for feature in ['header_validation', 'rate_limiting', 'blacklist']
                     if self.config.is_enabled(feature)

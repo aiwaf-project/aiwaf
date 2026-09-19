@@ -16,6 +16,11 @@ describe('wasmAdapter', () => {
       validate_url: jest.fn(() => 'url_bad'),
       validate_content: jest.fn(() => ({ ok: false, reason: 'content_bad' })),
       validate_recent: jest.fn(() => false),
+      extract_raw_training_features: jest.fn(() => [{ path_len: 6, kw_hits: 1 }]),
+      RouteMatcher: class {
+        constructor(prefixes) { this.prefixes = prefixes; }
+        match_index(path) { return path.startsWith(this.prefixes[0]) ? 0 : undefined; }
+      },
       AiwafIsolationForest: class {
         constructor() {}
         fit(data) { fitSpy(data); }
@@ -29,7 +34,9 @@ describe('wasmAdapter', () => {
       validateHeaders,
       validateUrl,
       validateContent,
-      validateRecent
+      validateRecent,
+      extractWasmRawTrainingFeatures,
+      createRouteMatcher
     } = require('../lib/wasmAdapter');
 
     const model = await createIsolationForest({ nTrees: 10, sampleSize: 8, threshold: 0.5 });
@@ -44,6 +51,12 @@ describe('wasmAdapter', () => {
     expect(await validateUrl('http://example.com')).toBe('url_bad');
     expect(await validateContent('payload')).toBe('content_bad');
     expect(await validateRecent([{ path: '/', status: 200 }])).toBe('wasm_recent_invalid');
+    expect(await extractWasmRawTrainingFeatures(
+      [{ ip: '203.0.113.1', path: '/a.php' }], ['.php'], ['200', '404']
+    )).toEqual([{ path_len: 6, kw_hits: 1 }]);
+    const routeMatcher = await createRouteMatcher(['/api/']);
+    expect(routeMatcher.matchIndex('/api/items')).toBe(0);
+    expect(routeMatcher.matchIndex('/other')).toBeNull();
   });
 
   it('falls back to JS isolation forest when wasm is unavailable', async () => {

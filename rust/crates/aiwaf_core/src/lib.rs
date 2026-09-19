@@ -31,6 +31,42 @@ impl KeywordMatcher {
     }
 }
 
+/// Match the deepest configured path prefix without scanning every rule.
+/// Inputs are normalized by the host adapter to preserve framework semantics.
+pub struct RouteMatcher {
+    by_prefix: HashMap<String, usize>,
+}
+
+impl RouteMatcher {
+    pub fn new(prefixes: Vec<String>) -> Self {
+        let mut by_prefix = HashMap::with_capacity(prefixes.len());
+        for (index, prefix) in prefixes.into_iter().enumerate() {
+            let base = prefix.trim_end_matches('/');
+            let base = if base.is_empty() { "/" } else { base };
+            by_prefix.entry(base.to_string()).or_insert(index);
+        }
+        Self { by_prefix }
+    }
+
+    pub fn match_index(&self, normalized_path: &str) -> Option<usize> {
+        let path = normalized_path.trim_end_matches('/');
+        let mut candidate = if path.is_empty() { "/" } else { path };
+        loop {
+            if let Some(index) = self.by_prefix.get(candidate) {
+                return Some(*index);
+            }
+            if candidate == "/" {
+                return None;
+            }
+            candidate = match candidate.rfind('/') {
+                Some(0) => "/",
+                Some(position) => &candidate[..position],
+                None => return None,
+            };
+        }
+    }
+}
+
 static LEGITIMATE_BOTS: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
         Regex::new(r"googlebot").unwrap(),
@@ -229,6 +265,22 @@ pub fn validate_headers(headers: &HashMap<String, String>) -> Option<String> {
     validate_headers_with_config(headers, None, None)
 }
 
+/// Reject control characters that cannot safely appear in an HTTP URL.
+pub fn validate_url(url: &str) -> Option<&'static str> {
+    if url.chars().any(char::is_control) {
+        return Some("url_control_character");
+    }
+    None
+}
+
+/// Keep default body checks conservative because body content can be arbitrary text.
+pub fn validate_content(content: &str) -> Option<&'static str> {
+    if content.contains('\0') {
+        return Some("content_nul_byte");
+    }
+    None
+}
+
 pub fn validate_headers_with_config(
     headers: &HashMap<String, String>,
     required_headers: Option<Vec<String>>,
@@ -395,6 +447,15 @@ pub struct FeatureBatchResult {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct RawFeatureRecord {
+    pub ip: String,
+    pub path: String,
+    pub timestamp: f64,
+    pub response_time: f64,
+    pub status: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct BehaviorAnalysis {
     pub avg_kw_hits: f64,
     pub max_404s: i32,
@@ -528,6 +589,53 @@ pub fn extract_training_features(
     static_keywords: Vec<String>,
 ) -> Vec<FeatureRecordOutput> {
     extract_features_with_window(records, static_keywords, true)
+}
+
+/// Build feature inputs and extract features in one Rust batch.
+/// `eligible_paths` is keyed by the original path; absent paths are eligible.
+/// A supplied 404 map preserves callers' precomputed counts.
+pub fn extract_raw_features(
+    records: Vec<RawFeatureRecord>,
+    static_keywords: Vec<String>,
+    status_indices: &[String],
+    eligible_paths: &HashMap<String, bool>,
+    ip_404_override: Option<&HashMap<String, i32>>,
+    symmetric_burst: bool,
+) -> Vec<FeatureRecordOutput> {
+    let computed_404 = if ip_404_override.is_none() {
+        let mut counts = HashMap::new();
+        for record in &records {
+            if record.status == "404" {
+                *counts.entry(record.ip.clone()).or_insert(0) += 1;
+            }
+        }
+        counts
+    } else {
+        HashMap::new()
+    };
+    let ip_404 = ip_404_override.unwrap_or(&computed_404);
+    let inputs = records
+        .into_iter()
+        .map(|record| FeatureRecordInput {
+            path_len: if symmetric_burst {
+                record.path.encode_utf16().count()
+            } else {
+                record.path.chars().count()
+            },
+            path_lower: record.path.to_lowercase(),
+            timestamp: record.timestamp,
+            response_time: record.response_time,
+            status_idx: status_indices
+                .iter()
+                .position(|status| status == &record.status)
+                .map(|index| index as i32)
+                .unwrap_or(-1),
+            kw_check: eligible_paths.get(&record.path).copied().unwrap_or(true),
+            total_404: ip_404.get(&record.ip).copied().unwrap_or(0),
+            ip: record.ip,
+        })
+        .collect();
+    extract_features_with_window(inputs, static_keywords, symmetric_burst)
 }
 
 fn extract_features_with_window(
@@ -1283,6 +1391,14 @@ mod tests {
     }
 
     #[test]
+    fn url_and_content_checks_are_conservative() {
+        assert_eq!(validate_url("https://example.com/docs?q=script"), None);
+        assert_eq!(validate_url("/api/item\nX-Injected: yes"), Some("url_control_character"));
+        assert_eq!(validate_content("<script>example documentation</script>"), None);
+        assert_eq!(validate_content("before\0after"), Some("content_nul_byte"));
+    }
+
+    #[test]
     fn validate_headers_with_config_allows_empty_required() {
         let mut headers = HashMap::new();
         headers.insert(
@@ -1392,10 +1508,90 @@ mod tests {
     }
 
     #[test]
+    fn raw_training_batch_builds_counts_statuses_and_symmetric_bursts() {
+        let records = vec![
+            RawFeatureRecord {
+                ip: "203.0.113.1".into(),
+                path: "/a.php".into(),
+                timestamp: 0.0,
+                response_time: 7.0,
+                status: "404".into(),
+            },
+            RawFeatureRecord {
+                ip: "203.0.113.1".into(),
+                path: "/safe".into(),
+                timestamp: 10.0,
+                response_time: 8.0,
+                status: "200".into(),
+            },
+            RawFeatureRecord {
+                ip: "203.0.113.1".into(),
+                path: "/safe".into(),
+                timestamp: 21.0,
+                response_time: 9.0,
+                status: "200".into(),
+            },
+        ];
+        let output = extract_raw_features(
+            records,
+            vec![".php".into()],
+            &["200".into(), "404".into()],
+            &HashMap::new(),
+            None,
+            true,
+        );
+        assert_eq!(output.len(), 3);
+        assert_eq!(output[0].kw_hits, 1);
+        assert_eq!(output[0].status_idx, 1);
+        assert_eq!(output[0].total_404, 1);
+        assert_eq!(output[0].burst_count, 2);
+        assert_eq!(output[1].burst_count, 2);
+        assert_eq!(output[2].burst_count, 1);
+    }
+
+    #[test]
+    fn raw_python_batch_honors_path_eligibility_and_supplied_404_counts() {
+        let records = vec![RawFeatureRecord {
+            ip: "203.0.113.2".into(),
+            path: "/known.php".into(),
+            timestamp: 10.0,
+            response_time: 0.2,
+            status: "200".into(),
+        }];
+        let output = extract_raw_features(
+            records,
+            vec![".php".into()],
+            &["200".into(), "404".into()],
+            &HashMap::from([("/known.php".into(), false)]),
+            Some(&HashMap::from([("203.0.113.2".into(), 3)])),
+            false,
+        );
+        assert_eq!(output[0].kw_hits, 0);
+        assert_eq!(output[0].total_404, 3);
+        assert_eq!(output[0].burst_count, 1);
+    }
+
+    #[test]
     fn keyword_matcher_uses_literal_patterns_in_configured_order() {
         let matcher = KeywordMatcher::new(vec![".env".to_string(), "admin".to_string()]).unwrap();
         assert_eq!(matcher.first_match("/admin/.env"), Some(".env"));
         assert_eq!(matcher.first_match("/safe"), None);
+    }
+
+    #[test]
+    fn route_matcher_selects_deepest_prefix_and_first_duplicate() {
+        let matcher = RouteMatcher::new(vec![
+            "/".into(),
+            "/api/".into(),
+            "/api/admin/".into(),
+            "/api/".into(),
+        ]);
+        assert_eq!(matcher.match_index("/api/admin/users"), Some(2));
+        assert_eq!(matcher.match_index("/api/admin"), Some(2));
+        assert_eq!(matcher.match_index("/api/items"), Some(1));
+        assert_eq!(matcher.match_index("/apix"), Some(0));
+        assert_eq!(matcher.match_index("/other"), Some(0));
+        assert_eq!(RouteMatcher::new(vec!["/api/".into()]).match_index("/other"), None);
     }
 
     #[test]

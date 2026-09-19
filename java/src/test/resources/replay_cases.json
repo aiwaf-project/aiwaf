@@ -1,0 +1,44 @@
+[
+  {
+    "name": "trace_traversal_block",
+    "request": {
+      "ip": "10.0.0.1",
+      "method": "TRACE",
+      "path": "/wp-admin/../../etc/passwd",
+      "headers": {
+        "user-agent": "Mozilla/5.0 Chrome/120",
+        "accept": "text/html,application/xml"
+      },
+      "query": "",
+      "body": "",
+      "known_path": false,
+      "exempt_path": false
+    },
+    "expected_allow": false,
+    "expected_reasons": [
+      "method_not_allowlisted",
+      "suspicious_keywords"
+    ]
+  },
+  {
+    "name": "normal_get_allow",
+    "request": {
+      "ip": "10.0.0.2",
+      "method": "GET",
+      "path": "/home",
+      "headers": {
+        "user-agent": "Mozilla/5.0 Chrome/120",
+        "accept": "text/html,application/xml",
+        "accept-language": "en-US",
+        "accept-encoding": "gzip",
+        "connection": "keep-alive"
+      },
+      "query": "",
+      "body": "",
+      "known_path": true,
+      "exempt_path": false
+    },
+    "expected_allow": true,
+    "expected_reasons": []
+  }
+]

@@ -26,18 +26,13 @@ class PackagingRustOptionalTests(unittest.TestCase):
         self.assertIn('"aiwaf-rust>=0.2.1"', setup_py)
         self.assertNotIn('"maturin>=1.6,<2.0"', setup_py)
 
-    def test_docs_explain_rust_extra_install(self):
+    def test_readme_explains_rust_extra_install(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        installation = (ROOT / "INSTALLATION.md").read_text(encoding="utf-8")
 
         self.assertIn('pip install aiwaf', readme)
         self.assertIn('pip install "aiwaf[rust]"', readme)
         self.assertIn("aiwaf-rust", readme)
         self.assertNotIn("maturin develop -m Cargo.toml", readme)
-        self.assertIn('pip install aiwaf', installation)
-        self.assertIn('pip install "aiwaf[rust]"', installation)
-        self.assertIn("aiwaf-rust", installation)
-        self.assertNotIn("maturin develop -m Cargo.toml", installation)
 
 
 if __name__ == "__main__":

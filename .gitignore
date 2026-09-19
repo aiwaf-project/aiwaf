@@ -177,12 +177,6 @@ cython_debug/
 
 # End of https://www.toptal.com/developers/gitignore/api/django
 
-# Sandbox benchmark outputs (direct/protected)
-examples/sandbox/results_direct_*.json
-examples/sandbox/results_protected_*.json
-examples/sandbox/comparison_modes_*.json
-examples/sandbox/comparison_aggregate_*.json
-
 # JavaScript package runtime/build artifacts
 /node_modules/
 js/node_modules/
@@ -244,3 +238,25 @@ js/aiwaf.sqlite
 
 # Generated WebAssembly npm package
 /rust/crates/aiwaf_wasm/pkg/
+
+# Canonical package assets staged from the repository root during release builds
+/js/README.md
+/js/LICENSE
+/rust/README.md
+/rust/LICENSE
+
+# Java package build, tooling, and runtime artifacts
+/java/target/
+/java/.r-lib/
+/java/.vscode/
+/java/.idea/
+/java/.mvn/
+/java/.github/java-upgrade/
+/java/.github/modernize/
+/java/**/*.class
+/java/**/*.log
+/java/**/*.bin
+/java/**/*.tmp
+/java/**/*.swp
+/java/**/*~
+/java/pom.xml.versionsBackup

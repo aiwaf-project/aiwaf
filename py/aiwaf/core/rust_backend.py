@@ -25,6 +25,12 @@ def rust_isolation_forest_class():
     return getattr(aiwaf_rust, "IsolationForest", None)
 
 
+def rust_route_matcher_class():
+    if aiwaf_rust is None:
+        return None
+    return getattr(aiwaf_rust, "RouteMatcher", None)
+
+
 def is_rust_isolation_forest(obj) -> bool:
     if aiwaf_rust is None or obj is None:
         return False
@@ -96,6 +102,21 @@ def build_records(parsed, ip_404, path_exists_fn, path_exempt_fn, status_idx_lis
         return None
     try:
         return aiwaf_rust.build_records(parsed, ip_404, path_exists_fn, path_exempt_fn, status_idx_list)
+    except Exception:
+        return None
+
+
+def supports_raw_feature_extraction() -> bool:
+    return aiwaf_rust is not None and hasattr(aiwaf_rust, "extract_raw_features")
+
+
+def extract_raw_features(parsed, eligible_paths, ip_404, status_idx_list, static_keywords):
+    if not supports_raw_feature_extraction():
+        return None
+    try:
+        return aiwaf_rust.extract_raw_features(
+            parsed, eligible_paths, ip_404, [str(status) for status in status_idx_list], static_keywords
+        )
     except Exception:
         return None
 

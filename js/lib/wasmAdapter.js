@@ -31,11 +31,15 @@ async function loadWasmFromDisk() {
     AiwafIsolationForest: bg.IsolationForest,
     IsolationForest: bg.IsolationForest,
     KeywordMatcher: bg.KeywordMatcher,
+    RouteMatcher: bg.RouteMatcher,
     validate_headers: bg.validate_headers,
     validate_headers_with_config: bg.validate_headers_with_config,
+    validate_url: bg.validate_url,
+    validate_content: bg.validate_content,
     analyze_recent_behavior: bg.analyze_recent_behavior,
     extract_features: bg.extract_features,
     extract_training_features: bg.extract_training_features,
+    extract_raw_training_features: bg.extract_raw_training_features,
     extract_features_batch_with_state: bg.extract_features_batch_with_state,
     finalize_feature_state: bg.finalize_feature_state,
     build_records: bg.build_records,
@@ -395,6 +399,16 @@ async function extractWasmTrainingFeatures(records, staticKeywords = []) {
   }
 }
 
+async function extractWasmRawTrainingFeatures(records, staticKeywords = [], statusIndices = []) {
+  const mod = await loadWasm();
+  if (!mod || typeof mod.extract_raw_training_features !== 'function') return null;
+  try {
+    return mod.extract_raw_training_features(records || [], staticKeywords || [], statusIndices || []);
+  } catch (err) {
+    return null;
+  }
+}
+
 async function createKeywordMatcher(keywords = []) {
   const mod = await loadWasm();
   if (!mod || typeof mod.KeywordMatcher !== 'function') return null;
@@ -403,6 +417,22 @@ async function createKeywordMatcher(keywords = []) {
     return {
       firstMatch(path) {
         return matcher.first_match(path) || null;
+      }
+    };
+  } catch (err) {
+    return null;
+  }
+}
+
+async function createRouteMatcher(prefixes = []) {
+  const mod = await loadWasm();
+  if (!mod || typeof mod.RouteMatcher !== 'function') return null;
+  try {
+    const matcher = new mod.RouteMatcher(prefixes);
+    return {
+      matchIndex(path) {
+        const index = matcher.match_index(path);
+        return Number.isInteger(index) ? index : null;
       }
     };
   } catch (err) {
@@ -502,7 +532,9 @@ module.exports = {
   analyzeRecentBehavior,
   extractWasmFeatures,
   extractWasmTrainingFeatures,
+  extractWasmRawTrainingFeatures,
   createKeywordMatcher,
+  createRouteMatcher,
   extractWasmFeaturesBatchWithState,
   finalizeWasmFeatureState,
   buildWasmRecords,

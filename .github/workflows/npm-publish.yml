@@ -22,10 +22,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Use Node.js 24
+      - name: Use Node.js 22 LTS
         uses: actions/setup-node@v6
         with:
-          node-version: 24
+          node-version: 22
           package-manager-cache: false
 
       - name: Use current npm CLI
@@ -43,6 +43,25 @@ jobs:
           cp ../LICENSE LICENSE
           mkdir -p geolock
           cp ../py/aiwaf/core/geolock/ipinfo_lite.mmdb geolock/ipinfo_lite.mmdb
+
+      - name: Verify npm tarball contents
+        run: |
+          set -o pipefail
+          npm pack --dry-run --json | node -e '
+          const fs = require("fs");
+          const result = JSON.parse(fs.readFileSync(0, "utf8"));
+          const pack = Array.isArray(result) ? result[0] : result.aiwaf;
+          if (!pack || !Array.isArray(pack.files)) {
+            throw new Error(`npm pack returned no file list for aiwaf: ${JSON.stringify(result)}`);
+          }
+          const files = new Set(pack.files.map(file => file.path));
+          const required = ["LICENSE", "README.md", "geolock/ipinfo_lite.mmdb", "index.js", "package.json"];
+          const missing = required.filter(file => !files.has(file));
+          if (pack.name !== "aiwaf" || missing.length || files.has("INSTALLATION.md")) {
+            throw new Error(`Invalid npm package: ${pack.name}; missing ${missing.join(", ")}`);
+          }
+          console.log(`${pack.name}@${pack.version}: ${pack.files.length} files ready to stage`);
+          '
 
       - name: Stage package for npm approval
         run: npm stage publish --access public

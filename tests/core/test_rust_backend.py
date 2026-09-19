@@ -155,6 +155,20 @@ def test_build_records_returns_none_when_api_missing(monkeypatch):
     assert rust_backend.build_records([], {}, lambda path: False, lambda path: False, [200, 404]) is None
 
 
+def test_raw_feature_backend_passes_status_names_and_batch(monkeypatch):
+    captured = {}
+
+    def _extract(*args):
+        captured["args"] = args
+        return [{"ip": "203.0.113.1"}]
+
+    monkeypatch.setattr(rust_backend, "aiwaf_rust", SimpleNamespace(extract_raw_features=_extract))
+    parsed = [{"ip": "203.0.113.1", "path": "/probe"}]
+    result = rust_backend.extract_raw_features(parsed, {"/probe": True}, {"203.0.113.1": 1}, [200, 404], [".php"])
+    assert result == [{"ip": "203.0.113.1"}]
+    assert captured["args"] == (parsed, {"/probe": True}, {"203.0.113.1": 1}, ["200", "404"], [".php"])
+
+
 def test_rust_payload_from_records_returns_payload(monkeypatch):
     backend = SimpleNamespace(rust_payload_from_records=lambda records: [{"payload": "rust"}])
     monkeypatch.setattr(rust_backend, "aiwaf_rust", backend)

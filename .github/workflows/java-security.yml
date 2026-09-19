@@ -1,0 +1,86 @@
+name: Java tests and security
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "java/**"
+      - "py/aiwaf/core/geolock/ipinfo_lite.mmdb"
+      - "LICENSE"
+      - ".github/workflows/java-security.yml"
+      - ".github/workflows/java-publish.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "java/**"
+      - "py/aiwaf/core/geolock/ipinfo_lite.mmdb"
+      - "LICENSE"
+      - ".github/workflows/java-security.yml"
+      - ".github/workflows/java-publish.yml"
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-and-sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          cache-dependency-path: java/pom.xml
+      - name: Test
+        run: mvn -B -f java/pom.xml test
+      - name: Dependency vulnerability gate
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: >
+          mvn -B -f java/pom.xml org.owasp:dependency-check-maven:12.2.2:check
+          -DfailBuildOnCVSS=7
+          -DnvdApiKeyEnvironmentVariable=NVD_API_KEY
+      - name: Generate CycloneDX SBOM
+        run: mvn -B -f java/pom.xml org.cyclonedx:cyclonedx-maven-plugin:2.9.2:makeAggregateBom
+      - uses: actions/upload-artifact@v4
+        with:
+          name: java-cyclonedx-sbom
+          path: |
+            java/target/bom.json
+            java/target/bom.xml
+          if-no-files-found: error
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks
+        uses: docker://ghcr.io/gitleaks/gitleaks:v8.30.1
+        with:
+          args: detect --source=/github/workspace --redact --verbose
+
+  codeql:
+    permissions:
+      contents: read
+      security-events: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: java-kotlin
+          queries: security-extended
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          cache-dependency-path: java/pom.xml
+      - run: mvn -B -f java/pom.xml -DskipTests package
+      - uses: github/codeql-action/analyze@v4

@@ -1,4 +1,5 @@
 const createExpressMiddleware = require('./wafMiddleware');
+const { version } = require('../package.json');
 
 function createExpressLikeResponse(h, rawRes) {
   const res = {
@@ -45,7 +46,7 @@ function createExpressLikeResponse(h, rawRes) {
 
 module.exports = {
   name: 'aiwaf',
-  version: '1.0.0',
+  version,
   register: async (server, opts = {}) => {
     const middleware = createExpressMiddleware(opts);
 

@@ -3,9 +3,11 @@ use aiwaf_core::{
     BehaviorAnalysis, BuiltFeatureRecord, Contamination, FeatureBatchResult, FeatureRecordInput,
     FeatureRecordOutput, FeatureState, IsolationForest as CoreForest, IsolationForestState,
     IsolationTreeState, KeywordMatcher as CoreKeywordMatcher, MaxFeatures, MaxSamples,
-    ParsedFeatureRecord, RecentEntryInput, analyze_recent_behavior as core_analyze_recent_behavior,
-    build_records as core_build_records, extract_features as core_extract_features,
+    ParsedFeatureRecord, RawFeatureRecord, RecentEntryInput, RouteMatcher as CoreRouteMatcher,
+    analyze_recent_behavior as core_analyze_recent_behavior, build_records as core_build_records,
+    extract_features as core_extract_features,
     extract_features_batch_with_state as core_extract_features_batch_with_state,
+    extract_raw_features as core_extract_raw_features,
     extract_training_features as core_extract_training_features,
     finalize_feature_state as core_finalize_feature_state,
     rust_payload_from_records as core_rust_payload_from_records,
@@ -35,6 +37,25 @@ impl KeywordMatcher {
 
     fn first_match(&self, path: &str) -> Option<String> {
         self.inner.first_match(path).map(str::to_string)
+    }
+}
+
+#[pyclass(name = "RouteMatcher")]
+struct RouteMatcher {
+    inner: CoreRouteMatcher,
+}
+
+#[pymethods]
+impl RouteMatcher {
+    #[new]
+    fn new(prefixes: Vec<String>) -> Self {
+        Self {
+            inner: CoreRouteMatcher::new(prefixes),
+        }
+    }
+
+    fn match_index(&self, path: &str) -> Option<usize> {
+        self.inner.match_index(path)
     }
 }
 
@@ -97,6 +118,25 @@ impl<'py> FromPyObject<'py> for PyFeatureRecordInput {
             status_idx: get_required("status_idx")?.extract()?,
             kw_check: get_required("kw_check")?.extract()?,
             total_404: get_required("total_404")?.extract()?,
+        }))
+    }
+}
+
+struct PyRawFeatureRecord(RawFeatureRecord);
+
+impl<'py> FromPyObject<'py> for PyRawFeatureRecord {
+    fn extract(ob: &'py PyAny) -> PyResult<Self> {
+        let dict: &PyDict = ob.downcast()?;
+        let get_required = |key: &str| -> PyResult<&PyAny> {
+            dict.get_item(key)?
+                .ok_or_else(|| PyErr::new::<PyKeyError, _>(key.to_string()))
+        };
+        Ok(Self(RawFeatureRecord {
+            ip: get_required("ip")?.extract()?,
+            path: get_required("path")?.extract()?,
+            timestamp: py_timestamp_epoch(get_required("timestamp")?)?,
+            response_time: get_required("response_time")?.extract()?,
+            status: get_required("status")?.str()?.to_str()?.to_string(),
         }))
     }
 }
@@ -308,7 +348,8 @@ fn extract_features<'py>(
     static_keywords: Vec<String>,
 ) -> PyResult<Vec<Py<PyDict>>> {
     let core_records: Vec<FeatureRecordInput> = records.into_iter().map(|r| r.0).collect();
-    let output: Vec<FeatureRecordOutput> = core_extract_features(core_records, static_keywords);
+    let output: Vec<FeatureRecordOutput> =
+        py.allow_threads(move || core_extract_features(core_records, static_keywords));
     output
         .into_iter()
         .map(|rec| feature_output_to_pydict(py, &rec))
@@ -322,9 +363,35 @@ fn extract_training_features<'py>(
     static_keywords: Vec<String>,
 ) -> PyResult<Vec<Py<PyDict>>> {
     let core_records: Vec<FeatureRecordInput> = records.into_iter().map(|r| r.0).collect();
-    core_extract_training_features(core_records, static_keywords)
+    py.allow_threads(move || core_extract_training_features(core_records, static_keywords))
         .into_iter()
         .map(|rec| feature_output_to_pydict(py, &rec))
+        .collect()
+}
+
+#[pyfunction]
+fn extract_raw_features<'py>(
+    py: Python<'py>,
+    records: Vec<PyRawFeatureRecord>,
+    eligible_paths: HashMap<String, bool>,
+    ip_404: HashMap<String, i32>,
+    status_indices: Vec<String>,
+    static_keywords: Vec<String>,
+) -> PyResult<Vec<Py<PyDict>>> {
+    let records = records.into_iter().map(|record| record.0).collect();
+    let output = py.allow_threads(move || {
+        core_extract_raw_features(
+            records,
+            static_keywords,
+            &status_indices,
+            &eligible_paths,
+            Some(&ip_404),
+            false,
+        )
+    });
+    output
+        .into_iter()
+        .map(|record| feature_output_to_pydict(py, &record))
         .collect()
 }
 
@@ -351,8 +418,9 @@ fn extract_features_batch_with_state<'py>(
     };
 
     let core_records: Vec<FeatureRecordInput> = records.into_iter().map(|r| r.0).collect();
-    let result: FeatureBatchResult =
-        core_extract_features_batch_with_state(core_records, static_keywords, state_map);
+    let result: FeatureBatchResult = py.allow_threads(move || {
+        core_extract_features_batch_with_state(core_records, static_keywords, state_map)
+    });
 
     let features: Vec<Py<PyDict>> = result
         .features
@@ -461,12 +529,12 @@ impl IsolationForest {
         })
     }
 
-    fn fit(&mut self, data: Vec<Vec<f64>>) {
-        self.inner.fit(data);
+    fn fit(&mut self, py: Python<'_>, data: Vec<Vec<f64>>) {
+        py.allow_threads(|| self.inner.fit(data));
     }
 
-    fn retrain(&mut self, data: Vec<Vec<f64>>) {
-        self.inner.retrain(data);
+    fn retrain(&mut self, py: Python<'_>, data: Vec<Vec<f64>>) {
+        py.allow_threads(|| self.inner.retrain(data));
     }
 
     fn anomaly_score(&self, point: Vec<f64>) -> f64 {
@@ -478,16 +546,16 @@ impl IsolationForest {
         self.inner.is_anomaly(&point, thresh)
     }
 
-    fn score_samples(&self, data: Vec<Vec<f64>>) -> Vec<f64> {
-        self.inner.score_samples(&data)
+    fn score_samples(&self, py: Python<'_>, data: Vec<Vec<f64>>) -> Vec<f64> {
+        py.allow_threads(|| self.inner.score_samples(&data))
     }
 
-    fn decision_function(&self, data: Vec<Vec<f64>>) -> Vec<f64> {
-        self.inner.decision_function(&data)
+    fn decision_function(&self, py: Python<'_>, data: Vec<Vec<f64>>) -> Vec<f64> {
+        py.allow_threads(|| self.inner.decision_function(&data))
     }
 
-    fn predict(&self, data: Vec<Vec<f64>>) -> Vec<i32> {
-        self.inner.predict(&data)
+    fn predict(&self, py: Python<'_>, data: Vec<Vec<f64>>) -> Vec<i32> {
+        py.allow_threads(|| self.inner.predict(&data))
     }
 
     fn to_json<'py>(&self, py: Python<'py>) -> PyResult<Py<PyDict>> {
@@ -859,10 +927,12 @@ fn aiwaf_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(python_features_batched, m)?)?;
     m.add_function(wrap_pyfunction!(extract_features, m)?)?;
     m.add_function(wrap_pyfunction!(extract_training_features, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_raw_features, m)?)?;
     m.add_function(wrap_pyfunction!(extract_features_batch_with_state, m)?)?;
     m.add_function(wrap_pyfunction!(finalize_feature_state, m)?)?;
     m.add_function(wrap_pyfunction!(analyze_recent_behavior, m)?)?;
     m.add_class::<IsolationForest>()?;
     m.add_class::<KeywordMatcher>()?;
+    m.add_class::<RouteMatcher>()?;
     Ok(())
 }

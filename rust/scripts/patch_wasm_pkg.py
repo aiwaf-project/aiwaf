@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Patch wasm-pack pkg/package.json and copy README.md for npm."""
+"""Patch wasm-pack output and stage the canonical root package assets."""
 from __future__ import annotations
 
 import json
@@ -23,7 +23,7 @@ KEYWORDS = [
 
 def main(argv: list[str]) -> int:
     pkg_dir = Path("crates/aiwaf_wasm/pkg")
-    src_readme = Path("crates/aiwaf_wasm/README.md")
+    src_readme = Path("../README.md")
     pkg_json = pkg_dir / "package.json"
 
     if not pkg_json.exists():
@@ -44,8 +44,10 @@ def main(argv: list[str]) -> int:
 
     pkg_json.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
-    if src_readme.exists():
-        shutil.copyfile(src_readme, pkg_dir / "README.md")
+    if not src_readme.is_file():
+        print(f"missing canonical README: {src_readme}", file=sys.stderr)
+        return 1
+    shutil.copyfile(src_readme, pkg_dir / "README.md")
 
     return 0
 

@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "aiwaf-rust"
 version = "0.2.1"
 description = "Rust-powered WAF heuristics exposed to Python via PyO3"
-readme = "README_PYPI.md"
+readme = "README.md"
 requires-python = ">=3.8"
 license = { file = "LICENSE" }
 authors = [
@@ -26,4 +26,7 @@ Source = "https://github.com/aiwaf-project/aiwaf/tree/main/rust"
 [tool.maturin]
 manifest-path = "Cargo.toml"
 module-name = "aiwaf_rust"
-include = [{ path = "LICENSE", format = "sdist" }]
+include = [
+  { path = "README.md", format = "sdist" },
+  { path = "LICENSE", format = "sdist" }
+]

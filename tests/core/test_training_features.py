@@ -4,6 +4,40 @@ from types import SimpleNamespace
 from aiwaf.core import training_features
 
 
+def test_raw_feature_batch_checks_each_unique_path_once(monkeypatch):
+    calls = {"known": [], "exempt": [], "rust": None}
+
+    def _extract(parsed, eligible, ip_404, statuses, keywords):
+        calls["rust"] = (parsed, eligible, ip_404, statuses, keywords)
+        return [{"ip": "203.0.113.1"}] * len(parsed)
+
+    monkeypatch.setattr(
+        training_features,
+        "rust_backend",
+        SimpleNamespace(
+            supports_raw_feature_extraction=lambda: True,
+            extract_raw_features=_extract,
+        ),
+    )
+    parsed = [
+        {"ip": "203.0.113.1", "path": "/known"},
+        {"ip": "203.0.113.1", "path": "/known"},
+        {"ip": "203.0.113.1", "path": "/probe"},
+    ]
+    result = training_features.extract_raw_features(
+        parsed,
+        {"203.0.113.1": 2},
+        lambda path: calls["known"].append(path) or path == "/known",
+        lambda path: calls["exempt"].append(path) or False,
+        [200, 404],
+        [".php"],
+    )
+    assert len(result) == 3
+    assert calls["known"] == ["/known", "/probe"]
+    assert calls["exempt"] == ["/known", "/probe"]
+    assert calls["rust"][1] == {"/known": False, "/probe": True}
+
+
 def test_build_records_uses_rust_helper_when_available(monkeypatch):
     calls = {}
 

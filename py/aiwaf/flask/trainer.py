@@ -50,6 +50,7 @@ from aiwaf.core.training import extract_rust_features_parallel as core_extract_r
 from aiwaf.core.training_logic import is_malicious_context as core_is_malicious_context
 from aiwaf.core.training_features import (
     build_records as core_build_records,
+    extract_raw_features as core_extract_raw_features,
     rust_payload_from_records as core_rust_payload_from_records,
     python_features_batched as core_python_features_batched,
 )
@@ -383,10 +384,16 @@ class FlaskAITrainer:
 
     def _generate_feature_dicts(self, parsed, ip_404, ip_times):
         """Generate model feature dictionaries using Rust backends or Python fallback."""
+        use_rust = rust_available()
+        if parsed and use_rust:
+            raw_features = core_extract_raw_features(
+                parsed, ip_404, self.path_exists_in_flask, is_path_exempt, STATUS_IDX, STATIC_KW
+            )
+            if raw_features is not None and len(raw_features) == len(parsed):
+                return raw_features
         feature_dicts = []
         records = core_build_records(parsed, ip_404, self.path_exists_in_flask, is_path_exempt, STATUS_IDX)
 
-        use_rust = rust_available()
         rust_streaming_enabled = use_rust and rust_supports_chunked_features()
         chunk_size_cfg = self.get_config(
             "AIWAF_RUST_FEATURE_CHUNK_SIZE",

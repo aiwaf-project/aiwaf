@@ -137,7 +137,7 @@ def main():
         print("\n DJANGO TEST INFRASTRUCTURE IS READY!")
         print("\n You can now run:")
         print("   python manage.py test")
-        print("   python run_tests.py")
+        print("   python aiwaf_test.py --python-only")
         print("\n Individual test files:")
         print("   python manage.py test tests.test_basic_import_django")
         print("   python manage.py test tests.test_header_validation_django")

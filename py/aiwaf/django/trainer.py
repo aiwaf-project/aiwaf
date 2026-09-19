@@ -38,6 +38,7 @@ from concurrent.futures import ThreadPoolExecutor
 from ..core.training import iter_batches as core_iter_batches, extract_rust_features_parallel as core_extract_rust_features_parallel
 from ..core.training_features import (
     build_records as core_build_records,
+    extract_raw_features as core_extract_raw_features,
     rust_payload_from_records as core_rust_payload_from_records,
     python_feature_from_record as core_python_feature_from_record,
 )
@@ -433,6 +434,12 @@ def _python_features_batched(records, ip_times, static_kw, batch_size: int, para
 
 
 def _generate_feature_dicts(parsed, ip_404, ip_times):
+    if parsed and _should_use_rust_features():
+        raw_features = core_extract_raw_features(
+            parsed, ip_404, path_exists_in_django, is_exempt_path, STATUS_IDX, STATIC_KW
+        )
+        if raw_features is not None and len(raw_features) == len(parsed):
+            return raw_features
     records = core_build_records(parsed, ip_404, path_exists_in_django, is_exempt_path, STATUS_IDX)
 
     if records and _should_use_rust_features():

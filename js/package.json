@@ -12,7 +12,6 @@
         "utils/",
         "train.js",
         "README.md",
-        "INSTALLATION.md",
         "LICENSE"
     ],
     "bin": {

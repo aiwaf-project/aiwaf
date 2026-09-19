@@ -1,13 +1,15 @@
 # Contributing to AIWAF
 
-AIWAF is a monorepo containing independently published Python and JavaScript packages.
+AIWAF is a monorepo containing independently published Python, JavaScript, Rust, WebAssembly, and Java packages.
 
 ## Repository layout
 
 - `py/aiwaf/`: Python package source (imported as `aiwaf`)
-- `js/`: JavaScript package source (published as `aiwaf-js`)
+- `js/`: JavaScript package source (published as `aiwaf`)
+- `rust/`: Rust accelerator and WebAssembly source
+- `java/`: Java 17 package source
 - `tests/`: Python tests
-- `examples/`: Python examples and sandbox tooling
+- `examples/`: focused Python examples
 - `.github/workflows/`: package-specific CI and publishing
 
 ## Python development
@@ -72,6 +74,9 @@ From the repository root, the equivalent commands are `python aiwaf_test.py --js
 ## Releases
 
 - Push a `python-v*` tag to build and publish `aiwaf` to PyPI.
-- Push a `js-v*` tag to test and publish `aiwaf-js` to npm.
+- Push a `js-v*` tag to test and publish `aiwaf` to npm.
+- Push a `rust-v*` tag to build and publish `aiwaf-rust` to PyPI.
+- Push a `wasm-v*` tag to build and stage `aiwaf-wasm` on npm.
+- Push a `java-v*` tag to test and publish `aiwaf-java` to Maven Central.
 
-The workflows can also be run manually. PyPI uses trusted publishing; npm requires the `NPM_TOKEN` repository secret.
+The workflows can also be run manually. PyPI and npm use OIDC trusted publishing; the Java workflow uses the Maven Central and GPG secrets configured in its protected environment.

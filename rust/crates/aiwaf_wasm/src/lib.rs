@@ -1,14 +1,17 @@
 use aiwaf_core::{
     BehaviorAnalysis, BuiltFeatureRecord, Contamination, FeatureBatchResult, FeatureRecordInput,
     FeatureRecordOutput, FeatureState, IsolationForest as CoreForest, IsolationForestState,
-    KeywordMatcher as CoreKeywordMatcher, MaxFeatures, MaxSamples, ParsedFeatureRecord,
+    KeywordMatcher as CoreKeywordMatcher, MaxFeatures, MaxSamples, ParsedFeatureRecord, RawFeatureRecord,
+    RouteMatcher as CoreRouteMatcher,
     RecentEntryInput, analyze_recent_behavior as core_analyze_recent_behavior,
     build_records as core_build_records, extract_features as core_extract_features,
     extract_features_batch_with_state as core_extract_features_batch_with_state,
+    extract_raw_features as core_extract_raw_features,
     extract_training_features as core_extract_training_features,
     finalize_feature_state as core_finalize_feature_state,
     rust_payload_from_records as core_rust_payload_from_records,
     validate_headers_with_config as core_validate_headers_with_config,
+    validate_url as core_validate_url, validate_content as core_validate_content,
 };
 use js_sys::{Array, Function, Map};
 use serde_wasm_bindgen::{from_value, to_value};
@@ -35,6 +38,26 @@ impl KeywordMatcher {
 
     pub fn first_match(&self, path: &str) -> Option<String> {
         self.inner.first_match(path).map(str::to_string)
+    }
+}
+
+#[wasm_bindgen]
+pub struct RouteMatcher {
+    inner: CoreRouteMatcher,
+}
+
+#[wasm_bindgen]
+impl RouteMatcher {
+    #[wasm_bindgen(constructor)]
+    pub fn new(prefixes: JsValue) -> Result<RouteMatcher, JsValue> {
+        let prefixes: Vec<String> = from_value(prefixes)?;
+        Ok(Self {
+            inner: CoreRouteMatcher::new(prefixes),
+        })
+    }
+
+    pub fn match_index(&self, path: &str) -> Option<u32> {
+        self.inner.match_index(path).map(|index| index as u32)
     }
 }
 
@@ -126,6 +149,16 @@ pub fn validate_headers_with_config(
         &map, required, min_score,
     ))
     .map_err(|e| e.into())
+}
+
+#[wasm_bindgen]
+pub fn validate_url(url: &str) -> Result<JsValue, JsValue> {
+    to_value(&core_validate_url(url)).map_err(|error| error.into())
+}
+
+#[wasm_bindgen]
+pub fn validate_content(content: &str) -> Result<JsValue, JsValue> {
+    to_value(&core_validate_content(content)).map_err(|error| error.into())
 }
 
 #[wasm_bindgen]
@@ -237,6 +270,58 @@ pub fn extract_training_features(
     let records: Vec<FeatureRecordInput> = from_value(records)?;
     let keywords: Vec<String> = from_value(static_keywords)?;
     to_value(&core_extract_training_features(records, keywords)).map_err(|e| e.into())
+}
+
+#[wasm_bindgen]
+pub fn extract_raw_training_features(
+    records: JsValue,
+    static_keywords: JsValue,
+    status_indices: JsValue,
+) -> Result<JsValue, JsValue> {
+    let rows = Array::from(&records);
+    let mut parsed = Vec::with_capacity(rows.length() as usize);
+    for row in rows.iter() {
+        let obj = row
+            .dyn_into::<js_sys::Object>()
+            .map_err(|_| JsValue::from_str("training records must be objects"))?;
+        let timestamp = get_value(&obj, "timestamp")
+            .ok_or_else(|| JsValue::from_str("timestamp is required"))?;
+        let timestamp = js_sys::Date::new(&timestamp).get_time() / 1000.0;
+        if !timestamp.is_finite() {
+            return Err(JsValue::from_str("timestamp must be a valid date"));
+        }
+        let response_time = match get_value(&obj, "responseTime") {
+            Some(value) => js_sys::Number::from(value).value_of(),
+            None => get_f64_required(&obj, "response_time")?,
+        };
+        if !response_time.is_finite() {
+            return Err(JsValue::from_str("responseTime must be finite"));
+        }
+        let status = get_value(&obj, "status")
+            .ok_or_else(|| JsValue::from_str("status is required"))?;
+        let status = status
+            .as_string()
+            .or_else(|| status.as_f64().map(|value| value.to_string()))
+            .ok_or_else(|| JsValue::from_str("status must be a string or number"))?;
+        parsed.push(RawFeatureRecord {
+            ip: get_string_required(&obj, "ip")?,
+            path: get_string_required(&obj, "path")?,
+            timestamp,
+            response_time,
+            status,
+        });
+    }
+    let keywords: Vec<String> = from_value(static_keywords)?;
+    let statuses: Vec<String> = from_value(status_indices)?;
+    to_value(&core_extract_raw_features(
+        parsed,
+        keywords,
+        &statuses,
+        &HashMap::new(),
+        None,
+        true,
+    ))
+    .map_err(|error| error.into())
 }
 
 #[wasm_bindgen]

@@ -1,7 +1,8 @@
 use aiwaf_wasm::{
-    IsolationForest, analyze_recent_behavior, build_records, extract_features,
-    extract_features_batch_with_state, finalize_feature_state, python_feature_from_record,
-    python_features_batched, rust_payload_from_records, validate_headers,
+    IsolationForest, RouteMatcher, analyze_recent_behavior, build_records, extract_features,
+    extract_features_batch_with_state, extract_raw_training_features, finalize_feature_state,
+    python_feature_from_record, python_features_batched, rust_payload_from_records,
+    validate_content, validate_headers, validate_url,
 };
 use js_sys::Array;
 use serde_wasm_bindgen::{from_value, to_value};
@@ -23,6 +24,48 @@ fn test_validate_headers() {
     let reason = validate_headers(headers).unwrap();
     let opt: Option<String> = from_value(reason).unwrap();
     assert!(opt.is_none());
+}
+
+#[wasm_bindgen_test]
+fn test_url_and_content_validation_exports() {
+    let good_url: Option<String> = from_value(validate_url("/docs?q=script").unwrap()).unwrap();
+    let bad_url: Option<String> = from_value(validate_url("/docs\nInjected").unwrap()).unwrap();
+    let good_content: Option<String> =
+        from_value(validate_content("<script>example</script>").unwrap()).unwrap();
+    let bad_content: Option<String> = from_value(validate_content("before\0after").unwrap()).unwrap();
+    assert_eq!(good_url, None);
+    assert_eq!(bad_url.as_deref(), Some("url_control_character"));
+    assert_eq!(good_content, None);
+    assert_eq!(bad_content.as_deref(), Some("content_nul_byte"));
+}
+
+#[wasm_bindgen_test]
+fn test_raw_training_features_accepts_js_style_rows() {
+    let rows = to_value(&serde_json::json!([
+        {"ip":"203.0.113.1", "path":"/a.php", "timestamp":0, "responseTime":7, "status":"404"},
+        {"ip":"203.0.113.1", "path":"/safe", "timestamp":10000, "responseTime":8, "status":"200"}
+    ]))
+    .unwrap();
+    let output = extract_raw_training_features(
+        rows,
+        to_value(&vec![".php"]).unwrap(),
+        to_value(&vec!["200", "404"]).unwrap(),
+    )
+    .unwrap();
+    let features: Vec<aiwaf_core::FeatureRecordOutput> = from_value(output).unwrap();
+    assert_eq!(features.len(), 2);
+    assert_eq!(features[0].kw_hits, 1);
+    assert_eq!(features[0].status_idx, 1);
+    assert_eq!(features[0].burst_count, 2);
+    assert_eq!(features[0].total_404, 1);
+}
+
+#[wasm_bindgen_test]
+fn test_route_matcher_isolated_api() {
+    let matcher = RouteMatcher::new(to_value(&vec!["/api/", "/api/admin/"]).unwrap()).unwrap();
+    assert_eq!(matcher.match_index("/api/admin/users"), Some(1));
+    assert_eq!(matcher.match_index("/api/items"), Some(0));
+    assert_eq!(matcher.match_index("/other"), None);
 }
 
 #[wasm_bindgen_test]

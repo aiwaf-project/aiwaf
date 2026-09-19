@@ -9,6 +9,27 @@ from concurrent.futures import ThreadPoolExecutor
 from . import rust_backend
 
 
+def extract_raw_features(parsed, ip_404, path_exists_fn, path_exempt_fn, status_idx_list, static_kw):
+    """Prepare only unique path eligibility, then let Rust build and score the batch."""
+    if not parsed or not rust_backend.supports_raw_feature_extraction():
+        return None
+    eligible_paths = {}
+    for record in parsed:
+        path = record["path"]
+        if path in eligible_paths:
+            continue
+        try:
+            known_path = bool(path_exists_fn(path))
+        except Exception:
+            known_path = False
+        try:
+            exempt_path = bool(path_exempt_fn(path))
+        except Exception:
+            exempt_path = False
+        eligible_paths[path] = not known_path and not exempt_path
+    return rust_backend.extract_raw_features(parsed, eligible_paths, ip_404, status_idx_list, static_kw)
+
+
 def build_records(parsed, ip_404, path_exists_fn, path_exempt_fn, status_idx_list):
     rust_records = rust_backend.build_records(parsed, ip_404, path_exists_fn, path_exempt_fn, status_idx_list)
     if rust_records is not None:

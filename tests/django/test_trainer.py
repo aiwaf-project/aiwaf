@@ -141,11 +141,26 @@ class TrainerFunctionsTestCase(AIWAFTestCase):
              patch('aiwaf.django.trainer.is_exempt_path', return_value=False), \
              patch('aiwaf.django.trainer.rust_available', return_value=True), \
              patch('aiwaf.django.trainer.rust_supports_chunked_features', return_value=False), \
+             patch('aiwaf.django.trainer.core_extract_raw_features', return_value=None), \
              patch('aiwaf.django.trainer.rust_extract_features', return_value=[{"ip": "1.1.1.1"}]) as mock_rust:
             result = self.trainer_module._generate_feature_dicts(parsed, ip_404, ip_times)
 
         self.assertEqual(result, [{"ip": "1.1.1.1"}])
         mock_rust.assert_called_once()
+
+    @override_settings(AIWAF_USE_RUST=True)
+    def test_generate_feature_dicts_prefers_raw_rust_batch(self):
+        parsed = [{
+            "ip": "203.0.113.1", "path": "/probe", "status": "404",
+            "timestamp": datetime(2025, 1, 1), "response_time": 0.1,
+        }]
+        expected = [{"ip": "203.0.113.1", "kw_hits": 1}]
+        with patch("aiwaf.django.trainer._should_use_rust_features", return_value=True), \
+             patch("aiwaf.django.trainer.core_extract_raw_features", return_value=expected) as raw, \
+             patch("aiwaf.django.trainer.core_build_records", side_effect=AssertionError("old path used")):
+            result = self.trainer_module._generate_feature_dicts(parsed, {"203.0.113.1": 1}, {})
+        self.assertEqual(result, expected)
+        raw.assert_called_once()
 
     @override_settings(
         AIWAF_USE_RUST=True,
@@ -279,6 +294,7 @@ class TrainerFunctionsTestCase(AIWAFTestCase):
              patch("aiwaf.django.trainer.is_exempt_path", return_value=False), \
              patch("aiwaf.django.trainer.rust_available", return_value=True), \
              patch("aiwaf.django.trainer.rust_supports_chunked_features", return_value=True), \
+             patch("aiwaf.django.trainer.core_extract_raw_features", return_value=None), \
              patch("aiwaf.django.trainer.rust_extract_features_batch", side_effect=[([{"ip": "1.1.1.1"}], "s1"), ([{"ip": "2.2.2.2"}], "s2")]) as mock_batch, \
              patch("aiwaf.django.trainer.rust_finalize_feature_state", return_value=[]) as mock_finalize, \
              patch("aiwaf.django.trainer.rust_extract_features") as mock_single:

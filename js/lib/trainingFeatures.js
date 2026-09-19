@@ -1,4 +1,12 @@
-const { extractWasmTrainingFeatures } = require('./wasmAdapter');
+const { extractWasmTrainingFeatures, extractWasmRawTrainingFeatures } = require('./wasmAdapter');
+
+function modelFeaturesFromRust(features, expectedLength) {
+  if (!Array.isArray(features) || features.length !== expectedLength
+      || !features.every(rec => rec && Number.isFinite(Number(rec.burst_count)))) return null;
+  return features.map(rec => [
+    rec.path_len, rec.kw_hits, rec.status_idx, rec.resp_time, rec.burst_count, rec.total_404
+  ]);
+}
 
 function lowerBound(values, target) {
   let left = 0;
@@ -25,6 +33,15 @@ function upperBound(values, target) {
 async function calculateTrainingFeatures(parsedRequests, staticKeywords, statusIndices) {
   const keywords = staticKeywords || [];
   const statuses = statusIndices || [];
+  // Direct JS-object parsing currently costs more than the prepared-record path
+  // on typical Node workloads; keep it opt-in until workload benchmarks improve.
+  if (process.env.AIWAF_EXPERIMENTAL_WASM_RAW_TRAINING === '1'
+      && parsedRequests.length && keywords.every(kw => kw === String(kw).toLowerCase())
+      && typeof extractWasmRawTrainingFeatures === 'function') {
+    const rawFeatures = await extractWasmRawTrainingFeatures(parsedRequests, keywords, statuses);
+    const mapped = modelFeaturesFromRust(rawFeatures, parsedRequests.length);
+    if (mapped) return mapped;
+  }
   const ip404Counts = new Map();
   const timestampsByIp = new Map();
 
@@ -62,12 +79,8 @@ async function calculateTrainingFeatures(parsedRequests, staticKeywords, statusI
     && keywords.every(kw => kw === String(kw).toLowerCase());
   if (canUseRust && records.length > 0) {
     const rustFeatures = await extractWasmTrainingFeatures(records, keywords);
-    if (Array.isArray(rustFeatures) && rustFeatures.length === records.length
-        && rustFeatures.every(rec => rec && Number.isFinite(Number(rec.burst_count)))) {
-      return rustFeatures.map(rec => [
-        rec.path_len, rec.kw_hits, rec.status_idx, rec.resp_time, rec.burst_count, rec.total_404
-      ]);
-    }
+    const mapped = modelFeaturesFromRust(rustFeatures, records.length);
+    if (mapped) return mapped;
   }
 
   return parsedRequests.map((req, index) => {

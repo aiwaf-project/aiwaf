@@ -49,6 +49,7 @@ def test_trainer_uses_chunked_rust_extraction(monkeypatch):
     monkeypatch.setattr(trainer.BlacklistManager, "block", lambda ip, reason: None)
     monkeypatch.setattr(trainer, "rust_available", lambda: True)
     monkeypatch.setattr(trainer, "rust_supports_chunked_features", lambda: True)
+    monkeypatch.setattr(trainer, "core_extract_raw_features", lambda *args: None)
 
     calls = {"batch": [], "finalize": [], "plain_extract": 0}
 
@@ -74,6 +75,24 @@ def test_trainer_uses_chunked_rust_extraction(monkeypatch):
     assert calls["plain_extract"] == 0
 
 
+def test_generate_feature_dicts_prefers_raw_rust_batch(monkeypatch):
+    app = _build_app()
+    trainer_instance = trainer.FlaskAITrainer(app)
+    expected = [{"ip": "203.0.113.1", "kw_hits": 1}]
+    monkeypatch.setattr(trainer, "rust_available", lambda: True)
+    monkeypatch.setattr(trainer, "core_extract_raw_features", lambda *args: expected)
+
+    def _unexpected_old_path(*args):
+        raise AssertionError("old record preparation should be skipped")
+
+    monkeypatch.setattr(trainer, "core_build_records", _unexpected_old_path)
+    with app.app_context():
+        result = trainer_instance._generate_feature_dicts(
+            [_fake_record(0)], {"10.0.0.1": 1}, {}
+        )
+    assert result == expected
+
+
 def test_trainer_falls_back_to_python_features_when_chunked_batch_fails(monkeypatch):
     app = _build_app()
     t = trainer.FlaskAITrainer(app)
@@ -88,6 +107,7 @@ def test_trainer_falls_back_to_python_features_when_chunked_batch_fails(monkeypa
     monkeypatch.setattr(trainer.BlacklistManager, "block", lambda ip, reason: None)
     monkeypatch.setattr(trainer, "rust_available", lambda: True)
     monkeypatch.setattr(trainer, "rust_supports_chunked_features", lambda: True)
+    monkeypatch.setattr(trainer, "core_extract_raw_features", lambda *args: None)
     monkeypatch.setattr(
         trainer,
         "rust_extract_features_batch",
