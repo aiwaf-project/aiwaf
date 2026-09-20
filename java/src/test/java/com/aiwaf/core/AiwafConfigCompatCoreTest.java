@@ -21,7 +21,15 @@ class AiwafConfigCompatCoreTest {
         cfg.put("ip_keyword_block", Map.of("enabled", true, "malicious_keywords", List.of(".env", ".git", "phpmyadmin", "xmlrpc")));
         cfg.put("geo_block", Map.of("enabled", false, "block_countries", List.of("CN", "RU")));
         cfg.put("ai_anomaly", Map.of("enabled", false));
-        cfg.put("uuid_tamper", Map.of("enabled", true));
+        cfg.put("uuid_tamper", Map.of(
+                "enabled", true,
+                "window_seconds", 90,
+                "block_threshold", 7,
+                "malformed_weight", 6,
+                "not_found_weight", 2,
+                "success_decay", 3,
+                "parameter_names", List.of("uuid", "account_uuid")
+        ));
         cfg.put("exemptions", Map.of("private_ips_exempted", true, "auto_exempt_patterns", List.of("127.0.0.1")));
         cfg.put("legitimate_route_hints", List.of("/payments/invoices", "AdminDashboard"));
         cfg.put("path_rules", List.of(
@@ -39,6 +47,12 @@ class AiwafConfigCompatCoreTest {
         assertFalse(out.geoBlockEnabled);
         assertFalse(out.aiEnabled);
         assertTrue(out.uuidTamperEnabled);
+        assertEquals(90, out.uuidScoreWindowSeconds);
+        assertEquals(7, out.uuidScoreBlockThreshold);
+        assertEquals(6, out.uuidMalformedWeight);
+        assertEquals(2, out.uuidNotFoundWeight);
+        assertEquals(3, out.uuidSuccessDecay);
+        assertTrue(out.uuidParameterNames.contains("account_uuid"));
         assertTrue(out.exemptIps.contains("127.0.0.1"));
         assertTrue(out.legitimatePathKeywords.contains("payments"));
         assertTrue(out.legitimatePathKeywords.contains("dashboard"));

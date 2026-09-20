@@ -39,6 +39,17 @@ public final class ServletRequestMapper {
             if (v != null && v.length > 1) duplicateParameters[0] = true;
             query.put(k, (v != null && v.length > 0) ? v[0] : "");
         });
+        Object pathVariables = req.getAttribute("org.springframework.web.servlet.HandlerMapping.uriTemplateVariables");
+        if (pathVariables instanceof Map<?, ?> variables) {
+            for (Map.Entry<?, ?> entry : variables.entrySet()) {
+                if (entry.getKey() == null || entry.getValue() == null) continue;
+                String name = String.valueOf(entry.getKey());
+                boolean uuidName = config.uuidParameterNames.stream()
+                        .filter(java.util.Objects::nonNull)
+                        .anyMatch(candidate -> candidate.equalsIgnoreCase(name));
+                if (uuidName) query.putIfAbsent(name, String.valueOf(entry.getValue()));
+            }
+        }
         if (duplicateParameters[0]) headers.put("AIWAF-Internal-Duplicate-Parameters", "true");
 
         boolean trustedPeer = isTrustedProxy(req.getRemoteAddr(), config.trustedProxyCidrs);

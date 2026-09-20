@@ -10,6 +10,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
 
 import java.nio.file.Path;
 import java.util.Map;
@@ -21,6 +24,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AiwafPostResponseTest {
     @TempDir Path tempDir;
+
+    @RestController
+    @RequestMapping("/objects")
+    static class UuidPathController {
+        @GetMapping("/{uuid}")
+        String get() { return "ok"; }
+    }
 
     @Test
     void actual_elapsed_time_changes_post_response_ai_decision() throws Exception {
@@ -114,6 +124,65 @@ class AiwafPostResponseTest {
         assertEquals(404, response.getStatus());
     }
 
+    @Test
+    void uuid_not_found_signals_block_at_python_threshold() {
+        AiwafEngine engine = uuidEngine();
+        AiwafRequest request = uuidRequest("198.51.100.220");
+        for (int i = 0; i < 4; i++) {
+            assertTrue(engine.evaluateBeforeResponse(request).allowed());
+            assertTrue(engine.evaluateAfterResponse(request, 404, 1).allowed());
+        }
+        assertTrue(engine.evaluateBeforeResponse(request).allowed());
+        assertEquals(403, engine.evaluateAfterResponse(request, 404, 1).statusCode());
+    }
+
+    @Test
+    void uuid_success_decays_not_found_score() {
+        AiwafEngine engine = uuidEngine();
+        AiwafRequest request = uuidRequest("198.51.100.221");
+        for (int i = 0; i < 4; i++) assertTrue(engine.evaluateAfterResponse(request, 404, 1).allowed());
+        assertTrue(engine.evaluateAfterResponse(request, 200, 1).allowed());
+        assertTrue(engine.evaluateAfterResponse(request, 404, 1).allowed());
+        assertTrue(engine.evaluateAfterResponse(request, 404, 1).allowed());
+        assertEquals(403, engine.evaluateAfterResponse(request, 404, 1).statusCode());
+    }
+
+    @Test
+    void model_lookup_can_mark_successful_responses_as_uuid_not_found() {
+        AiwafConfig config = uuidConfig();
+        AiwafEngine engine = new AiwafEngine(config, value -> false);
+        AiwafRequest request = uuidRequest("198.51.100.224");
+
+        for (int i = 0; i < 4; i++) {
+            assertTrue(engine.evaluateAfterResponse(request, 200, 1).allowed());
+        }
+        assertEquals(403, engine.evaluateAfterResponse(request, 200, 1).statusCode());
+    }
+
+    @Test
+    void malformed_uuid_uses_weighted_reason_and_blocks_immediately() {
+        AiwafEngine engine = uuidEngine();
+        AiwafRequest request = new AiwafRequest("GET", "/profile", "198.51.100.222", "",
+                Map.of(), Map.of("uuid", "not-a-uuid"), System.currentTimeMillis(), Set.of());
+        AiwafDecision decision = engine.evaluateBeforeResponse(request);
+        assertEquals(403, decision.statusCode());
+        assertEquals("UUID tampering score=5", decision.reason());
+    }
+
+    @Test
+    void spring_filter_extracts_uuid_route_variable_without_query_parameter() throws Exception {
+        AiwafFilter filter = new AiwafFilter(uuidEngine(), new UuidPathController());
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/objects/not-a-uuid");
+        request.setRemoteAddr("198.51.100.223");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        boolean[] called = {false};
+
+        filter.doFilter(request, response, (req, res) -> called[0] = true);
+
+        assertEquals(403, response.getStatus());
+        assertFalse(called[0]);
+    }
+
     private AiwafEngine engineForFeature(int featureIndex, double split) throws Exception {
         String json = """
                 {
@@ -149,6 +218,27 @@ class AiwafPostResponseTest {
     private static AiwafRequest request(String ip) {
         return new AiwafRequest("GET", "/profile", ip, "", Map.of(), Map.of(),
                 System.currentTimeMillis(), Set.of());
+    }
+
+    private static AiwafRequest uuidRequest(String ip) {
+        return new AiwafRequest("GET", "/profile", ip, "", Map.of(),
+                Map.of("uuid", "123e4567-e89b-12d3-a456-426614174000"),
+                System.currentTimeMillis(), Set.of());
+    }
+
+    private static AiwafEngine uuidEngine() {
+        return new AiwafEngine(uuidConfig());
+    }
+
+    private static AiwafConfig uuidConfig() {
+        AiwafConfig config = new AiwafConfig();
+        config.headerValidationEnabled = false;
+        config.rateLimitEnabled = false;
+        config.honeypotEnabled = false;
+        config.ipKeywordBlockEnabled = false;
+        config.aiEnabled = false;
+        config.uuidTamperEnabled = true;
+        return config;
     }
 
     private static MockHttpServletRequest servletRequest(String ip) {

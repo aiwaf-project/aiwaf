@@ -7,6 +7,7 @@ import com.aiwaf.core.AiwafEngine;
 import com.aiwaf.core.LegitimateRouteKeywordsCore;
 import com.aiwaf.core.ServletRequestMapper;
 import com.aiwaf.core.BufferedServletRequest;
+import com.aiwaf.core.PathManifestCore;
 import com.aiwaf.spring.support.AiwafRouteDecisions;
 import jakarta.servlet.AsyncEvent;
 import jakarta.servlet.AsyncListener;
@@ -69,8 +70,12 @@ public final class AiwafFilter extends OncePerRequestFilter {
             return;
         }
         HttpServletRequest inspectedRequest = buffered.request();
-        AiwafRequest aiwafReq = ServletRequestMapper.from(
+        AiwafRequest mappedRequest = ServletRequestMapper.from(
                 inspectedRequest, disabledMiddlewares, engine.config(), buffered.preview());
+        PathVariableCandidate routeUuid = resolveUuidPathVariable(inspectedRequest);
+        final AiwafRequest aiwafReq = routeUuid == null
+                ? mappedRequest
+                : mappedRequest.withQueryParameter(routeUuid.name(), routeUuid.value());
         AiwafDecision decision = engine.evaluateBeforeResponse(aiwafReq);
         if (!decision.allowed()) {
             response.sendError(decision.statusCode(), decision.reason());
@@ -148,24 +153,11 @@ public final class AiwafFilter extends OncePerRequestFilter {
         }
         for (Object handler : handlers) {
             if (handler == null) continue;
-            Class<?> handlerType = handler.getClass();
-            String[] classPaths = extractPaths(AnnotatedElementUtils.findMergedAnnotation(handlerType, RequestMapping.class));
-            if (classPaths.length == 0) {
-                classPaths = new String[]{""};
-            }
-            for (Method method : handlerType.getMethods()) {
-                Mapping mapping = extractMethodMapping(method);
-                if (mapping == null) {
-                    continue;
-                }
-                HandlerMethod hm = new HandlerMethod(handler, method);
-                String[] methodPaths = mapping.paths().length == 0 ? new String[]{""} : mapping.paths();
-                Set<String> methods = normalizeMethods(mapping.methods());
-                for (String classPath : classPaths) {
-                    for (String methodPath : methodPaths) {
-                        out.add(new RoutePolicy(toRegexPath(joinPaths(classPath, methodPath)), methods, hm));
-                    }
-                }
+            for (PathManifestCore.RouteInfo route : PathManifestCore.discoverControllerRoutes(handler)) {
+                HandlerMethod hm = new HandlerMethod(handler, route.method());
+                Set<String> methods = new HashSet<>(route.httpMethods());
+                String routePath = route.path();
+                out.add(new RoutePolicy(routePath, toRegexPath(routePath), methods, hm));
             }
         }
         return out;
@@ -204,30 +196,8 @@ public final class AiwafFilter extends OncePerRequestFilter {
         return new String[0];
     }
 
-    private static Set<String> normalizeMethods(RequestMethod[] methods) {
-        Set<String> out = new HashSet<>();
-        if (methods == null || methods.length == 0) {
-            return out;
-        }
-        for (RequestMethod method : methods) {
-            if (method != null) {
-                out.add(method.name());
-            }
-        }
-        return out;
-    }
-
     private static String normalizeMethod(String method) {
         return method == null ? "" : method.toUpperCase(Locale.ROOT);
-    }
-
-    private static String joinPaths(String left, String right) {
-        String a = left == null ? "" : left.trim();
-        String b = right == null ? "" : right.trim();
-        if (a.isEmpty() && b.isEmpty()) return "/";
-        if (a.isEmpty()) return normalizePath(b);
-        if (b.isEmpty()) return normalizePath(a);
-        return normalizePath(a + "/" + b);
     }
 
     private static String normalizePath(String path) {
@@ -259,6 +229,17 @@ public final class AiwafFilter extends OncePerRequestFilter {
         }
         regex.append("$");
         return Pattern.compile(regex.toString());
+    }
+
+    private PathVariableCandidate resolveUuidPathVariable(HttpServletRequest request) {
+        String method = normalizeMethod(request.getMethod());
+        String path = request.getRequestURI() == null ? "/" : request.getRequestURI();
+        for (RoutePolicy policy : routePolicies) {
+            if (!policy.matches(method, path)) continue;
+            PathVariableCandidate candidate = policy.uuidCandidate(path, engine.config().uuidParameterNames);
+            if (candidate != null) return candidate;
+        }
+        return null;
     }
 
     private static void enrichLegitimateKeywords(AiwafEngine engine, Object... handlers) {
@@ -321,12 +302,33 @@ public final class AiwafFilter extends OncePerRequestFilter {
 
     private record Mapping(String[] paths, RequestMethod[] methods) {}
 
-    private record RoutePolicy(Pattern pathPattern, Set<String> methods, HandlerMethod handler) {
+    private record PathVariableCandidate(String name, String value) {}
+
+    private record RoutePolicy(String template, Pattern pathPattern, Set<String> methods, HandlerMethod handler) {
         boolean matches(String method, String path) {
             if (!methods.isEmpty() && !methods.contains(method)) {
                 return false;
             }
             return pathPattern.matcher(path).matches();
+        }
+
+        PathVariableCandidate uuidCandidate(String actualPath, Set<String> configuredNames) {
+            String[] templateParts = normalizePath(template).substring(1).split("/", -1);
+            String[] actualParts = normalizePath(actualPath).substring(1).split("/", -1);
+            if (templateParts.length != actualParts.length) return null;
+            for (int i = 0; i < templateParts.length; i++) {
+                String part = templateParts[i];
+                if (!part.startsWith("{") || !part.endsWith("}")) continue;
+                String name = part.substring(1, part.length() - 1);
+                int constraint = name.indexOf(':');
+                if (constraint >= 0) name = name.substring(0, constraint);
+                String candidateName = name;
+                boolean configured = configuredNames.stream()
+                        .filter(java.util.Objects::nonNull)
+                        .anyMatch(value -> value.equalsIgnoreCase(candidateName));
+                if (configured) return new PathVariableCandidate(name, actualParts[i]);
+            }
+            return null;
         }
     }
 }

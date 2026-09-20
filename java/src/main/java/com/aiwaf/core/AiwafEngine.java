@@ -19,7 +19,9 @@ public final class AiwafEngine {
     private final Map<String, Deque<Long>> requestBuckets = new ConcurrentHashMap<>();
     private final Map<String, Long> lastGetPerIpPath = new ConcurrentHashMap<>();
     private final Map<String, Deque<RecentRequest>> recentRequestsByIp = new ConcurrentHashMap<>();
+    private final UuidScoreCore uuidScores = new UuidScoreCore();
     private final LazyModelProviderCore modelProvider;
+    private final UuidPolicyCore.UUIDLookup uuidLookup;
     private final AiwafTelemetryCore telemetry = new AiwafTelemetryCore();
     private final Set<String> defaultMaliciousKeywords = new HashSet<>(Set.of(
             ".php", "xmlrpc", "wp-", ".env", ".git", ".bak", "shell", "filemanager"
@@ -29,7 +31,12 @@ public final class AiwafEngine {
     );
 
     public AiwafEngine(AiwafConfig config) {
+        this(config, null);
+    }
+
+    public AiwafEngine(AiwafConfig config, UuidPolicyCore.UUIDLookup uuidLookup) {
         this.config = config;
+        this.uuidLookup = uuidLookup;
         this.modelProvider = new LazyModelProviderCore(config.aiModelPath);
         RuntimeStorage.initialize(config.storageBackend, config.storageFilePath);
         if (config.aiEnabled) {
@@ -47,6 +54,7 @@ public final class AiwafEngine {
         requestBuckets.clear();
         lastGetPerIpPath.clear();
         recentRequestsByIp.clear();
+        uuidScores.clear();
         telemetry.reset();
     }
 
@@ -74,19 +82,24 @@ public final class AiwafEngine {
         String ip = blankToDefault(req.ip(), "127.0.0.1");
         AiwafConfig.PathRule rule = ExemptionsCore.getPathRuleForPath(req.path(), config.pathRules);
         boolean ipExempted = config.exemptIps.contains(ip) || (config.privateIpsExempted && isPrivateIp(ip));
-        AiwafDecision aiDecision = null;
+        AiwafDecision aiDecision = evaluateUuidResponse(req, ip, statusCode, nowMillis);
         if (!isPathExempted(req) && !ipExempted
+                && aiDecision == null
                 && !isRuleDisabled(req, rule, config, "ai_anomaly") && config.aiEnabled) {
             aiDecision = evaluateAiAnomaly(req, ip, statusCode, responseTimeMs, nowMillis);
         }
         recordRecent(ip, req, statusCode, nowMillis);
         return finalizeDecision(aiDecision == null ? AiwafDecision.allow() : aiDecision,
-                startedNs, aiDecision == null ? "allow" : "ai_anomaly");
+                startedNs, aiDecision == null ? "allow" :
+                        (aiDecision.reason().startsWith("UUID tampering") ? "uuid_tamper" : "ai_anomaly"));
     }
 
     /** Record a committed or streaming response without attempting to replace its body. */
     public void recordCommittedResponse(AiwafRequest req, int statusCode) {
-        recordRecent(blankToDefault(req.ip(), "127.0.0.1"), req, statusCode, System.currentTimeMillis());
+        String ip = blankToDefault(req.ip(), "127.0.0.1");
+        long nowMillis = System.currentTimeMillis();
+        evaluateUuidResponse(req, ip, statusCode, nowMillis);
+        recordRecent(ip, req, statusCode, nowMillis);
         finalizeDecision(AiwafDecision.allow(), System.nanoTime(), "allow");
     }
 
@@ -146,10 +159,13 @@ public final class AiwafEngine {
         }
 
         if (!isRuleDisabled(req, rule, config, "uuid_tamper") && config.uuidTamperEnabled) {
-            String uuidValue = req.query().get("uuid");
+            String uuidValue = uuidCandidate(req);
             if (uuidValue != null && !isValidUuid(uuidValue)) {
                 telemetryIncrement("middleware.uuid_tamper.triggered");
-                AiwafDecision d = AiwafDecision.deny(403, "Invalid UUID");
+                UuidScoreCore.Decision score = uuidScores.record(
+                        ip, UuidScoreCore.Signal.MALFORMED, req.nowEpochMillis(), uuidScoreConfig());
+                blockWithContext(ip, req, "UUID tampering score=" + score.score());
+                AiwafDecision d = AiwafDecision.deny(403, "UUID tampering score=" + score.score());
                 return finalizeDecision(d, startedNs, "uuid_tamper");
             }
         }
@@ -268,6 +284,7 @@ public final class AiwafEngine {
 
         AiwafDecision allow = AiwafDecision.allow();
         if (deferAiAnomaly) return allow;
+        evaluateUuidResponse(req, ip, allow.statusCode(), req.nowEpochMillis());
         recordRecent(ip, req, allow.statusCode());
         return finalizeDecision(allow, startedNs, "allow");
     }
@@ -277,6 +294,78 @@ public final class AiwafEngine {
                 || ExemptionsCore.isPathExempt(req.path(), config.exemptPaths, config.exemptAllowWildcards, config.exemptAllowPrefix)
                 || RuntimeStorage.getPathExemptionStore().isExempted(req.path(), config.exemptAllowWildcards, config.exemptAllowPrefix)
                 || config.geoExemptPaths.contains(req.path());
+    }
+
+    private AiwafDecision evaluateUuidResponse(AiwafRequest req, String ip, int statusCode, long nowMillis) {
+        if (!config.uuidTamperEnabled || isPathExempted(req)) {
+            return null;
+        }
+        AiwafConfig.PathRule rule = ExemptionsCore.getPathRuleForPath(req.path(), config.pathRules);
+        if (isRuleDisabled(req, rule, config, "uuid_tamper")) {
+            return null;
+        }
+        boolean ipExempted = config.exemptIps.contains(ip) || (config.privateIpsExempted && isPrivateIp(ip));
+        if (ipExempted) {
+            return null;
+        }
+        String candidate = uuidCandidate(req);
+        if (!isValidUuid(candidate)) {
+            return null;
+        }
+
+        UuidScoreCore.Signal signal;
+        Boolean existsInModel = lookupUuid(candidate);
+        if (statusCode == 404 || Boolean.FALSE.equals(existsInModel)) {
+            signal = UuidScoreCore.Signal.NOT_FOUND;
+        } else if (statusCode < 400) {
+            signal = UuidScoreCore.Signal.SUCCESS;
+        } else {
+            return null;
+        }
+        UuidScoreCore.Decision score = uuidScores.record(ip, signal, nowMillis, uuidScoreConfig());
+        if (!score.blocked()) {
+            return null;
+        }
+        telemetryIncrement("middleware.uuid_tamper.triggered");
+        String reason = "UUID tampering score=" + score.score();
+        blockWithContext(ip, req, reason);
+        return AiwafDecision.deny(403, reason);
+    }
+
+    private Boolean lookupUuid(String candidate) {
+        if (uuidLookup == null) return null;
+        try {
+            return uuidLookup.exists(candidate);
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    private UuidScoreCore.Config uuidScoreConfig() {
+        return new UuidScoreCore.Config(
+                config.uuidScoreEnabled,
+                config.uuidScoreWindowSeconds,
+                config.uuidScoreBlockThreshold,
+                config.uuidMalformedWeight,
+                config.uuidNotFoundWeight,
+                config.uuidSuccessDecay
+        );
+    }
+
+    private String uuidCandidate(AiwafRequest req) {
+        if (req.query() == null || req.query().isEmpty()) {
+            return null;
+        }
+        for (String configuredName : config.uuidParameterNames) {
+            if (configuredName == null) continue;
+            for (Map.Entry<String, String> parameter : req.query().entrySet()) {
+                if (configuredName.equalsIgnoreCase(parameter.getKey())) {
+                    String value = parameter.getValue();
+                    return value == null || value.isBlank() ? null : value.trim();
+                }
+            }
+        }
+        return null;
     }
 
     private static boolean containsJavaSerializationPayload(AiwafRequest req) {
@@ -396,6 +485,7 @@ public final class AiwafEngine {
     }
 
     private static boolean isValidUuid(String value) {
+        if (value == null || value.isBlank()) return false;
         try {
             UUID.fromString(value);
             return true;

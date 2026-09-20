@@ -2,6 +2,7 @@ package com.aiwaf.core;
 
 import java.io.FileInputStream;
 import java.io.ObjectOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
@@ -18,11 +19,9 @@ public final class ModelArtifactIoCore {
         }
         try {
             Path p = Path.of(path);
-            SecureFiles.writeAtomically(p, output -> {
-                try (ObjectOutputStream out = new ObjectOutputStream(output)) {
-                    out.writeObject(model);
-                }
-            });
+            Map<String, Object> portable = PortableModelArtifactCore.toPortableArtifact(model);
+            SecureFiles.writeAtomically(p, output ->
+                    new com.fasterxml.jackson.databind.ObjectMapper().writeValue(output, portable));
             return true;
         } catch (Exception ex) {
             return false;
@@ -43,21 +42,50 @@ public final class ModelArtifactIoCore {
                 LOG.warning("Ignoring AIWAF model artifact with invalid or missing signature");
                 return null;
             }
-            try (var in = SafeObjectInputStreams.open(
-                    new FileInputStream(p.toFile()), SafeObjectInputStreams.Profile.MODEL)) {
-                Object obj = in.readObject();
-                if (obj instanceof TrainedModelCore model) {
-                    TrainedModelCore migrated = ModelArtifactMigrationCore.migrate(model);
-                    if (!isCompatible(migrated)) {
-                        return null;
-                    }
-                    return migrated;
-                }
-            }
+            TrainedModelCore model = looksLikeJson(p) ? loadPortable(p) : loadLegacy(p);
+            if (model == null) return null;
+            TrainedModelCore migrated = ModelArtifactMigrationCore.migrate(model);
+            if (!isCompatible(migrated)) return null;
+            return migrated;
         } catch (Exception ex) {
             LOG.warning("Unable to load AIWAF model artifact: " + ex.getClass().getSimpleName());
         }
         return null;
+    }
+
+    static boolean saveLegacy(TrainedModelCore model, String path) {
+        try {
+            SecureFiles.writeAtomically(Path.of(path), output -> {
+                try (ObjectOutputStream out = new ObjectOutputStream(output)) {
+                    out.writeObject(model);
+                }
+            });
+            return true;
+        } catch (Exception ex) {
+            return false;
+        }
+    }
+
+    private static TrainedModelCore loadPortable(Path path) throws Exception {
+        return PortableModelArtifactCore.parse(Files.readString(path, StandardCharsets.UTF_8));
+    }
+
+    private static TrainedModelCore loadLegacy(Path path) throws Exception {
+        try (var in = SafeObjectInputStreams.open(
+                new FileInputStream(path.toFile()), SafeObjectInputStreams.Profile.MODEL)) {
+            Object obj = in.readObject();
+            return obj instanceof TrainedModelCore model ? model : null;
+        }
+    }
+
+    private static boolean looksLikeJson(Path path) throws Exception {
+        try (var input = Files.newInputStream(path)) {
+            int value;
+            while ((value = input.read()) >= 0) {
+                if (!Character.isWhitespace(value)) return value == '{';
+            }
+            return false;
+        }
     }
 
     private static boolean isCompatible(TrainedModelCore model) {

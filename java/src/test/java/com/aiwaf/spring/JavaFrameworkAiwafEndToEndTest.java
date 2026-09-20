@@ -125,8 +125,8 @@ class JavaFrameworkAiwafEndToEndTest {
 
         mvc.perform(get("/form")).andExpect(status().isOk());
         mvc.perform(post("/form")).andExpect(status().isForbidden());
-        mvc.perform(get("/uuid").queryParam("uuid", "invalid")).andExpect(status().isForbidden());
         mvc.perform(get("/uuid").queryParam("uuid", "550e8400-e29b-41d4-a716-446655440000")).andExpect(status().isOk());
+        mvc.perform(get("/uuid").queryParam("uuid", "invalid")).andExpect(status().isForbidden());
         mvc.perform(get("/.env")).andExpect(status().isForbidden());
     }
 

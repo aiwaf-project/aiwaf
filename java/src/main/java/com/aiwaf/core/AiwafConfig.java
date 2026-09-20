@@ -143,6 +143,13 @@ public final class AiwafConfig {
             "/signin/"
     ));
     public boolean uuidTamperEnabled = true;
+    public boolean uuidScoreEnabled = true;
+    public int uuidScoreWindowSeconds = 60;
+    public int uuidScoreBlockThreshold = 5;
+    public int uuidMalformedWeight = 5;
+    public int uuidNotFoundWeight = 1;
+    public int uuidSuccessDecay = 2;
+    public Set<String> uuidParameterNames = new HashSet<>(Set.of("uuid"));
     public boolean ipKeywordBlockEnabled = true;
     public boolean methodValidationEnabled = true;
     public Set<String> allowedMethods = new HashSet<>(Arrays.asList("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"));

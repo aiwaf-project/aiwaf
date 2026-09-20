@@ -61,6 +61,14 @@ public final class AiwafConfigCompatCore {
 
         Map<String, Object> uuid = map(settings.get("uuid_tamper"));
         cfg.uuidTamperEnabled = bool(uuid.get("enabled"), cfg.uuidTamperEnabled);
+        cfg.uuidScoreEnabled = bool(or(uuid.get("score_enabled"), uuid.get("scoring_enabled")), cfg.uuidScoreEnabled);
+        cfg.uuidScoreWindowSeconds = intval(uuid.get("window_seconds"), cfg.uuidScoreWindowSeconds);
+        cfg.uuidScoreBlockThreshold = intval(uuid.get("block_threshold"), cfg.uuidScoreBlockThreshold);
+        cfg.uuidMalformedWeight = intval(uuid.get("malformed_weight"), cfg.uuidMalformedWeight);
+        cfg.uuidNotFoundWeight = intval(uuid.get("not_found_weight"), cfg.uuidNotFoundWeight);
+        cfg.uuidSuccessDecay = intval(uuid.get("success_decay"), cfg.uuidSuccessDecay);
+        Set<String> uuidParameterNames = strSet(uuid.get("parameter_names"));
+        if (!uuidParameterNames.isEmpty()) cfg.uuidParameterNames = uuidParameterNames;
 
         Map<String, Object> ex = map(settings.get("exemptions"));
         cfg.privateIpsExempted = bool(ex.get("private_ips_exempted"), cfg.privateIpsExempted);
@@ -111,6 +119,12 @@ public final class AiwafConfigCompatCore {
         get(env, "AIWAF_GEO_ALLOW_COUNTRIES").ifPresent(v -> cfg.geoAllowedCountries.addAll(csvUpper(v)));
         get(env, "AIWAF_AI_ENABLED").ifPresent(v -> cfg.aiEnabled = parseBool(v, cfg.aiEnabled));
         get(env, "AIWAF_AI_MODEL_PATH").ifPresent(v -> cfg.aiModelPath = v);
+        get(env, "AIWAF_UUID_SCORE_ENABLED").ifPresent(v -> cfg.uuidScoreEnabled = parseBool(v, cfg.uuidScoreEnabled));
+        get(env, "AIWAF_UUID_SCORE_WINDOW_SECONDS").ifPresent(v -> cfg.uuidScoreWindowSeconds = parseInt(v, cfg.uuidScoreWindowSeconds));
+        get(env, "AIWAF_UUID_SCORE_BLOCK_THRESHOLD").ifPresent(v -> cfg.uuidScoreBlockThreshold = parseInt(v, cfg.uuidScoreBlockThreshold));
+        get(env, "AIWAF_UUID_SCORE_MALFORMED_WEIGHT").ifPresent(v -> cfg.uuidMalformedWeight = parseInt(v, cfg.uuidMalformedWeight));
+        get(env, "AIWAF_UUID_SCORE_NOT_FOUND_WEIGHT").ifPresent(v -> cfg.uuidNotFoundWeight = parseInt(v, cfg.uuidNotFoundWeight));
+        get(env, "AIWAF_UUID_SCORE_SUCCESS_DECAY").ifPresent(v -> cfg.uuidSuccessDecay = parseInt(v, cfg.uuidSuccessDecay));
         get(env, "AIWAF_STORAGE_BACKEND").ifPresent(v -> cfg.storageBackend = v.toLowerCase(Locale.ROOT));
         get(env, "AIWAF_STORAGE_FILE_PATH").ifPresent(v -> cfg.storageFilePath = v);
     }

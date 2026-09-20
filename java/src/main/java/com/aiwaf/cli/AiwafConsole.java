@@ -1,11 +1,16 @@
 package com.aiwaf.cli;
 
 import com.aiwaf.core.WhoisLookup;
+import com.aiwaf.core.CoreCli;
+import com.aiwaf.core.ModelArtifactIoCore;
+import com.aiwaf.core.TrainedModelCore;
 
 import java.io.IOException;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 public final class AiwafConsole {
     private AiwafConsole() {}
@@ -15,27 +20,38 @@ public final class AiwafConsole {
             printUsage();
             return;
         }
-        AiwafManager manager = new AiwafManager();
         String cmd = args[0].toLowerCase(Locale.ROOT);
         try {
             switch (cmd) {
-                case "stats" -> System.out.println(manager.stats());
-                case "list" -> handleList(manager, args);
-                case "add" -> handleAdd(manager, args);
-                case "remove" -> handleRemove(manager, args);
-                case "export" -> handleExport(manager, args);
-                case "import" -> handleImport(manager, args);
-                case "reset" -> handleReset(manager, args);
-                case "geo" -> handleGeo(manager, args);
-                case "exempt-path", "path-exemptions" -> handleExemptPath(manager, args);
+                case "stats", "status" -> System.out.println(manager().stats());
+                case "diagnose" -> handleDiagnose(manager(), args);
+                case "list" -> handleList(manager(), args);
+                case "blocked" -> System.out.println(manager().listBlacklist());
+                case "unblock" -> handleUnblock(manager(), args);
+                case "clear" -> System.out.println(manager().resetSelective(true, false, false) ? "ok" : "noop");
+                case "add" -> handleAdd(manager(), args);
+                case "remove" -> handleRemove(manager(), args);
+                case "export" -> handleExport(manager(), args);
+                case "import" -> handleImport(manager(), args);
+                case "reset" -> handleReset(manager(), args);
+                case "geo" -> handleGeo(manager(), args);
+                case "exempt-path", "path-exemptions" -> handleExemptPath(manager(), args);
                 case "whois" -> handleWhois(args);
-                case "generate-manifest" -> handleGenerateManifest(args);
+                case "generate-manifest", "init" -> handleGenerateManifest(args);
+                case "train", "train-model" -> handleCoreCommand("train-model", args);
+                case "replay" -> handleCoreCommand("replay", args);
+                case "model" -> handleModel(args);
+                case "logs" -> handleLogs(args);
                 default -> printUsage();
             }
         } catch (Exception ex) {
             System.err.println("Error: " + ex.getMessage());
             System.exit(1);
         }
+    }
+
+    private static AiwafManager manager() {
+        return new AiwafManager();
     }
 
     private static void handleList(AiwafManager manager, String[] args) {
@@ -107,6 +123,8 @@ public final class AiwafConsole {
         List<String> lines = List.of(
                 "Usage:",
                 "  aiwaf-cli stats",
+                "  aiwaf-cli diagnose [--model <model.json>]",
+                "  aiwaf-cli blocked | unblock <ip> | clear",
                 "  aiwaf-cli list [all|whitelist|blacklist|keywords|geo|exempt-path]",
                 "  aiwaf-cli add <whitelist|blacklist|keyword|geo|exempt-path> <value> [--reason <text>]",
                 "  aiwaf-cli remove <whitelist|blacklist|keyword|geo|exempt-path> <value>",
@@ -116,7 +134,12 @@ public final class AiwafConsole {
                 "  aiwaf-cli geo <list|add|remove> [country]",
                 "  aiwaf-cli exempt-path <list|add|remove> [path] [--reason text]",
                 "  aiwaf-cli whois <target>",
-                "  aiwaf-cli generate-manifest <output.json> --class <ControllerClassName>"
+                "  aiwaf-cli train --events <events.json> --out <model.json> [--backend java|fastr]",
+                "  aiwaf-cli replay --cases <cases.json>",
+                "  aiwaf-cli model status [--path <model.json>]",
+                "  aiwaf-cli logs [--dir aiwaf_logs]",
+                "  aiwaf-cli init --app <SpringApplicationClass> [--output .aiwaf/paths.json]",
+                "  aiwaf-cli generate-manifest [output.json] --class <ControllerClassName>"
         );
         for (String line : lines) {
             System.out.println(line);
@@ -166,24 +189,105 @@ public final class AiwafConsole {
         }
     }
 
+    private static void handleUnblock(AiwafManager manager, String[] args) {
+        System.out.println(args.length > 1 && manager.removeBlacklistIp(args[1]) ? "ok" : "noop");
+    }
+
+    private static void handleCoreCommand(String command, String[] args) {
+        String[] delegated = new String[args.length];
+        delegated[0] = command;
+        if (args.length > 1) System.arraycopy(args, 1, delegated, 1, args.length - 1);
+        int status = CoreCli.main(delegated);
+        System.out.println(status == 0 ? "ok" : "error (exit " + status + ")");
+    }
+
+    private static void handleDiagnose(AiwafManager manager, String[] args) {
+        String modelPath = parseOption(args, "--model");
+        if (modelPath == null) modelPath = "model.json";
+        Package pkg = AiwafConsole.class.getPackage();
+        String version = pkg == null || pkg.getImplementationVersion() == null
+                ? "development" : pkg.getImplementationVersion();
+        System.out.println("AIWAF Java diagnostics");
+        System.out.println("version=" + version);
+        System.out.println("java=" + System.getProperty("java.runtime.version", "unknown"));
+        System.out.println("storage=" + manager.stats());
+        System.out.println("model_path=" + Path.of(modelPath).toAbsolutePath().normalize());
+        System.out.println("model=" + (ModelArtifactIoCore.load(modelPath) == null ? "unavailable" : "ready"));
+    }
+
+    private static void handleModel(String[] args) {
+        String action = args.length > 1 ? args[1].toLowerCase(Locale.ROOT) : "status";
+        if (!"status".equals(action)) {
+            printUsage();
+            return;
+        }
+        String path = parseOption(args, "--path");
+        if (path == null) path = "model.json";
+        TrainedModelCore model = ModelArtifactIoCore.load(path);
+        if (model == null) {
+            System.out.println("model=unavailable path=" + Path.of(path).toAbsolutePath().normalize());
+            return;
+        }
+        System.out.println("model=ready type=" + model.modelType() + " version=" + model.version());
+    }
+
+    private static void handleLogs(String[] args) throws IOException {
+        String configured = parseOption(args, "--dir");
+        Path directory = Path.of(configured == null ? "aiwaf_logs" : configured);
+        if (!Files.isDirectory(directory)) {
+            System.out.println("logs=unavailable dir=" + directory.toAbsolutePath().normalize());
+            return;
+        }
+        try (var files = Files.list(directory)) {
+            files.filter(Files::isRegularFile)
+                    .sorted((left, right) -> Long.compare(lastModified(right), lastModified(left)))
+                    .forEach(path -> System.out.println(path + " bytes=" + size(path)));
+        }
+    }
+
+    private static long lastModified(Path path) {
+        try { return Files.getLastModifiedTime(path).toMillis(); } catch (IOException ignored) { return 0L; }
+    }
+
+    private static long size(Path path) {
+        try { return Files.size(path); } catch (IOException ignored) { return 0L; }
+    }
+
     private static void handleGenerateManifest(String[] args) {
-        String output = args.length > 1 && !args[1].startsWith("--") ? args[1] : "manifest.json";
+        String outputOption = parseOption(args, "--output");
+        String output = outputOption != null
+                ? outputOption
+                : (args.length > 1 && !args[1].startsWith("--")
+                        ? args[1] : com.aiwaf.core.PathManifestCore.DEFAULT_MANIFEST_PATH);
+        String appName = parseOption(args, "--app");
+        if (appName != null) {
+            Map<String, Object> manifest = com.aiwaf.spring.SpringPathManifest.launchAndGenerate(appName, output);
+            printManifestSummary(output, manifest);
+            return;
+        }
         String clsName = parseOption(args, "--class");
         if (clsName == null) {
-            System.out.println("Usage: aiwaf-cli generate-manifest <output.json> --class <ControllerClassName>");
+            System.out.println("Usage: aiwaf-cli init --app <SpringApplicationClass> [--output .aiwaf/paths.json]");
             return;
         }
         try {
             Class<?> cls = Class.forName(clsName);
-            List<com.aiwaf.core.PathManifestCore.RouteInfo> routes = new java.util.ArrayList<>();
-            for (java.lang.reflect.Method m : cls.getMethods()) {
-                if (m.getDeclaringClass() == Object.class) continue;
-                routes.add(new com.aiwaf.core.PathManifestCore.RouteInfo("/" + m.getName(), List.of("GET", "POST"), cls, m));
-            }
+            List<com.aiwaf.core.PathManifestCore.RouteInfo> routes =
+                    com.aiwaf.core.PathManifestCore.discoverControllerRoutes(cls);
             com.aiwaf.core.PathManifestCore.generateManifest(routes, output);
+            printManifestSummary(output, com.aiwaf.core.PathManifestCore.buildManifest("spring", routes));
         } catch (Exception e) {
             System.err.println("Error generating manifest: " + e.getMessage());
         }
+    }
+
+    private static void printManifestSummary(String output, Map<String, Object> manifest) {
+        Object routes = manifest.get("routes");
+        int count = routes instanceof Map<?, ?> map ? map.size() : 0;
+        System.out.println("Generated " + output);
+        System.out.println("Framework: " + manifest.getOrDefault("framework", "spring"));
+        System.out.println("Routes: " + count);
+        System.out.println("Context hash: " + manifest.getOrDefault("context_hash", ""));
     }
 
     private static void handleExport(AiwafManager manager, String[] args) {

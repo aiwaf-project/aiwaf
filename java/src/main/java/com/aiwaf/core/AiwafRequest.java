@@ -2,6 +2,7 @@ package com.aiwaf.core;
 
 import java.util.Map;
 import java.util.Set;
+import java.util.HashMap;
 
 public record AiwafRequest(
         String method,
@@ -24,5 +25,13 @@ public record AiwafRequest(
 
     public AiwafRequest withDisabledMiddlewares(Set<String> disabled) {
         return new AiwafRequest(method, path, ip, country, headers, query, nowEpochMillis, disabled, bodyPreview);
+    }
+
+    public AiwafRequest withQueryParameter(String name, String value) {
+        if (name == null || name.isBlank() || value == null) return this;
+        Map<String, String> updated = new HashMap<>(query == null ? Map.of() : query);
+        updated.putIfAbsent(name, value);
+        return new AiwafRequest(method, path, ip, country, headers, Map.copyOf(updated),
+                nowEpochMillis, disabledMiddlewares, bodyPreview);
     }
 }

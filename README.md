@@ -16,7 +16,7 @@ Each package is versioned and released independently.
 | Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.0.2` | Express and Node framework middleware |
 | Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.1` | Native Python acceleration and JSON model inference |
 | WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.1` | Rust detection and model primitives for JavaScript |
-| Java | `io.github.aiwaf-project:aiwaf-java` | `1.1.1` | Spring MVC and Jakarta Servlet protection |
+| Java | `io.github.aiwaf-project:aiwaf-java` | `1.2.0` | Spring MVC and Jakarta Servlet protection |
 
 Supported framework integrations include Django, Flask, FastAPI, Express, Fastify, Hapi, Koa, NestJS, Next.js API routes, AdonisJS, Sails.js, Spring MVC, and Jakarta Servlet.
 
@@ -75,13 +75,13 @@ npm install aiwaf
 npm install aiwaf-wasm
 ```
 
-Java 1.1.1, after it is published to Maven Central:
+Java 1.2.0, after it is published to Maven Central:
 
 ```xml
 <dependency>
   <groupId>io.github.aiwaf-project</groupId>
   <artifactId>aiwaf-java</artifactId>
-  <version>1.1.1</version>
+  <version>1.2.0</version>
 </dependency>
 ```
 
@@ -462,7 +462,7 @@ cp ../LICENSE crates/aiwaf_wasm/pkg/LICENSE
 
 ## Java package
 
-AIWAF Java 1.1.1 targets Java 17, Spring Framework 7.0, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
+AIWAF Java 1.2.0 targets Java 17, Spring Framework 7.0, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
 
 ### Core engine
 
@@ -513,11 +513,12 @@ if (decision.allowed()) {
 
 ```java
 @Bean
-AiwafEngine aiwafEngine() {
+AiwafEngine aiwafEngine(ApplicationContext applicationContext) {
     AiwafConfig config = new AiwafConfig();
     config.storageBackend = "memory";
     config.aiEnabled = false;
-    return new AiwafEngine(config);
+    SpringUuidModelLookup uuidLookup = SpringUuidModelLookup.discover(applicationContext);
+    return new AiwafEngine(config, uuidLookup);
 }
 
 @Bean
@@ -535,6 +536,19 @@ FilterRegistrationBean<AiwafFilter> aiwafFilter(
 Pass controller beans to the filter when using `@AiwafExempt`, `@AiwafExemptFrom`, `@AiwafOnly`, or `@AiwafRequireProtection`. Do not register `AiwafInterceptor` and `AiwafFilter` as independent enforcement layers for the same request.
 
 Committed, streaming, and asynchronous responses are recorded but are not replaced after bytes have been sent.
+
+UUID protection uses Python-compatible weighted signals: malformed input, valid UUID requests that resolve to `404`, and successful requests that decay the score. UUID-valued query parameters and `{uuid}` route variables are supported. `SpringUuidModelLookup` optionally discovers UUID primary keys and unique UUID properties through the JPA metamodel; omit it when the application does not use JPA.
+
+Generate a route manifest from the live Spring application rather than supplying controller methods manually:
+
+```bash
+java -cp "your-app.jar:aiwaf-java-1.2.0.jar" \
+  com.aiwaf.cli.AiwafConsole init \
+  --app com.example.Application \
+  --output .aiwaf/paths.json
+```
+
+The command starts the application, reads every registered `RequestMappingHandlerMapping`, writes the shared `schema_version/framework/context_hash/routes` document, and then closes the temporary application context.
 
 ### Jakarta Servlet
 
@@ -559,11 +573,26 @@ The generic servlet filter uses request-time evaluation. Spring applications sho
 | Proxies | `trustedProxyCidrs`, `maxForwardedForEntries` |
 | Exemptions | `exemptIps`, `exemptPaths`, `autoExemptPathPrefixes` |
 | GeoIP | `geoBlockEnabled`, `geoAllowedCountries`, `geoBlockedCountries` |
+| UUID checks | `uuidTamperEnabled`, `uuidScoreWindowSeconds`, `uuidScoreBlockThreshold`, signal weights, `uuidParameterNames` |
 | AI | `aiEnabled`, `aiModelPath`, `aiAnomalyScoreThreshold` |
 | Storage | `storageBackend`, `storageFilePath` |
 | Telemetry | `observabilityEnabled` |
 
-New Java models use the Python-aligned six-feature schema. Existing nine-feature Java artifacts remain readable. Java artifacts are not Python pickle files and are not interchangeable with Python or JavaScript model files.
+New Java models use the Python-aligned six-feature schema and are written as safe JSON containing the Python `aiwaf_rust.IsolationForest` state. Python can restore Java-generated forest state, and Java can load Python Rust-model artifacts. Existing signed Java binary artifacts, including nine-feature models, remain readable through the restricted legacy loader. Scikit-learn object artifacts are intentionally unsupported.
+
+Java operational commands mirror the common Python workflow:
+
+```bash
+aiwaf-cli status
+aiwaf-cli diagnose --model model.json
+aiwaf-cli blocked
+aiwaf-cli unblock 203.0.113.10
+aiwaf-cli clear
+aiwaf-cli train --events events.json --out model.json --backend java
+aiwaf-cli replay --cases replay.json
+aiwaf-cli model status --path model.json
+aiwaf-cli logs --dir aiwaf_logs
+```
 
 Build Java from the repository root:
 
@@ -595,7 +624,7 @@ The training lifecycle is:
 3. Extract the six features and suspicious route segments.
 4. Train or update the Isolation Forest after configured volume thresholds are met.
 5. Refresh learned keywords while excluding known legitimate and exempt routes.
-6. Persist the language-specific model artifact and metadata.
+6. Persist portable JSON forest state and runtime metadata; legacy language-specific artifacts remain read-only compatibility inputs.
 
 Do not train directly on unreviewed sensitive request bodies or authentication headers. Treat models, logs, exported state, and MMDB files as deployment artifacts with controlled access.
 
@@ -681,7 +710,7 @@ Release versions and tags must match the relevant manifest.
 | npm `aiwaf` | `js/package.json` | `js-v1.0.2` | `npm-publish.yml` |
 | PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.1` | `rust-publish.yml` |
 | npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.1` | `wasm-publish.yml` |
-| Maven `aiwaf-java` | `java/pom.xml` | `java-v1.1.1` | `java-publish.yml` |
+| Maven `aiwaf-java` | `java/pom.xml` | `java-v1.2.0` | `java-publish.yml` |
 
 Python and Rust publish to PyPI with trusted publishing. The npm workflows use npm trusted publishing and stage packages for approval. Configure the trusted publisher with organization `aiwaf-project`, repository `aiwaf`, the exact workflow filename, and the environment used by that workflow.
 
