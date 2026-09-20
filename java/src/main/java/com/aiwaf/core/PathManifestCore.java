@@ -21,6 +21,8 @@ import java.security.MessageDigest;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HexFormat;
@@ -37,6 +39,11 @@ public final class PathManifestCore {
     public static final String SCHEMA_VERSION = "1.0";
     public static final String DEFAULT_MANIFEST_PATH = ".aiwaf/paths.json";
     private static final Set<String> HTTP_METHODS = Set.of("GET", "POST", "PUT", "PATCH", "DELETE");
+    private static final Set<String> MIDDLEWARE_NAMES = Set.of(
+            "geo_block", "ip_keyword_block", "rate_limit", "ai_anomaly", "honeypot",
+            "uuid_tamper", "header_validation", "logging"
+    );
+    private static final long MAX_MANIFEST_BYTES = 10L * 1024L * 1024L;
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
 
@@ -94,6 +101,79 @@ public final class PathManifestCore {
             return absolute;
         } catch (IOException ex) {
             throw new IllegalStateException("Failed to write manifest to " + outputPath + ": " + ex.getMessage(), ex);
+        }
+    }
+
+    /** Load a generated manifest. Missing, oversized, malformed, or incompatible files are ignored safely. */
+    @SuppressWarnings("unchecked")
+    public static Map<String, Object> loadManifest(Path manifestPath) {
+        if (manifestPath == null || !Files.isRegularFile(manifestPath)) return Map.of();
+        try {
+            if (Files.size(manifestPath) > MAX_MANIFEST_BYTES) return Map.of();
+            Object raw = MAPPER.readValue(manifestPath.toFile(), Object.class);
+            if (!(raw instanceof Map<?, ?> source)) return Map.of();
+            Map<String, Object> manifest = stringObjectMap(source);
+            Object schema = manifest.get("schema_version");
+            if (schema != null && !SCHEMA_VERSION.equals(String.valueOf(schema))) return Map.of();
+            return manifest;
+        } catch (IOException | RuntimeException ignored) {
+            return Map.of();
+        }
+    }
+
+    /** Compile the shared manifest protections into the same path rules used by the Java engine. */
+    public static List<AiwafConfig.PathRule> compileManifestToPathRules(Map<String, Object> manifest) {
+        if (manifest == null || !(manifest.get("routes") instanceof Map<?, ?> routes)) return List.of();
+        List<AiwafConfig.PathRule> rules = new ArrayList<>();
+        for (Map.Entry<?, ?> route : routes.entrySet()) {
+            if (route.getKey() == null || !(route.getValue() instanceof Map<?, ?> rawEntry)) continue;
+            Map<String, Object> entry = stringObjectMap(rawEntry);
+            Map<String, Object> protections = entry.get("protections") instanceof Map<?, ?> raw
+                    ? stringObjectMap(raw) : Map.of();
+            Set<String> disabled = new HashSet<>();
+            for (Map.Entry<String, Object> protection : protections.entrySet()) {
+                String name = protection.getKey().trim().toLowerCase(Locale.ROOT);
+                if (!MIDDLEWARE_NAMES.contains(name)) continue;
+                Object value = protection.getValue();
+                if (Boolean.FALSE.equals(value)) {
+                    disabled.add(name);
+                } else if (value instanceof Map<?, ?> options
+                        && Boolean.FALSE.equals(stringObjectMap(options).get("enabled"))) {
+                    disabled.add(name);
+                }
+            }
+
+            Map<String, Object> rate = protectionMap(protections.get("rate_limit"));
+            if (rate.isEmpty()) rate = protectionMap(protections.get("api_rate_limit"));
+            Integer max = firstInteger(rate, "MAX", "max", "requests");
+            Integer window = firstInteger(rate, "WINDOW", "window", "window_seconds");
+            Integer flood = firstInteger(rate, "FLOOD", "flood");
+            if (disabled.isEmpty() && max == null && window == null && flood == null) continue;
+
+            Map<String, Map<String, Integer>> overrides = new HashMap<>();
+            Map<String, Integer> rateOverrides = new HashMap<>();
+            if (max != null) rateOverrides.put("max", max);
+            if (window != null) rateOverrides.put("window", window);
+            if (flood != null) rateOverrides.put("flood", flood);
+            if (!rateOverrides.isEmpty()) overrides.put("rate_limit", rateOverrides);
+            rules.add(new AiwafConfig.PathRule(
+                    ExemptionsCore.normalizePath(String.valueOf(route.getKey()), true),
+                    false, max, window, flood, disabled, overrides
+            ));
+        }
+        return List.copyOf(rules);
+    }
+
+    /** Append manifest-derived rules after explicit rules so equal-prefix explicit settings win. */
+    public static synchronized void applyManifest(AiwafConfig config) {
+        if (config == null || !config.pathManifestEnabled || config.pathManifestApplied) return;
+        config.pathManifestApplied = true;
+        String configured = config.pathManifestPath;
+        if (configured == null || configured.isBlank()) configured = DEFAULT_MANIFEST_PATH;
+        try {
+            config.pathRules.addAll(compileManifestToPathRules(loadManifest(Path.of(configured))));
+        } catch (RuntimeException ignored) {
+            // A malformed optional path must not prevent the application from starting.
         }
     }
 
@@ -313,6 +393,33 @@ public final class PathManifestCore {
         Map<String, Object> out = new LinkedHashMap<>();
         for (int i = 0; i + 1 < values.length; i += 2) out.put(String.valueOf(values[i]), values[i + 1]);
         return out;
+    }
+
+    private static Map<String, Object> protectionMap(Object value) {
+        return value instanceof Map<?, ?> raw ? stringObjectMap(raw) : Map.of();
+    }
+
+    private static Map<String, Object> stringObjectMap(Map<?, ?> raw) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> item : raw.entrySet()) {
+            if (item.getKey() != null) out.put(String.valueOf(item.getKey()), item.getValue());
+        }
+        return out;
+    }
+
+    private static Integer firstInteger(Map<String, Object> values, String... keys) {
+        for (String key : keys) {
+            Object value = values.get(key);
+            if (value instanceof Number number) return number.intValue();
+            if (value != null) {
+                try {
+                    return Integer.parseInt(String.valueOf(value));
+                } catch (NumberFormatException ignored) {
+                    // Try the next compatible spelling.
+                }
+            }
+        }
+        return null;
     }
 
     private static byte[] stableJson(Object value) {

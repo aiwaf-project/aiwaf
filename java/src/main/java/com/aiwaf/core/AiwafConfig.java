@@ -131,6 +131,10 @@ public final class AiwafConfig {
     public Set<String> geoAllowedCountries = new HashSet<>();
     public Set<String> geoBlockedCountries = new HashSet<>();
     public Set<String> geoExemptPaths = new HashSet<>();
+    /** Optional filesystem MMDB path. A null/blank value uses AIWAF's packaged database. */
+    public String geoIpDatabasePath = null;
+    public int geoCacheSeconds = 3600;
+    public int geoMaxCacheEntries = 10_000;
     public boolean honeypotEnabled = true;
     public double minFormTimeSeconds = 1.0;
     public double maxFormPageTimeSeconds = 240.0;
@@ -173,6 +177,9 @@ public final class AiwafConfig {
     public Map<String, List<String>> requiredHeadersByMethod = new HashMap<>();
     public Set<String> blockedPathPatterns = new HashSet<>(Arrays.asList(".env", "../", "%2e%2e", "wp-admin", "phpmyadmin", ".git"));
     public List<PathRule> pathRules = new ArrayList<>();
+    public boolean pathManifestEnabled = true;
+    public String pathManifestPath = ".aiwaf/paths.json";
+    boolean pathManifestApplied = false;
     public boolean aiEnabled = false;
     public boolean aiLazyLoadModel = true;
     public boolean aiBackgroundPreload = false;

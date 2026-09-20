@@ -69,4 +69,46 @@ class PathManifestCoreTest {
         ));
         assertFalse(((Map<?, ?>) manifest.get("routes")).containsKey("/aiwaf/status"));
     }
+
+    @Test
+    void compiles_manifest_protections_into_runtime_path_rules() {
+        Map<String, Object> manifest = Map.of("routes", Map.of(
+                "/api/accounts", Map.of("protections", Map.of(
+                        "header_validation", Map.of("enabled", false),
+                        "honeypot", false,
+                        "rate_limit", Map.of("requests", 17, "window_seconds", 45, "flood", 31)
+                ))
+        ));
+
+        List<AiwafConfig.PathRule> rules = PathManifestCore.compileManifestToPathRules(manifest);
+        assertEquals(1, rules.size());
+        AiwafConfig.PathRule rule = rules.get(0);
+        assertTrue(rule.disables("header_validation"));
+        assertTrue(rule.disables("honeypot"));
+        assertEquals(17, rule.rateLimitMaxOverride);
+        assertEquals(45, rule.rateLimitWindowOverride);
+        assertEquals(31, rule.rateLimitFloodOverride);
+    }
+
+    @Test
+    void engine_loads_manifest_once_and_keeps_explicit_equal_prefix_precedence() throws Exception {
+        Path output = tempDir.resolve("paths.json");
+        PathManifestCore.writeManifest(Map.of("schema_version", "1.0", "routes", Map.of(
+                "/api", Map.of("protections", Map.of(
+                        "header_validation", Map.of("enabled", false),
+                        "rate_limit", Map.of("requests", 7)
+                ))
+        )), output);
+
+        AiwafConfig config = new AiwafConfig();
+        config.pathManifestPath = output.toString();
+        config.pathRules.add(new AiwafConfig.PathRule("/api/", false, 99));
+        new AiwafEngine(config);
+        new AiwafEngine(config);
+
+        assertEquals(2, config.pathRules.size());
+        AiwafConfig.PathRule selected = ExemptionsCore.getPathRuleForPath("/api/users", config.pathRules);
+        assertEquals(99, selected.rateLimitMaxOverride);
+        assertFalse(selected.disables("header_validation"));
+    }
 }

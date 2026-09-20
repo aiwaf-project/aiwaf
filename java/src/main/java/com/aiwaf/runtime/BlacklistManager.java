@@ -29,6 +29,14 @@ public final class BlacklistManager {
         return block(ip, reason, null);
     }
 
+    public static boolean blockTemporary(String ip, String reason, int minutes) {
+        return block(ip, "Temporary: " + reason, Math.max(1, minutes) * 60);
+    }
+
+    public static boolean blockPermanent(String ip, String reason) {
+        return block(ip, "Permanent: " + reason, 0);
+    }
+
     public static boolean unblock(String ip) {
         return RuntimeStorage.getBlacklistStore().unblockIp(ip);
     }

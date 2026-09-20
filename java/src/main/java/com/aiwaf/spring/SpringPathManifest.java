@@ -22,8 +22,16 @@ public final class SpringPathManifest {
     private SpringPathManifest() {}
 
     public static List<PathManifestCore.RouteInfo> discoverRoutes(ApplicationContext context) {
+        return discoverHandlerRoutes(context).stream()
+                .map(route -> new PathManifestCore.RouteInfo(
+                        route.path(), route.httpMethods(), route.handler().getBeanType(), route.handler().getMethod()))
+                .toList();
+    }
+
+    /** Discover live mappings while retaining the real HandlerMethod for route annotations. */
+    public static List<MappedRoute> discoverHandlerRoutes(ApplicationContext context) {
         if (context == null) throw new IllegalArgumentException("application context must not be null");
-        List<PathManifestCore.RouteInfo> routes = new ArrayList<>();
+        List<MappedRoute> routes = new ArrayList<>();
         Map<String, RequestMappingHandlerMapping> mappings = context.getBeansOfType(RequestMappingHandlerMapping.class);
         for (RequestMappingHandlerMapping mapping : mappings.values()) {
             for (Map.Entry<RequestMappingInfo, HandlerMethod> entry : mapping.getHandlerMethods().entrySet()) {
@@ -35,17 +43,16 @@ public final class SpringPathManifest {
                         .toList();
                 if (methods.isEmpty()) methods = List.of("DELETE", "GET", "PATCH", "POST", "PUT");
                 for (String path : info.getPatternValues()) {
-                    routes.add(new PathManifestCore.RouteInfo(
+                    routes.add(new MappedRoute(
                             PathManifestCore.normalizePath(path),
                             methods,
-                            handler.getBeanType(),
-                            handler.getMethod()
+                            handler
                     ));
                 }
             }
         }
-        routes.sort(Comparator.comparing(PathManifestCore.RouteInfo::path)
-                .thenComparing(route -> route.method().getName()));
+        routes.sort(Comparator.comparing(MappedRoute::path)
+                .thenComparing(route -> route.handler().getMethod().getName()));
         return routes;
     }
 
@@ -94,4 +101,6 @@ public final class SpringPathManifest {
             return context;
         }
     }
+
+    public record MappedRoute(String path, List<String> httpMethods, HandlerMethod handler) {}
 }

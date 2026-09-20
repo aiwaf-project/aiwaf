@@ -43,12 +43,11 @@ class GeoIpCliReplayCoreParityTest {
     void mmdblookup_availability_gate_is_safe_when_tool_missing() {
         boolean available = GeoIpCore.isMmdbLookupAvailable();
         String mmdb = GeoIpCore.defaultMmdbPath();
-        if (!available) {
-            assertNull(GeoIpCore.lookupCountry("8.8.8.8", mmdb));
-            assertNull(GeoIpCore.lookupCountryName("8.8.8.8", mmdb));
-        } else {
-            assertFalse(mmdb.isBlank());
-        }
+        assertTrue(available);
+        assertFalse(mmdb.isBlank());
+        String country = GeoIpCore.lookupCountry("8.8.8.8", null);
+        assertNotNull(country);
+        assertTrue(country.matches("[A-Z]{2}"));
     }
 
     @Test

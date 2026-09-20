@@ -41,7 +41,10 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <jackson.version>2.22.2</jackson.version>
     <junit.version>5.14.4</junit.version>
+    <assertj.version>3.27.6</assertj.version>
     <spring.version>7.0.9</spring.version>
+    <spring-boot.version>4.0.8</spring-boot.version>
+    <maxmind-db.version>4.2.0</maxmind-db.version>
   </properties>
 
   <dependencies>
@@ -61,15 +64,33 @@
       <version>${spring.version}</version>
     </dependency>
     <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-autoconfigure</artifactId>
+      <version>${spring-boot.version}</version>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
       <groupId>org.springframework</groupId>
       <artifactId>spring-test</artifactId>
       <version>${spring.version}</version>
       <scope>test</scope>
     </dependency>
     <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-test</artifactId>
+      <version>${spring-boot.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>
       <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+      <version>${assertj.version}</version>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -88,10 +109,18 @@
       <artifactId>sqlite-jdbc</artifactId>
       <version>3.53.2.0</version>
     </dependency>
+    <dependency>
+      <groupId>com.maxmind.db</groupId>
+      <artifactId>maxmind-db</artifactId>
+      <version>${maxmind-db.version}</version>
+    </dependency>
   </dependencies>
 
   <build>
     <resources>
+      <resource>
+        <directory>${project.basedir}/src/main/resources</directory>
+      </resource>
       <resource>
         <directory>${project.basedir}/../py/aiwaf/core</directory>
         <includes>

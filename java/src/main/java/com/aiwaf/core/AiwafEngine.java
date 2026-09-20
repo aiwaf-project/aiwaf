@@ -36,6 +36,7 @@ public final class AiwafEngine {
 
     public AiwafEngine(AiwafConfig config, UuidPolicyCore.UUIDLookup uuidLookup) {
         this.config = config;
+        PathManifestCore.applyManifest(config);
         this.uuidLookup = uuidLookup;
         this.modelProvider = new LazyModelProviderCore(config.aiModelPath);
         RuntimeStorage.initialize(config.storageBackend, config.storageFilePath);

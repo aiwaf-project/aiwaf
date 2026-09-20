@@ -1,5 +1,19 @@
 # Changelog
 
+## Java 1.2.0
+
+- Added Spring Boot servlet auto-configuration with live MVC route, annotation,
+  and JPA UUID-field discovery.
+- Load generated path manifests at runtime while preserving explicit path-rule
+  precedence.
+- Replaced the external `mmdblookup` process with the native Java MaxMind DB
+  reader and bounded country caching.
+- Added Python-compatible reputation weights, metadata, and progressive
+  15-minute, 1-hour, and 24-hour default blocks; explicit permanent blocking
+  remains available.
+- Added Spring property and environment configuration for the new runtime
+  behavior.
+
 ## 1.0.8
 
 - Require `aiwaf-rust>=0.2.1` for the optional Rust extra.

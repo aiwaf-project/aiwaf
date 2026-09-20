@@ -53,9 +53,15 @@ public final class ServletRequestMapper {
         if (duplicateParameters[0]) headers.put("AIWAF-Internal-Duplicate-Parameters", "true");
 
         boolean trustedPeer = isTrustedProxy(req.getRemoteAddr(), config.trustedProxyCidrs);
+        String clientIp = resolveClientIp(req, headers, config, trustedPeer);
         String country = trustedPeer ? getHeader(headers, "X-Country").trim().toUpperCase(java.util.Locale.ROOT) : "";
         if (!country.matches("[A-Z]{2}")) country = "";
-        String clientIp = resolveClientIp(req, headers, config, trustedPeer);
+        if (country.isBlank() && (config.geoBlockEnabled
+                || !config.geoAllowedCountries.isEmpty() || !config.geoBlockedCountries.isEmpty())) {
+            String lookedUp = GeoIpCore.lookupCountryCached(
+                    clientIp, config.geoIpDatabasePath, config.geoCacheSeconds, config.geoMaxCacheEntries);
+            if (lookedUp != null && lookedUp.matches("[A-Z]{2}")) country = lookedUp;
+        }
         return new AiwafRequest(
                 req.getMethod(),
                 req.getRequestURI(),

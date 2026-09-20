@@ -54,6 +54,12 @@ public final class AiwafConfigCompatCore {
         cfg.geoBlockEnabled = bool(geo.get("enabled"), cfg.geoBlockEnabled);
         cfg.geoBlockedCountries.addAll(upperSet(geo.get("block_countries")));
         cfg.geoAllowedCountries.addAll(upperSet(geo.get("allow_countries")));
+        cfg.geoIpDatabasePath = str(or(geo.get("database_path"), geo.get("mmdb_path")), cfg.geoIpDatabasePath);
+        cfg.geoCacheSeconds = intval(geo.get("cache_seconds"), cfg.geoCacheSeconds);
+
+        Map<String, Object> manifest = map(settings.get("path_manifest"));
+        cfg.pathManifestEnabled = bool(manifest.get("enabled"), cfg.pathManifestEnabled);
+        cfg.pathManifestPath = str(manifest.get("path"), cfg.pathManifestPath);
 
         Map<String, Object> ai = map(settings.get("ai_anomaly"));
         cfg.aiEnabled = bool(ai.get("enabled"), cfg.aiEnabled);
@@ -117,6 +123,10 @@ public final class AiwafConfigCompatCore {
         get(env, "AIWAF_GEO_BLOCK_ENABLED").ifPresent(v -> cfg.geoBlockEnabled = parseBool(v, cfg.geoBlockEnabled));
         get(env, "AIWAF_GEO_BLOCK_COUNTRIES").ifPresent(v -> cfg.geoBlockedCountries.addAll(csvUpper(v)));
         get(env, "AIWAF_GEO_ALLOW_COUNTRIES").ifPresent(v -> cfg.geoAllowedCountries.addAll(csvUpper(v)));
+        get(env, "AIWAF_GEOIP_DATABASE_PATH").ifPresent(v -> cfg.geoIpDatabasePath = v);
+        get(env, "AIWAF_GEO_CACHE_SECONDS").ifPresent(v -> cfg.geoCacheSeconds = parseInt(v, cfg.geoCacheSeconds));
+        get(env, "AIWAF_PATH_MANIFEST_ENABLED").ifPresent(v -> cfg.pathManifestEnabled = parseBool(v, cfg.pathManifestEnabled));
+        get(env, "AIWAF_PATH_MANIFEST_PATH").ifPresent(v -> cfg.pathManifestPath = v);
         get(env, "AIWAF_AI_ENABLED").ifPresent(v -> cfg.aiEnabled = parseBool(v, cfg.aiEnabled));
         get(env, "AIWAF_AI_MODEL_PATH").ifPresent(v -> cfg.aiModelPath = v);
         get(env, "AIWAF_UUID_SCORE_ENABLED").ifPresent(v -> cfg.uuidScoreEnabled = parseBool(v, cfg.uuidScoreEnabled));

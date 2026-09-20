@@ -16,6 +16,8 @@ import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.core.Ordered;
+import org.springframework.context.ApplicationContext;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -36,14 +38,16 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
-public final class AiwafFilter extends OncePerRequestFilter {
+public final class AiwafFilter extends OncePerRequestFilter implements Ordered {
     private static final Set<String> SUPPORTED_MIDDLEWARES = Set.of(
             "ip_keyword_block", "rate_limit", "honeypot",
             "header_validation", "geo_block", "uuid_tamper", "ai_anomaly"
     );
 
     private final AiwafEngine engine;
-    private final List<RoutePolicy> routePolicies;
+    private volatile List<RoutePolicy> routePolicies;
+    private final ApplicationContext applicationContext;
+    private final AtomicBoolean liveRoutesResolved = new AtomicBoolean();
 
     public AiwafFilter(AiwafEngine engine) {
         this(engine, new Object[0]);
@@ -52,7 +56,20 @@ public final class AiwafFilter extends OncePerRequestFilter {
     public AiwafFilter(AiwafEngine engine, Object... handlers) {
         this.engine = engine;
         this.routePolicies = buildPolicies(handlers);
+        this.applicationContext = null;
         enrichLegitimateKeywords(engine, handlers);
+    }
+
+    /** Build policies lazily from every live Spring MVC mapping; no controller list is required. */
+    public AiwafFilter(AiwafEngine engine, ApplicationContext applicationContext) {
+        this.engine = engine;
+        this.routePolicies = List.of();
+        this.applicationContext = applicationContext;
+    }
+
+    @Override
+    public int getOrder() {
+        return Ordered.HIGHEST_PRECEDENCE + 10;
     }
 
     @Override
@@ -132,7 +149,7 @@ public final class AiwafFilter extends OncePerRequestFilter {
         }
         String method = normalizeMethod(request.getMethod());
         String path = request.getRequestURI() == null ? "/" : request.getRequestURI();
-        for (RoutePolicy policy : routePolicies) {
+        for (RoutePolicy policy : routePolicies()) {
             if (policy.matches(method, path)) {
                 Set<String> disabled = new HashSet<>();
                 for (String middleware : SUPPORTED_MIDDLEWARES) {
@@ -161,6 +178,28 @@ public final class AiwafFilter extends OncePerRequestFilter {
             }
         }
         return out;
+    }
+
+    private static List<RoutePolicy> buildPolicies(List<SpringPathManifest.MappedRoute> routes) {
+        List<RoutePolicy> out = new ArrayList<>();
+        for (SpringPathManifest.MappedRoute route : routes) {
+            Set<String> methods = new HashSet<>(route.httpMethods());
+            out.add(new RoutePolicy(route.path(), toRegexPath(route.path()), methods, route.handler()));
+        }
+        return List.copyOf(out);
+    }
+
+    private List<RoutePolicy> routePolicies() {
+        if (applicationContext == null || liveRoutesResolved.get()) return routePolicies;
+        synchronized (liveRoutesResolved) {
+            if (!liveRoutesResolved.get()) {
+                List<SpringPathManifest.MappedRoute> routes = SpringPathManifest.discoverHandlerRoutes(applicationContext);
+                routePolicies = buildPolicies(routes);
+                enrichLegitimateKeywords(engine, routes);
+                liveRoutesResolved.set(true);
+            }
+        }
+        return routePolicies;
     }
 
     private static Mapping extractMethodMapping(Method method) {
@@ -234,7 +273,7 @@ public final class AiwafFilter extends OncePerRequestFilter {
     private PathVariableCandidate resolveUuidPathVariable(HttpServletRequest request) {
         String method = normalizeMethod(request.getMethod());
         String path = request.getRequestURI() == null ? "/" : request.getRequestURI();
-        for (RoutePolicy policy : routePolicies) {
+        for (RoutePolicy policy : routePolicies()) {
             if (!policy.matches(method, path)) continue;
             PathVariableCandidate candidate = policy.uuidCandidate(path, engine.config().uuidParameterNames);
             if (candidate != null) return candidate;
@@ -267,6 +306,20 @@ public final class AiwafFilter extends OncePerRequestFilter {
                     addPathTokens(out, methodPath);
                 }
             }
+        }
+        LegitimateRouteKeywordsCore.mergeInto(out, LegitimateRouteKeywordsCore.fromHandlerClasses(types));
+    }
+
+    private static void enrichLegitimateKeywords(AiwafEngine engine, List<SpringPathManifest.MappedRoute> routes) {
+        if (engine == null || engine.config() == null || routes == null) return;
+        Set<String> out = engine.config().legitimatePathKeywords;
+        Set<Class<?>> types = new HashSet<>();
+        for (SpringPathManifest.MappedRoute route : routes) {
+            HandlerMethod handler = route.handler();
+            types.add(handler.getBeanType());
+            addTokenized(out, handler.getBeanType().getSimpleName());
+            addTokenized(out, handler.getMethod().getName());
+            addPathTokens(out, route.path());
         }
         LegitimateRouteKeywordsCore.mergeInto(out, LegitimateRouteKeywordsCore.fromHandlerClasses(types));
     }

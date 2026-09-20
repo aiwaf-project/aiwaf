@@ -1,5 +1,7 @@
 package com.aiwaf.runtime;
 
+import com.aiwaf.core.ReputationCore;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -22,17 +24,34 @@ public final class BlacklistStore {
             Integer durationSeconds,
             Map<String, Object> extendedRequestInfo
     ) {
+        double now = System.currentTimeMillis() / 1000.0;
+        Map<String, Object> existing = getBlockInfo(ip);
+        ReputationCore.Decision reputation = ReputationCore.evaluate(existing, reason, now);
+        Integer effectiveDuration;
+        if (durationSeconds == null) {
+            effectiveDuration = reputation.durationSeconds() == null
+                    ? ReputationCore.FIRST_BLOCK_SECONDS : reputation.durationSeconds();
+        } else if (durationSeconds <= 0) {
+            effectiveDuration = null;
+        } else {
+            effectiveDuration = durationSeconds;
+        }
         Map<String, Object> block = new HashMap<>();
         block.put("ip", ip);
         block.put("reason", reason);
-        block.put("blocked_at", System.currentTimeMillis() / 1000.0);
-        block.put("added_date", System.currentTimeMillis() / 1000.0);
-        block.put("duration", durationSeconds);
-        block.put("permanent", durationSeconds == null);
+        block.put("reputation_reason", ReputationCore.formatBlockReason(reputation));
+        block.put("reasons", reputation.reasons());
+        block.put("score", reputation.score());
+        block.put("offenses", reputation.offenses());
+        block.put("blocked_at", now);
+        block.put("added_date", now);
+        block.put("duration", effectiveDuration);
+        block.put("expires_at", effectiveDuration == null ? null : now + effectiveDuration);
+        block.put("permanent", effectiveDuration == null);
         if (extendedRequestInfo != null && !extendedRequestInfo.isEmpty()) {
             block.put("extended_request_info", new HashMap<>(extendedRequestInfo));
         }
-        storage.set("blocked:" + ip, block, durationSeconds);
+        storage.set("blocked:" + ip, block, effectiveDuration);
 
         List<Map<String, Object>> log = readBlockLog();
         log.add(block);

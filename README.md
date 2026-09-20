@@ -509,31 +509,26 @@ if (decision.allowed()) {
 
 ### Spring MVC
 
-`AiwafFilter` is the recommended Spring enforcement surface. It applies request controls before the controller and post-response AI scoring with the real response status and timing.
+Spring Boot applications are protected automatically. Adding `aiwaf-java` creates `AiwafConfig`, `AiwafEngine`, and the ordered `AiwafFilter`; discovers live MVC routes, route annotations, and JPA UUID fields; and applies request controls before the controller plus post-response scoring with the real status and timing. Set `aiwaf.enabled=false` to disable auto-configuration.
+
+```properties
+aiwaf.rate-limit.max=60
+aiwaf.rate-limit.window-seconds=60
+aiwaf.geo.enabled=true
+aiwaf.geo.blocked-countries=CN,RU
+aiwaf.path-manifest.path=.aiwaf/paths.json
+```
+
+Define an `AiwafConfig`, `AiwafEngine`, or `AiwafFilter` bean only when the application needs a custom replacement. For plain Spring MVC without Boot, register the filter directly; passing the application context enables the same live route discovery:
 
 ```java
 @Bean
-AiwafEngine aiwafEngine(ApplicationContext applicationContext) {
-    AiwafConfig config = new AiwafConfig();
-    config.storageBackend = "memory";
-    config.aiEnabled = false;
-    SpringUuidModelLookup uuidLookup = SpringUuidModelLookup.discover(applicationContext);
-    return new AiwafEngine(config, uuidLookup);
-}
-
-@Bean
-FilterRegistrationBean<AiwafFilter> aiwafFilter(
-        AiwafEngine engine,
-        AccountController accountController) {
-    FilterRegistrationBean<AiwafFilter> registration = new FilterRegistrationBean<>();
-    registration.setFilter(new AiwafFilter(engine, accountController));
-    registration.addUrlPatterns("/*");
-    registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 20);
-    return registration;
+AiwafFilter aiwafFilter(AiwafEngine engine, ApplicationContext context) {
+    return new AiwafFilter(engine, context);
 }
 ```
 
-Pass controller beans to the filter when using `@AiwafExempt`, `@AiwafExemptFrom`, `@AiwafOnly`, or `@AiwafRequireProtection`. Do not register `AiwafInterceptor` and `AiwafFilter` as independent enforcement layers for the same request.
+The live mapping integration honors `@AiwafExempt`, `@AiwafExemptFrom`, `@AiwafOnly`, and `@AiwafRequireProtection` without a controller list. Do not register `AiwafInterceptor` and `AiwafFilter` as independent enforcement layers for the same request.
 
 Committed, streaming, and asynchronous responses are recorded but are not replaced after bytes have been sent.
 
@@ -548,7 +543,7 @@ java -cp "your-app.jar:aiwaf-java-1.2.0.jar" \
   --output .aiwaf/paths.json
 ```
 
-The command starts the application, reads every registered `RequestMappingHandlerMapping`, writes the shared `schema_version/framework/context_hash/routes` document, and then closes the temporary application context.
+The command starts the application, reads every registered `RequestMappingHandlerMapping`, writes the shared `schema_version/framework/context_hash/routes` document, and then closes the temporary application context. At runtime, `AiwafEngine` loads this file automatically and appends its disabled middleware and rate-limit overrides after explicit `pathRules`, so explicit equal-prefix rules retain precedence. Set `pathManifestEnabled=false` or `aiwaf.path-manifest.enabled=false` to opt out.
 
 ### Jakarta Servlet
 
@@ -572,11 +567,14 @@ The generic servlet filter uses request-time evaluation. Spring applications sho
 | Request | body, parameter, method, and content-type limits |
 | Proxies | `trustedProxyCidrs`, `maxForwardedForEntries` |
 | Exemptions | `exemptIps`, `exemptPaths`, `autoExemptPathPrefixes` |
-| GeoIP | `geoBlockEnabled`, `geoAllowedCountries`, `geoBlockedCountries` |
+| GeoIP | `geoBlockEnabled`, `geoAllowedCountries`, `geoBlockedCountries`, `geoIpDatabasePath`, cache limits |
+| Route manifest | `pathManifestEnabled`, `pathManifestPath`, `pathRules` |
 | UUID checks | `uuidTamperEnabled`, `uuidScoreWindowSeconds`, `uuidScoreBlockThreshold`, signal weights, `uuidParameterNames` |
 | AI | `aiEnabled`, `aiModelPath`, `aiAnomalyScoreThreshold` |
 | Storage | `storageBackend`, `storageFilePath` |
 | Telemetry | `observabilityEnabled` |
+
+GeoIP uses the bundled MMDB through the native Java reader; it does not require the external `mmdblookup` executable. A valid `X-Country` value is accepted only from a peer in `trustedProxyCidrs`; otherwise AIWAF resolves the client address itself. Default blacklist calls use Python-compatible reputation scoring and temporary escalation (15 minutes, 1 hour, then 24 hours). Use `BlacklistManager.blockPermanent(ip, reason)` for an explicit permanent administrative block.
 
 New Java models use the Python-aligned six-feature schema and are written as safe JSON containing the Python `aiwaf_rust.IsolationForest` state. Python can restore Java-generated forest state, and Java can load Python Rust-model artifacts. Existing signed Java binary artifacts, including nine-feature models, remain readable through the restricted legacy loader. Scikit-learn object artifacts are intentionally unsupported.
 
