@@ -37,7 +37,7 @@ public final class ModelArtifactMigrationCore {
         }
         metadata.put("model_schema", schema);
         metadata.putIfAbsent("model_backend", "aiwaf_java");
-        metadata.putIfAbsent("aiwaf_java_version", "1.0.0");
+        metadata.putIfAbsent("aiwaf_java_version", "1.1.1");
         metadata.putIfAbsent("created_at_epoch_ms", System.currentTimeMillis());
         metadata.putIfAbsent("java_runtime_version", System.getProperty("java.runtime.version", "unknown"));
         return metadata;

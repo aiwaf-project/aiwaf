@@ -16,7 +16,7 @@ Each package is versioned and released independently.
 | Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.0.2` | Express and Node framework middleware |
 | Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.1` | Native Python acceleration and JSON model inference |
 | WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.1` | Rust detection and model primitives for JavaScript |
-| Java | `io.github.aiwaf-project:aiwaf-java` | `1.0.0` | Spring MVC and Jakarta Servlet protection |
+| Java | `io.github.aiwaf-project:aiwaf-java` | `1.1.1` | Spring MVC and Jakarta Servlet protection |
 
 Supported framework integrations include Django, Flask, FastAPI, Express, Fastify, Hapi, Koa, NestJS, Next.js API routes, AdonisJS, Sails.js, Spring MVC, and Jakarta Servlet.
 
@@ -75,13 +75,13 @@ npm install aiwaf
 npm install aiwaf-wasm
 ```
 
-Java 1.0.0, after it is published to Maven Central:
+Java 1.1.1, after it is published to Maven Central:
 
 ```xml
 <dependency>
   <groupId>io.github.aiwaf-project</groupId>
   <artifactId>aiwaf-java</artifactId>
-  <version>1.0.0</version>
+  <version>1.1.1</version>
 </dependency>
 ```
 
@@ -462,7 +462,7 @@ cp ../LICENSE crates/aiwaf_wasm/pkg/LICENSE
 
 ## Java package
 
-AIWAF Java 1.0.0 targets Java 17, Spring Framework 7.0, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
+AIWAF Java 1.1.1 targets Java 17, Spring Framework 7.0, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
 
 ### Core engine
 
@@ -681,7 +681,7 @@ Release versions and tags must match the relevant manifest.
 | npm `aiwaf` | `js/package.json` | `js-v1.0.2` | `npm-publish.yml` |
 | PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.1` | `rust-publish.yml` |
 | npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.1` | `wasm-publish.yml` |
-| Maven `aiwaf-java` | `java/pom.xml` | `java-v1.0.0` | `java-publish.yml` |
+| Maven `aiwaf-java` | `java/pom.xml` | `java-v1.1.1` | `java-publish.yml` |
 
 Python and Rust publish to PyPI with trusted publishing. The npm workflows use npm trusted publishing and stage packages for approval. Configure the trusted publisher with organization `aiwaf-project`, repository `aiwaf`, the exact workflow filename, and the environment used by that workflow.
 
