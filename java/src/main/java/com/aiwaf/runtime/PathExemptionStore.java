@@ -17,6 +17,7 @@ public final class PathExemptionStore {
     }
 
     private void load() {
+        exemptPaths.clear();
         Object v = storage.get("path_exemptions");
         if (!(v instanceof java.util.Map<?, ?> map)) {
             return;
@@ -41,6 +42,7 @@ public final class PathExemptionStore {
         if (path == null || path.isBlank()) {
             return false;
         }
+        load();
         boolean added = exemptPaths.add(path.trim());
         if (added) {
             save();
@@ -52,6 +54,7 @@ public final class PathExemptionStore {
         if (path == null || path.isBlank()) {
             return false;
         }
+        load();
         boolean changed = exemptPaths.remove(path.trim());
         if (changed) {
             save();
@@ -60,10 +63,12 @@ public final class PathExemptionStore {
     }
 
     public synchronized Set<String> getPaths() {
+        load();
         return new HashSet<>(exemptPaths);
     }
 
     public synchronized boolean isExempted(String path, boolean allowWildcards, boolean allowPrefix) {
+        load();
         return ExemptionsCore.isPathExempt(path, exemptPaths, allowWildcards, allowPrefix);
     }
 }

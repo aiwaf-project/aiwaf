@@ -1,59 +1,102 @@
 package com.aiwaf.runtime;
 
 public final class RuntimeStorage {
-    private static StorageBackend backend;
-    private static ExemptionStore exemptionStore;
-    private static PathExemptionStore pathExemptionStore;
-    private static BlacklistStore blacklistStore;
-    private static KeywordStore keywordStore;
-    private static GeoBlockStore geoBlockStore;
+    public static final class Context {
+        private final StorageBackend storage;
+        private final RuntimeState state;
+        private final ExemptionStore exemptionStore;
+        private final PathExemptionStore pathExemptionStore;
+        private final BlacklistStore blacklistStore;
+        private final KeywordStore keywordStore;
+        private final GeoBlockStore geoBlockStore;
+
+        private Context(StorageBackend storage, RuntimeState state) {
+            this.storage = storage;
+            this.state = state;
+            this.exemptionStore = new ExemptionStore(storage);
+            this.pathExemptionStore = new PathExemptionStore(storage);
+            this.blacklistStore = new BlacklistStore(storage);
+            this.keywordStore = new KeywordStore(storage);
+            this.geoBlockStore = new GeoBlockStore(storage);
+        }
+
+        public StorageBackend storage() { return storage; }
+        public RuntimeState state() { return state; }
+        public ExemptionStore exemptionStore() { return exemptionStore; }
+        public PathExemptionStore pathExemptionStore() { return pathExemptionStore; }
+        public BlacklistStore blacklistStore() { return blacklistStore; }
+        public KeywordStore keywordStore() { return keywordStore; }
+        public GeoBlockStore geoBlockStore() { return geoBlockStore; }
+    }
+
+    private static volatile Context defaultContext;
 
     private RuntimeStorage() {}
 
     public static synchronized StorageBackend initialize(String backendType, String filePath) {
+        return initialize(backendType, filePath, null, null);
+    }
+
+    public static synchronized StorageBackend initialize(
+            String backendType,
+            String filePath,
+            String redisUrl,
+            String keyPrefix
+    ) {
+        defaultContext = create(backendType, filePath, redisUrl, keyPrefix);
+        return defaultContext.storage();
+    }
+
+    public static Context create(String backendType, String filePath, String redisUrl, String keyPrefix) {
         String kind = backendType == null ? "memory" : backendType.trim().toLowerCase();
+        StorageBackend storage;
         switch (kind) {
-            case "memory" -> backend = new MemoryStorage();
-            case "file" -> backend = new FileStorage(filePath == null ? "aiwaf_data.bin" : filePath);
-            case "csv" -> backend = new CsvStorage(filePath == null ? "aiwaf_data.csv" : filePath);
-            case "db" -> backend = new DbStorage(filePath == null ? "aiwaf_data.db" : filePath);
+            case "memory" -> storage = new MemoryStorage();
+            case "file" -> storage = new FileStorage(filePath == null ? "aiwaf_data.bin" : filePath);
+            case "csv" -> storage = new CsvStorage(filePath == null ? "aiwaf_data.csv" : filePath);
+            case "db" -> storage = new DbStorage(filePath == null ? "aiwaf_data.db" : filePath);
+            case "redis" -> storage = new RedisStorage(redisUrl, keyPrefix);
             default -> throw new IllegalArgumentException("Unknown storage backend: " + backendType);
         }
-        exemptionStore = new ExemptionStore(backend);
-        pathExemptionStore = new PathExemptionStore(backend);
-        blacklistStore = new BlacklistStore(backend);
-        keywordStore = new KeywordStore(backend);
-        geoBlockStore = new GeoBlockStore(backend);
-        return backend;
+        RuntimeState state = storage instanceof RuntimeState shared ? shared : new LocalRuntimeState();
+        return new Context(storage, state);
+    }
+
+    public static synchronized void installDefault(Context context) {
+        if (context == null) throw new IllegalArgumentException("context cannot be null");
+        defaultContext = context;
+    }
+
+    public static Context getContext() {
+        Context current = defaultContext;
+        if (current != null) return current;
+        synchronized (RuntimeStorage.class) {
+            if (defaultContext == null) defaultContext = create("memory", null, null, null);
+            return defaultContext;
+        }
     }
 
     public static synchronized StorageBackend getStorage() {
-        if (backend == null) initialize("memory", null);
-        return backend;
+        return getContext().storage();
     }
 
     public static synchronized ExemptionStore getExemptionStore() {
-        if (exemptionStore == null) initialize("memory", null);
-        return exemptionStore;
+        return getContext().exemptionStore();
     }
 
     public static synchronized BlacklistStore getBlacklistStore() {
-        if (blacklistStore == null) initialize("memory", null);
-        return blacklistStore;
+        return getContext().blacklistStore();
     }
 
     public static synchronized PathExemptionStore getPathExemptionStore() {
-        if (pathExemptionStore == null) initialize("memory", null);
-        return pathExemptionStore;
+        return getContext().pathExemptionStore();
     }
 
     public static synchronized KeywordStore getKeywordStore() {
-        if (keywordStore == null) initialize("memory", null);
-        return keywordStore;
+        return getContext().keywordStore();
     }
 
     public static synchronized GeoBlockStore getGeoBlockStore() {
-        if (geoBlockStore == null) initialize("memory", null);
-        return geoBlockStore;
+        return getContext().geoBlockStore();
     }
 }

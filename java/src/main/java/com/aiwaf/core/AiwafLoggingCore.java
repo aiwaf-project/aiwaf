@@ -16,7 +16,14 @@ public final class AiwafLoggingCore {
     private AiwafLoggingCore() {}
 
     public static void log(AiwafConfig config, AiwafRequest req, AiwafDecision decision, int statusCode, long responseTimeMs, long contentLength) {
-        if (!config.loggingEnabled) return;
+        if (!config.loggingEnabled || !config.isMiddlewareEnabled("logging")) return;
+        AiwafConfig.PathRule rule = ExemptionsCore.getPathRuleForPath(req.path(), config.pathRules);
+        if ((req.disabledMiddlewares() != null && req.disabledMiddlewares().stream()
+                .map(ExemptionsCore::normalizeMiddlewareName)
+                .anyMatch("logging"::equals))
+                || (rule != null && rule.disables("logging"))) {
+            return;
+        }
 
         File logDir = new File(config.logDir);
         if (!logDir.exists()) {

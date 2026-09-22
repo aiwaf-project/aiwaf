@@ -41,7 +41,7 @@ import java.util.regex.Pattern;
 public final class AiwafFilter extends OncePerRequestFilter implements Ordered {
     private static final Set<String> SUPPORTED_MIDDLEWARES = Set.of(
             "ip_keyword_block", "rate_limit", "honeypot",
-            "header_validation", "geo_block", "uuid_tamper", "ai_anomaly"
+            "header_validation", "geo_block", "uuid_tamper", "ai_anomaly", "logging"
     );
 
     private final AiwafEngine engine;
@@ -96,7 +96,7 @@ public final class AiwafFilter extends OncePerRequestFilter implements Ordered {
         AiwafDecision decision = engine.evaluateBeforeResponse(aiwafReq);
         if (!decision.allowed()) {
             response.sendError(decision.statusCode(), decision.reason());
-            AiwafLoggingCore.log(engine.config(), aiwafReq, decision, decision.statusCode(), System.currentTimeMillis() - start, 0);
+            log(aiwafReq, decision, decision.statusCode(), System.currentTimeMillis() - start);
             return;
         }
         filterChain.doFilter(inspectedRequest, response);
@@ -108,8 +108,7 @@ public final class AiwafFilter extends OncePerRequestFilter implements Ordered {
                     HttpServletResponse completed = (HttpServletResponse) event.getSuppliedResponse();
                     int status = completed == null ? response.getStatus() : completed.getStatus();
                     engine.recordCommittedResponse(aiwafReq, status);
-                    AiwafLoggingCore.log(engine.config(), aiwafReq, decision, status,
-                            System.currentTimeMillis() - start, 0);
+                    log(aiwafReq, decision, status, System.currentTimeMillis() - start);
                 }
 
                 @Override public void onComplete(AsyncEvent event) { record(event); }
@@ -125,7 +124,7 @@ public final class AiwafFilter extends OncePerRequestFilter implements Ordered {
         long responseTimeMs = System.currentTimeMillis() - start;
         if (response.isCommitted()) {
             engine.recordCommittedResponse(aiwafReq, handlerStatus);
-            AiwafLoggingCore.log(engine.config(), aiwafReq, decision, handlerStatus, responseTimeMs, 0);
+            log(aiwafReq, decision, handlerStatus, responseTimeMs);
             return;
         }
         AiwafDecision finalDecision = engine.evaluateAfterResponse(aiwafReq, handlerStatus, responseTimeMs);
@@ -133,7 +132,13 @@ public final class AiwafFilter extends OncePerRequestFilter implements Ordered {
             response.reset();
             response.sendError(finalDecision.statusCode(), finalDecision.reason());
         }
-        AiwafLoggingCore.log(engine.config(), aiwafReq, finalDecision, response.getStatus(), responseTimeMs, 0);
+        log(aiwafReq, finalDecision, response.getStatus(), responseTimeMs);
+    }
+
+    private void log(AiwafRequest request, AiwafDecision decision, int status, long responseTimeMs) {
+        if (engine.shouldApplyMiddleware(request, "logging")) {
+            AiwafLoggingCore.log(engine.config(), request, decision, status, responseTimeMs, 0);
+        }
     }
 
     private Set<String> resolveDisabledMiddlewares(HttpServletRequest request) {

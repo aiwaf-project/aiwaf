@@ -16,6 +16,8 @@ public final class ExemptionStore {
     }
 
     private void load() {
+        exemptIps.clear();
+        exemptPatterns.clear();
         Object v = storage.get("exemptions");
         if (!(v instanceof java.util.Map<?, ?>)) return;
         java.util.Map<?, ?> m = (java.util.Map<?, ?>) v;
@@ -39,17 +41,20 @@ public final class ExemptionStore {
     }
 
     public synchronized void addIp(String ip, String reason) {
+        load();
         exemptIps.add(ip);
         save();
     }
 
     public synchronized boolean removeIp(String ip) {
+        load();
         boolean changed = exemptIps.remove(ip);
         if (changed) save();
         return changed;
     }
 
     public synchronized void addPattern(String pattern, String reason) {
+        load();
         if (!exemptPatterns.contains(pattern)) {
             exemptPatterns.add(pattern);
             save();
@@ -57,12 +62,14 @@ public final class ExemptionStore {
     }
 
     public synchronized boolean removePattern(String pattern) {
+        load();
         boolean changed = exemptPatterns.remove(pattern);
         if (changed) save();
         return changed;
     }
 
     public synchronized boolean isExempted(String ip) {
+        load();
         if (ip == null || ip.isBlank()) return false;
         if (exemptIps.contains(ip)) return true;
         for (String pattern : exemptPatterns) {
@@ -77,10 +84,12 @@ public final class ExemptionStore {
     }
 
     public synchronized Set<String> getExemptedIps() {
+        load();
         return new HashSet<>(exemptIps);
     }
 
     public synchronized List<String> getExemptedPatterns() {
+        load();
         return new ArrayList<>(exemptPatterns);
     }
 }

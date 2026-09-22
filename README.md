@@ -517,7 +517,13 @@ aiwaf.rate-limit.window-seconds=60
 aiwaf.geo.enabled=true
 aiwaf.geo.blocked-countries=CN,RU
 aiwaf.path-manifest.path=.aiwaf/paths.json
+# Use one namespace and shared enforcement state across application instances.
+aiwaf.storage.backend=redis
+aiwaf.storage.redis-url=redis://localhost:6379/0
+aiwaf.storage.key-prefix=my-service
 ```
+
+Set `aiwaf.config-file=/etc/aiwaf/config.json` (or `AIWAF_CONFIG_FILE`) to load the same nested JSON configuration used by the Python runtime. Environment variables and Spring properties override file values. `AiwafConfigFileCore` also exposes load, save, deep-merge, and validation APIs for non-Spring applications.
 
 Define an `AiwafConfig`, `AiwafEngine`, or `AiwafFilter` bean only when the application needs a custom replacement. For plain Spring MVC without Boot, register the filter directly; passing the application context enables the same live route discovery:
 
@@ -571,10 +577,12 @@ The generic servlet filter uses request-time evaluation. Spring applications sho
 | Route manifest | `pathManifestEnabled`, `pathManifestPath`, `pathRules` |
 | UUID checks | `uuidTamperEnabled`, `uuidScoreWindowSeconds`, `uuidScoreBlockThreshold`, signal weights, `uuidParameterNames` |
 | AI | `aiEnabled`, `aiModelPath`, `aiAnomalyScoreThreshold` |
-| Storage | `storageBackend`, `storageFilePath` |
+| Storage | `storageBackend`, `storageFilePath`, `storageRedisUrl`, `storageKeyPrefix` |
 | Telemetry | `observabilityEnabled` |
 
 GeoIP uses the bundled MMDB through the native Java reader; it does not require the external `mmdblookup` executable. A valid `X-Country` value is accepted only from a peer in `trustedProxyCidrs`; otherwise AIWAF resolves the client address itself. Default blacklist calls use Python-compatible reputation scoring and temporary escalation (15 minutes, 1 hour, then 24 hours). Use `BlacklistManager.blockPermanent(ip, reason)` for an explicit permanent administrative block.
+
+`storageBackend="redis"` makes rate-limit buckets, honeypot timing, weighted UUID scores, recent-request anomaly state, blacklist data, exemptions, geo policy, and learned keywords visible to every application instance using the same key prefix. Redis enforcement updates use atomic server-side scripts. Memory, file, CSV, and SQLite engines keep request state isolated per `AiwafEngine`; constructing another engine no longer replaces an existing engine's stores. The static `RuntimeStorage` and `BlacklistManager` methods remain compatibility facades for command-line and administrative code.
 
 New Java models use the Python-aligned six-feature schema and are written as safe JSON containing the Python `aiwaf_rust.IsolationForest` state. Python can restore Java-generated forest state, and Java can load Python Rust-model artifacts. Existing signed Java binary artifacts, including nine-feature models, remain readable through the restricted legacy loader. Scikit-learn object artifacts are intentionally unsupported.
 

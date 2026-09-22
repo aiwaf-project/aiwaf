@@ -45,6 +45,7 @@
     <spring.version>7.0.9</spring.version>
     <spring-boot.version>4.0.8</spring-boot.version>
     <maxmind-db.version>4.2.0</maxmind-db.version>
+    <jedis.version>7.5.3</jedis.version>
   </properties>
 
   <dependencies>
@@ -113,6 +114,11 @@
       <groupId>com.maxmind.db</groupId>
       <artifactId>maxmind-db</artifactId>
       <version>${maxmind-db.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>redis.clients</groupId>
+      <artifactId>jedis</artifactId>
+      <version>${jedis.version}</version>
     </dependency>
   </dependencies>
 

@@ -1,9 +1,10 @@
 package com.aiwaf.core;
 
 import com.aiwaf.runtime.BlacklistManager;
+import com.aiwaf.runtime.CidrUtil;
+import com.aiwaf.runtime.RuntimeState;
 import com.aiwaf.runtime.RuntimeStorage;
 
-import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -11,15 +12,10 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedDeque;
 
 public final class AiwafEngine {
     private final AiwafConfig config;
-    private final Map<String, Deque<Long>> requestBuckets = new ConcurrentHashMap<>();
-    private final Map<String, Long> lastGetPerIpPath = new ConcurrentHashMap<>();
-    private final Map<String, Deque<RecentRequest>> recentRequestsByIp = new ConcurrentHashMap<>();
-    private final UuidScoreCore uuidScores = new UuidScoreCore();
+    private final RuntimeStorage.Context runtimeStorage;
     private final LazyModelProviderCore modelProvider;
     private final UuidPolicyCore.UUIDLookup uuidLookup;
     private final AiwafTelemetryCore telemetry = new AiwafTelemetryCore();
@@ -35,11 +31,25 @@ public final class AiwafEngine {
     }
 
     public AiwafEngine(AiwafConfig config, UuidPolicyCore.UUIDLookup uuidLookup) {
+        this(config, uuidLookup, RuntimeStorage.create(
+                config.storageBackend,
+                config.storageFilePath,
+                config.storageRedisUrl,
+                config.storageKeyPrefix
+        ));
+    }
+
+    public AiwafEngine(
+            AiwafConfig config,
+            UuidPolicyCore.UUIDLookup uuidLookup,
+            RuntimeStorage.Context runtimeStorage
+    ) {
         this.config = config;
         PathManifestCore.applyManifest(config);
         this.uuidLookup = uuidLookup;
         this.modelProvider = new LazyModelProviderCore(config.aiModelPath);
-        RuntimeStorage.initialize(config.storageBackend, config.storageFilePath);
+        this.runtimeStorage = runtimeStorage;
+        RuntimeStorage.installDefault(runtimeStorage);
         if (config.aiEnabled) {
             if (!config.aiLazyLoadModel) {
                 modelProvider.get();
@@ -52,10 +62,7 @@ public final class AiwafEngine {
     }
 
     public void clearState() {
-        requestBuckets.clear();
-        lastGetPerIpPath.clear();
-        recentRequestsByIp.clear();
-        uuidScores.clear();
+        runtimeStorage.state().clear();
         telemetry.reset();
     }
 
@@ -65,6 +72,10 @@ public final class AiwafEngine {
 
     public AiwafTelemetryCore telemetry() {
         return telemetry;
+    }
+
+    public RuntimeStorage.Context runtimeStorage() {
+        return runtimeStorage;
     }
 
     public AiwafDecision evaluate(AiwafRequest req) {
@@ -82,7 +93,7 @@ public final class AiwafEngine {
         long nowMillis = System.currentTimeMillis();
         String ip = blankToDefault(req.ip(), "127.0.0.1");
         AiwafConfig.PathRule rule = ExemptionsCore.getPathRuleForPath(req.path(), config.pathRules);
-        boolean ipExempted = config.exemptIps.contains(ip) || (config.privateIpsExempted && isPrivateIp(ip));
+        boolean ipExempted = isIpExempted(ip);
         AiwafDecision aiDecision = evaluateUuidResponse(req, ip, statusCode, nowMillis);
         if (!isPathExempted(req) && !ipExempted
                 && aiDecision == null
@@ -128,8 +139,8 @@ public final class AiwafEngine {
         int floodThreshold = resolveRateLimitOverride(rule, "flood", config.rateLimitFloodThreshold, rule == null ? null : rule.rateLimitFloodOverride);
         boolean pathExempted = isPathExempted(req);
         String ip = blankToDefault(req.ip(), "127.0.0.1");
-        boolean ipExempted = config.exemptIps.contains(ip) || (config.privateIpsExempted && isPrivateIp(ip));
-        if (!ipExempted && BlacklistManager.isBlocked(ip)) {
+        boolean ipExempted = isIpExempted(ip);
+        if (!ipExempted && BlacklistManager.isBlocked(runtimeStorage, ip)) {
             AiwafDecision d = AiwafDecision.deny(403, "IP blacklisted");
             return finalizeDecision(d, startedNs, "ip_blacklisted");
         }
@@ -144,7 +155,7 @@ public final class AiwafEngine {
             String matchedKeyword = detectMaliciousKeyword(req.path());
             if (matchedKeyword != null) {
                 telemetryIncrement("middleware.ip_keyword_block.triggered");
-                RuntimeStorage.getKeywordStore().addKeyword(matchedKeyword, 1);
+                runtimeStorage.keywordStore().addKeyword(matchedKeyword, 1);
                 blockWithContext(ip, req, "Keyword block: " + matchedKeyword);
                 AiwafDecision d = AiwafDecision.deny(403, "Malicious keyword: " + matchedKeyword);
                 return finalizeDecision(d, startedNs, "ip_keyword_block");
@@ -159,12 +170,13 @@ public final class AiwafEngine {
             maybeLearnKeywords(req);
         }
 
-        if (!isRuleDisabled(req, rule, config, "uuid_tamper") && config.uuidTamperEnabled) {
+        if (!pathExempted && !ipExempted
+                && !isRuleDisabled(req, rule, config, "uuid_tamper") && config.uuidTamperEnabled) {
             String uuidValue = uuidCandidate(req);
             if (uuidValue != null && !isValidUuid(uuidValue)) {
                 telemetryIncrement("middleware.uuid_tamper.triggered");
-                UuidScoreCore.Decision score = uuidScores.record(
-                        ip, UuidScoreCore.Signal.MALFORMED, req.nowEpochMillis(), uuidScoreConfig());
+                RuntimeState.UuidResult score = recordUuidSignal(
+                        ip, UuidScoreCore.Signal.MALFORMED, req.nowEpochMillis());
                 blockWithContext(ip, req, "UUID tampering score=" + score.score());
                 AiwafDecision d = AiwafDecision.deny(403, "UUID tampering score=" + score.score());
                 return finalizeDecision(d, startedNs, "uuid_tamper");
@@ -174,11 +186,14 @@ public final class AiwafEngine {
         if (!pathExempted && !isRuleDisabled(req, rule, config, "honeypot") && config.honeypotEnabled) {
             String key = ip + "|" + req.path();
             if ("GET".equalsIgnoreCase(req.method())) {
-                if (reserveStateEntry(lastGetPerIpPath, key)) {
-                    lastGetPerIpPath.put(key, req.nowEpochMillis());
-                }
+                runtimeStorage.state().recordFormGet(
+                        key,
+                        req.nowEpochMillis(),
+                        Math.max(1, (int) Math.ceil(config.maxFormPageTimeSeconds)),
+                        config.maxRuntimeStateEntries
+                );
             } else if ("POST".equalsIgnoreCase(req.method())) {
-                Long lastGet = lastGetPerIpPath.get(key);
+                Long lastGet = runtimeStorage.state().getFormGet(key);
                 if (lastGet != null) {
                     double elapsed = (req.nowEpochMillis() - lastGet) / 1000.0;
                     if (elapsed > config.maxFormPageTimeSeconds) {
@@ -227,7 +242,8 @@ public final class AiwafEngine {
             }
         }
 
-        if (!pathExempted && !isRuleDisabled(req, rule, config, "geo_block") && config.geoBlockEnabled && !ipExempted) {
+        if (!pathExempted && !isGeoPathExempted(req)
+                && !isRuleDisabled(req, rule, config, "geo_block") && config.geoBlockEnabled && !ipExempted) {
             String country = safeUpper(req.country());
             if (!config.geoAllowedCountries.isEmpty() && !config.geoAllowedCountries.contains(country)) {
                 telemetryIncrement("middleware.geo_block.allowlist_denied");
@@ -235,7 +251,7 @@ public final class AiwafEngine {
                 return finalizeDecision(d, startedNs, "geo_allowlist");
             }
             boolean blockedByConfig = config.geoBlockedCountries.contains(country);
-            boolean blockedByStore = RuntimeStorage.getGeoBlockStore().getCountries().contains(country);
+            boolean blockedByStore = runtimeStorage.geoBlockStore().getCountries().contains(country);
             if (blockedByConfig || blockedByStore) {
                 telemetryIncrement("middleware.geo_block.blocked");
                 AiwafDecision d = AiwafDecision.deny(403, "Geo blocked");
@@ -247,30 +263,30 @@ public final class AiwafEngine {
             String bucketKey = config.rateLimitScope == AiwafConfig.RateLimitScope.GLOBAL_IP
                     ? ip
                     : ip + "|" + req.path();
-            if (!reserveRateLimitEntry(bucketKey, req.nowEpochMillis(), windowSeconds)) {
+            RuntimeState.RateResult rate = runtimeStorage.state().recordRate(
+                    bucketKey,
+                    req.nowEpochMillis(),
+                    windowSeconds,
+                    maxRequests,
+                    floodThreshold,
+                    config.maxRuntimeStateEntries
+            );
+            if (rate.action() == RuntimeState.RateAction.CAPACITY) {
                 telemetryIncrement("middleware.rate_limit.capacity");
                 AiwafDecision d = AiwafDecision.deny(429, "Rate limiter capacity exceeded");
                 return finalizeDecision(d, startedNs, "rate_limit_capacity");
             }
-            Deque<Long> bucket = requestBuckets.computeIfAbsent(bucketKey, k -> new ConcurrentLinkedDeque<>());
-            long threshold = req.nowEpochMillis() - (windowSeconds * 1000L);
-            synchronized (bucket) {
-                while (!bucket.isEmpty() && bucket.peekFirst() < threshold) {
-                    bucket.pollFirst();
-                }
-                if (bucket.size() >= floodThreshold) {
-                    if (config.blockIpOnFloodBreach) blockWithContext(ip, req, "Flood pattern");
-                    telemetryIncrement("middleware.rate_limit.flood");
-                    AiwafDecision d = AiwafDecision.deny(403, "Flood pattern");
-                    return finalizeDecision(d, startedNs, "rate_limit_flood");
-                }
-                if (bucket.size() >= maxRequests) {
-                    if (config.blockIpOnRateLimitBreach) blockWithContext(ip, req, "Rate limit exceeded");
-                    telemetryIncrement("middleware.rate_limit.exceeded");
-                    AiwafDecision d = AiwafDecision.deny(429, "Rate limit exceeded");
-                    return finalizeDecision(d, startedNs, "rate_limit");
-                }
-                bucket.addLast(req.nowEpochMillis());
+            if (rate.action() == RuntimeState.RateAction.FLOOD) {
+                if (config.blockIpOnFloodBreach) blockWithContext(ip, req, "Flood pattern");
+                telemetryIncrement("middleware.rate_limit.flood");
+                AiwafDecision d = AiwafDecision.deny(403, "Flood pattern");
+                return finalizeDecision(d, startedNs, "rate_limit_flood");
+            }
+            if (rate.action() == RuntimeState.RateAction.LIMIT) {
+                if (config.blockIpOnRateLimitBreach) blockWithContext(ip, req, "Rate limit exceeded");
+                telemetryIncrement("middleware.rate_limit.exceeded");
+                AiwafDecision d = AiwafDecision.deny(429, "Rate limit exceeded");
+                return finalizeDecision(d, startedNs, "rate_limit");
             }
         }
 
@@ -290,11 +306,20 @@ public final class AiwafEngine {
         return finalizeDecision(allow, startedNs, "allow");
     }
 
-    private boolean isPathExempted(AiwafRequest req) {
+    public boolean isPathExempted(AiwafRequest req) {
         return config.isAutoExemptPath(req.path())
                 || ExemptionsCore.isPathExempt(req.path(), config.exemptPaths, config.exemptAllowWildcards, config.exemptAllowPrefix)
-                || RuntimeStorage.getPathExemptionStore().isExempted(req.path(), config.exemptAllowWildcards, config.exemptAllowPrefix)
-                || config.geoExemptPaths.contains(req.path());
+                || runtimeStorage.pathExemptionStore().isExempted(req.path(), config.exemptAllowWildcards, config.exemptAllowPrefix);
+    }
+
+    public boolean shouldApplyMiddleware(AiwafRequest req, String middlewareName) {
+        AiwafConfig.PathRule rule = ExemptionsCore.getPathRuleForPath(req.path(), config.pathRules);
+        return !isPathExempted(req) && !isRuleDisabled(req, rule, config, middlewareName);
+    }
+
+    private boolean isGeoPathExempted(AiwafRequest req) {
+        return ExemptionsCore.isPathExempt(
+                req.path(), config.geoExemptPaths, config.exemptAllowWildcards, config.exemptAllowPrefix);
     }
 
     private AiwafDecision evaluateUuidResponse(AiwafRequest req, String ip, int statusCode, long nowMillis) {
@@ -305,7 +330,7 @@ public final class AiwafEngine {
         if (isRuleDisabled(req, rule, config, "uuid_tamper")) {
             return null;
         }
-        boolean ipExempted = config.exemptIps.contains(ip) || (config.privateIpsExempted && isPrivateIp(ip));
+        boolean ipExempted = isIpExempted(ip);
         if (ipExempted) {
             return null;
         }
@@ -323,7 +348,7 @@ public final class AiwafEngine {
         } else {
             return null;
         }
-        UuidScoreCore.Decision score = uuidScores.record(ip, signal, nowMillis, uuidScoreConfig());
+        RuntimeState.UuidResult score = recordUuidSignal(ip, signal, nowMillis);
         if (!score.blocked()) {
             return null;
         }
@@ -350,6 +375,28 @@ public final class AiwafEngine {
                 config.uuidMalformedWeight,
                 config.uuidNotFoundWeight,
                 config.uuidSuccessDecay
+        );
+    }
+
+    private RuntimeState.UuidResult recordUuidSignal(
+            String subject,
+            UuidScoreCore.Signal signal,
+            long nowMillis
+    ) {
+        UuidScoreCore.Config scoring = uuidScoreConfig();
+        if (!scoring.enabled()) return new RuntimeState.UuidResult(0, false);
+        int delta = switch (signal) {
+            case MALFORMED -> scoring.malformedWeight();
+            case NOT_FOUND -> scoring.notFoundWeight();
+            case SUCCESS -> -scoring.successDecay();
+        };
+        return runtimeStorage.state().recordUuid(
+                subject,
+                delta,
+                nowMillis,
+                scoring.windowSeconds(),
+                scoring.blockThreshold(),
+                config.maxRuntimeStateEntries
         );
     }
 
@@ -509,7 +556,7 @@ public final class AiwafEngine {
     private String detectLearnedKeyword(String path) {
         String p = path == null ? "" : path.toLowerCase(Locale.ROOT);
         String[] tokens = p.split("\\W+");
-        Set<String> learned = new HashSet<>(RuntimeStorage.getKeywordStore().getTopKeywords(100));
+        Set<String> learned = new HashSet<>(runtimeStorage.keywordStore().getTopKeywords(100));
         for (String token : tokens) {
             if (token.length() > 3 && learned.contains(token)) return token;
         }
@@ -542,6 +589,23 @@ public final class AiwafEngine {
             return false;
         }
         return second >= 16 && second <= 31;
+    }
+
+    private boolean isIpExempted(String ip) {
+        if (runtimeStorage.exemptionStore().isExempted(ip) || config.exemptIps.contains(ip)) return true;
+        if (config.localhostExempted && ("::1".equals(ip) || (ip != null && ip.startsWith("127.")))) return true;
+        if (config.privateIpsExempted && isPrivateIp(ip)) return true;
+        Set<String> patterns = new HashSet<>(config.exemptIpPatterns);
+        for (String configured : config.exemptIps) {
+            if (configured != null && (configured.contains("*") || configured.contains("/"))) patterns.add(configured);
+        }
+        for (String pattern : patterns) {
+            if (pattern == null || pattern.isBlank()) continue;
+            if (pattern.contains("/") && CidrUtil.contains(pattern, ip)) return true;
+            String regex = pattern.replace(".", "\\.").replace("*", ".*");
+            if (ip != null && ip.matches(regex)) return true;
+        }
+        return false;
     }
 
     private static String blankToDefault(String value, String fallback) {
@@ -670,7 +734,7 @@ public final class AiwafEngine {
             if (config.exemptKeywords.contains(seg)) continue;
             if (config.legitimatePathKeywords.contains(seg)) continue;
             if (defaultMaliciousKeywords.contains(seg)) continue;
-            RuntimeStorage.getKeywordStore().addKeyword(seg, 1);
+            runtimeStorage.keywordStore().addKeyword(seg, 1);
             added++;
             if (added >= config.dynamicTopN) {
                 break;
@@ -694,7 +758,7 @@ public final class AiwafEngine {
 
     private void blockWithContext(String ip, AiwafRequest req, String reason) {
         Map<String, Object> ext = config.storeExtendedBlockInfo ? extendedBlockInfo(req) : null;
-        BlacklistManager.block(ip, reason, null, ext);
+        BlacklistManager.block(runtimeStorage, ip, reason, null, ext);
         telemetryIncrement("blocks.total");
     }
 
@@ -773,81 +837,24 @@ public final class AiwafEngine {
     }
 
     private void recordRecent(String ip, AiwafRequest req, int statusCode, long nowMillis) {
-        if (!reserveRecentEntry(ip, nowMillis)) return;
-        Deque<RecentRequest> queue = recentRequestsByIp.computeIfAbsent(ip, k -> new ConcurrentLinkedDeque<>());
-        queue.addLast(new RecentRequest(nowMillis, req.path(), statusCode));
-        long cutoff = nowMillis - (config.aiRecentWindowSeconds * 1000L);
-        while (!queue.isEmpty() && queue.peekFirst().timestampMillis() < cutoff) {
-            queue.pollFirst();
-        }
-        if (queue.isEmpty()) recentRequestsByIp.remove(ip, queue);
-    }
-
-    private synchronized boolean reserveStateEntry(Map<String, Long> map, String key) {
-        if (map.containsKey(key)) return true;
-        int max = Math.max(100, config.maxRuntimeStateEntries);
-        if (map.size() < max) return true;
-        long cutoff = System.currentTimeMillis() - Math.max(60_000L, (long) (config.maxFormPageTimeSeconds * 1000L));
-        map.entrySet().removeIf(entry -> entry.getValue() < cutoff);
-        return map.size() < max;
-    }
-
-    private synchronized boolean reserveRateLimitEntry(String key, long nowMillis, int windowSeconds) {
-        if (requestBuckets.containsKey(key)) return true;
-        int max = Math.max(100, config.maxRuntimeStateEntries);
-        if (requestBuckets.size() < max) return true;
-        long cutoff = nowMillis - Math.max(1, windowSeconds) * 1000L;
-        requestBuckets.entrySet().removeIf(entry -> {
-            Long newest = entry.getValue().peekLast();
-            return newest == null || newest < cutoff;
-        });
-        return requestBuckets.size() < max;
-    }
-
-    private synchronized boolean reserveRecentEntry(String ip, long nowMillis) {
-        if (recentRequestsByIp.containsKey(ip)) return true;
-        int max = Math.max(100, config.maxRuntimeStateEntries);
-        if (recentRequestsByIp.size() < max) return true;
-        long cutoff = nowMillis - Math.max(1, config.aiRecentWindowSeconds) * 1000L;
-        recentRequestsByIp.entrySet().removeIf(entry -> {
-            RecentRequest newest = entry.getValue().peekLast();
-            return newest == null || newest.timestampMillis() < cutoff;
-        });
-        return recentRequestsByIp.size() < max;
+        runtimeStorage.state().recordRecent(
+                ip,
+                nowMillis,
+                statusCode,
+                config.aiRecentWindowSeconds,
+                config.maxRuntimeStateEntries
+        );
     }
 
     private int recentCount(String ip, long nowMillis, int windowSeconds) {
-        Deque<RecentRequest> queue = recentRequestsByIp.get(ip);
-        if (queue == null || queue.isEmpty()) return 0;
-        long cutoff = nowMillis - (windowSeconds * 1000L);
-        int count = 0;
-        for (RecentRequest r : queue) {
-            if (r.timestampMillis() >= cutoff) count++;
-        }
-        return count;
+        return runtimeStorage.state().recentStats(ip, nowMillis, windowSeconds).count();
     }
 
     private int recent404(String ip, long nowMillis, int windowSeconds) {
-        Deque<RecentRequest> queue = recentRequestsByIp.get(ip);
-        if (queue == null || queue.isEmpty()) return 0;
-        long cutoff = nowMillis - (windowSeconds * 1000L);
-        int count = 0;
-        for (RecentRequest r : queue) {
-            if (r.timestampMillis() >= cutoff && r.statusCode() == 404) count++;
-        }
-        return count;
+        return runtimeStorage.state().recentStats(ip, nowMillis, windowSeconds).notFoundCount();
     }
 
     private int recentBurst(String ip, long nowMillis) {
-        Deque<RecentRequest> queue = recentRequestsByIp.get(ip);
-        if (queue == null || queue.isEmpty()) return 0;
-        long cutoff = nowMillis - 10_000L;
-        int count = 0;
-        for (RecentRequest r : queue) {
-            if (r.timestampMillis() >= cutoff) count++;
-        }
-        return count;
+        return runtimeStorage.state().recentStats(ip, nowMillis, config.aiRecentWindowSeconds).burstCount();
     }
-
-    private record RecentRequest(long timestampMillis, String path, int statusCode) {}
 }

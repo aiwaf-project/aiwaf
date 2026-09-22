@@ -41,10 +41,16 @@ public final class AiwafServletFilter implements Filter {
         AiwafDecision decision = engine.evaluate(aiwafReq);
         if (!decision.allowed()) {
             httpResp.sendError(decision.statusCode(), decision.reason());
-            AiwafLoggingCore.log(engine.config(), aiwafReq, decision, decision.statusCode(), System.currentTimeMillis() - start, 0);
+            log(aiwafReq, decision, decision.statusCode(), System.currentTimeMillis() - start);
             return;
         }
         chain.doFilter(inspectedRequest, response);
-        AiwafLoggingCore.log(engine.config(), aiwafReq, decision, httpResp.getStatus(), System.currentTimeMillis() - start, 0);
+        log(aiwafReq, decision, httpResp.getStatus(), System.currentTimeMillis() - start);
+    }
+
+    private void log(AiwafRequest request, AiwafDecision decision, int status, long responseTimeMs) {
+        if (engine.shouldApplyMiddleware(request, "logging")) {
+            AiwafLoggingCore.log(engine.config(), request, decision, status, responseTimeMs, 0);
+        }
     }
 }

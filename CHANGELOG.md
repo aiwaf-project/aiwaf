@@ -2,6 +2,14 @@
 
 ## Java 1.2.0
 
+- Added scoped per-engine storage contexts and a Redis backend with atomic,
+  distributed rate-limit, honeypot, UUID-score, and anomaly-history state.
+- Aligned path, IP, geo-only, and route-level logging exemption behavior with
+  Python.
+- Added Python-style JSON configuration loading, environment overrides, deep
+  merge, validation, saving, and broader Spring property coverage.
+- Aligned Java defaults for private-IP exemptions and anomaly detection with
+  Python.
 - Added Spring Boot servlet auto-configuration with live MVC route, annotation,
   and JPA UUID-field discovery.
 - Load generated path manifests at runtime while preserving explicit path-rule

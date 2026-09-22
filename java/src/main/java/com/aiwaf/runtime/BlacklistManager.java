@@ -18,10 +18,20 @@ public final class BlacklistManager {
     }
 
     public static boolean block(String ip, String reason, Integer durationSeconds, Map<String, Object> extendedRequestInfo) {
-        if (RuntimeStorage.getExemptionStore().isExempted(ip)) {
+        return block(RuntimeStorage.getContext(), ip, reason, durationSeconds, extendedRequestInfo);
+    }
+
+    public static boolean block(
+            RuntimeStorage.Context context,
+            String ip,
+            String reason,
+            Integer durationSeconds,
+            Map<String, Object> extendedRequestInfo
+    ) {
+        if (context.exemptionStore().isExempted(ip)) {
             return false;
         }
-        RuntimeStorage.getBlacklistStore().blockIp(ip, reason, durationSeconds, extendedRequestInfo);
+        context.blacklistStore().blockIp(ip, reason, durationSeconds, extendedRequestInfo);
         return true;
     }
 
@@ -42,8 +52,12 @@ public final class BlacklistManager {
     }
 
     public static boolean isBlocked(String ip) {
-        if (RuntimeStorage.getExemptionStore().isExempted(ip)) return false;
-        return RuntimeStorage.getBlacklistStore().isBlocked(ip);
+        return isBlocked(RuntimeStorage.getContext(), ip);
+    }
+
+    public static boolean isBlocked(RuntimeStorage.Context context, String ip) {
+        if (context.exemptionStore().isExempted(ip)) return false;
+        return context.blacklistStore().isBlocked(ip);
     }
 
     public static Map<String, Object> getBlockInfo(String ip) {

@@ -115,7 +115,10 @@ public final class AiwafConfig {
     public Set<String> trustedProxyCidrs = new HashSet<>(Set.of("127.0.0.0/8", "::1/128"));
     public int maxForwardedForEntries = 16;
     public Set<String> exemptIps = new HashSet<>();
-    public boolean privateIpsExempted = false;
+    public Set<String> exemptIpPatterns = new HashSet<>();
+    public boolean privateIpsExempted = true;
+    /** Separate loopback exemption; privateIpsExempted already covers loopback by default. */
+    public boolean localhostExempted = false;
     public Set<String> autoExemptPathPrefixes = new HashSet<>();
     public Set<String> exemptPaths = new HashSet<>(Arrays.asList(
             "/favicon.ico", "/robots.txt", "/sitemap.xml", "/sitemap.txt", "/ads.txt", "/security.txt",
@@ -180,7 +183,7 @@ public final class AiwafConfig {
     public boolean pathManifestEnabled = true;
     public String pathManifestPath = ".aiwaf/paths.json";
     boolean pathManifestApplied = false;
-    public boolean aiEnabled = false;
+    public boolean aiEnabled = true;
     public boolean aiLazyLoadModel = true;
     public boolean aiBackgroundPreload = false;
     public String aiModelPath = "aiwaf-model.bin";
@@ -208,6 +211,8 @@ public final class AiwafConfig {
     public String logFormat = "combined";
     public String storageBackend = "memory";
     public String storageFilePath = null;
+    public String storageRedisUrl = null;
+    public String storageKeyPrefix = "aiwaf:";
     public Set<String> legitimateRouteHints = new HashSet<>();
 
     public boolean isAutoExemptPath(String path) {
