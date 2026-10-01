@@ -48,6 +48,16 @@ public final class RuntimeStorage {
     }
 
     public static Context create(String backendType, String filePath, String redisUrl, String keyPrefix) {
+        return create(backendType, filePath, redisUrl, keyPrefix, RedisStorage.Options.defaults());
+    }
+
+    public static Context create(
+            String backendType,
+            String filePath,
+            String redisUrl,
+            String keyPrefix,
+            RedisStorage.Options redisOptions
+    ) {
         String kind = backendType == null ? "memory" : backendType.trim().toLowerCase();
         StorageBackend storage;
         switch (kind) {
@@ -55,7 +65,7 @@ public final class RuntimeStorage {
             case "file" -> storage = new FileStorage(filePath == null ? "aiwaf_data.bin" : filePath);
             case "csv" -> storage = new CsvStorage(filePath == null ? "aiwaf_data.csv" : filePath);
             case "db" -> storage = new DbStorage(filePath == null ? "aiwaf_data.db" : filePath);
-            case "redis" -> storage = new RedisStorage(redisUrl, keyPrefix);
+            case "redis" -> storage = new RedisStorage(redisUrl, keyPrefix, redisOptions);
             default -> throw new IllegalArgumentException("Unknown storage backend: " + backendType);
         }
         RuntimeState state = storage instanceof RuntimeState shared ? shared : new LocalRuntimeState();

@@ -87,6 +87,24 @@ public final class SpringAiwafConfig {
         config.storageFilePath = text(environment, "aiwaf.storage.file-path", config.storageFilePath);
         config.storageRedisUrl = text(environment, "aiwaf.storage.redis-url", config.storageRedisUrl);
         config.storageKeyPrefix = text(environment, "aiwaf.storage.key-prefix", config.storageKeyPrefix);
+        config.storageRedisMode = text(environment, "aiwaf.storage.redis-mode", config.storageRedisMode);
+        config.storageRedisFailureMode = text(
+                environment, "aiwaf.storage.redis-failure-mode", config.storageRedisFailureMode);
+        config.storageRedisConnectionTimeoutMillis = integer(
+                environment, "aiwaf.storage.redis-connection-timeout-millis",
+                config.storageRedisConnectionTimeoutMillis);
+        config.storageRedisSocketTimeoutMillis = integer(
+                environment, "aiwaf.storage.redis-socket-timeout-millis",
+                config.storageRedisSocketTimeoutMillis);
+        config.storageRedisPoolMaxTotal = integer(
+                environment, "aiwaf.storage.redis-pool-max-total", config.storageRedisPoolMaxTotal);
+        config.storageRedisPoolMaxIdle = integer(
+                environment, "aiwaf.storage.redis-pool-max-idle", config.storageRedisPoolMaxIdle);
+        config.storageRedisPoolMinIdle = integer(
+                environment, "aiwaf.storage.redis-pool-min-idle", config.storageRedisPoolMinIdle);
+        config.storageRedisPoolMaxWaitMillis = integer(
+                environment, "aiwaf.storage.redis-pool-max-wait-millis",
+                config.storageRedisPoolMaxWaitMillis);
         config.loggingEnabled = bool(environment, "aiwaf.logging.enabled", config.loggingEnabled);
         config.logDir = text(environment, "aiwaf.logging.directory", config.logDir);
         config.logFormat = text(environment, "aiwaf.logging.format", config.logFormat);

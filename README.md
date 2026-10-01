@@ -16,7 +16,7 @@ Each package is versioned and released independently.
 | Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.0.2` | Express and Node framework middleware |
 | Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.1` | Native Python acceleration and JSON model inference |
 | WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.1` | Rust detection and model primitives for JavaScript |
-| Java | `io.github.aiwaf-project:aiwaf-java` | `1.2.0` | Spring MVC and Jakarta Servlet protection |
+| Java | `io.github.aiwaf-project:aiwaf-java` | `1.3.0` | Spring MVC and Jakarta Servlet protection |
 
 Supported framework integrations include Django, Flask, FastAPI, Express, Fastify, Hapi, Koa, NestJS, Next.js API routes, AdonisJS, Sails.js, Spring MVC, and Jakarta Servlet.
 
@@ -75,13 +75,13 @@ npm install aiwaf
 npm install aiwaf-wasm
 ```
 
-Java 1.2.0, after it is published to Maven Central:
+Java 1.3.0, after it is published to Maven Central:
 
 ```xml
 <dependency>
   <groupId>io.github.aiwaf-project</groupId>
   <artifactId>aiwaf-java</artifactId>
-  <version>1.2.0</version>
+  <version>1.3.0</version>
 </dependency>
 ```
 
@@ -462,7 +462,7 @@ cp ../LICENSE crates/aiwaf_wasm/pkg/LICENSE
 
 ## Java package
 
-AIWAF Java 1.2.0 targets Java 17, Spring Framework 7.0, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
+AIWAF Java 1.3.0 targets Java 17, Spring Framework 7.0, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
 
 ### Core engine
 
@@ -521,6 +521,14 @@ aiwaf.path-manifest.path=.aiwaf/paths.json
 aiwaf.storage.backend=redis
 aiwaf.storage.redis-url=redis://localhost:6379/0
 aiwaf.storage.key-prefix=my-service
+# Redis is fail-closed by default. Every wait is bounded.
+aiwaf.storage.redis-failure-mode=fail_closed
+aiwaf.storage.redis-connection-timeout-millis=1000
+aiwaf.storage.redis-socket-timeout-millis=2000
+aiwaf.storage.redis-pool-max-total=32
+aiwaf.storage.redis-pool-max-idle=16
+aiwaf.storage.redis-pool-min-idle=0
+aiwaf.storage.redis-pool-max-wait-millis=250
 ```
 
 Set `aiwaf.config-file=/etc/aiwaf/config.json` (or `AIWAF_CONFIG_FILE`) to load the same nested JSON configuration used by the Python runtime. Environment variables and Spring properties override file values. `AiwafConfigFileCore` also exposes load, save, deep-merge, and validation APIs for non-Spring applications.
@@ -543,7 +551,7 @@ UUID protection uses Python-compatible weighted signals: malformed input, valid 
 Generate a route manifest from the live Spring application rather than supplying controller methods manually:
 
 ```bash
-java -cp "your-app.jar:aiwaf-java-1.2.0.jar" \
+java -cp "your-app.jar:aiwaf-java-1.3.0.jar" \
   com.aiwaf.cli.AiwafConsole init \
   --app com.example.Application \
   --output .aiwaf/paths.json
@@ -577,12 +585,16 @@ The generic servlet filter uses request-time evaluation. Spring applications sho
 | Route manifest | `pathManifestEnabled`, `pathManifestPath`, `pathRules` |
 | UUID checks | `uuidTamperEnabled`, `uuidScoreWindowSeconds`, `uuidScoreBlockThreshold`, signal weights, `uuidParameterNames` |
 | AI | `aiEnabled`, `aiModelPath`, `aiAnomalyScoreThreshold` |
-| Storage | `storageBackend`, `storageFilePath`, `storageRedisUrl`, `storageKeyPrefix` |
+| Storage | `storageBackend`, `storageFilePath`, `storageRedisUrl`, `storageKeyPrefix`, `storageRedisFailureMode`, Redis timeout and pool limits |
 | Telemetry | `observabilityEnabled` |
 
 GeoIP uses the bundled MMDB through the native Java reader; it does not require the external `mmdblookup` executable. A valid `X-Country` value is accepted only from a peer in `trustedProxyCidrs`; otherwise AIWAF resolves the client address itself. Default blacklist calls use Python-compatible reputation scoring and temporary escalation (15 minutes, 1 hour, then 24 hours). Use `BlacklistManager.blockPermanent(ip, reason)` for an explicit permanent administrative block.
 
 `storageBackend="redis"` makes rate-limit buckets, honeypot timing, weighted UUID scores, recent-request anomaly state, blacklist data, exemptions, geo policy, and learned keywords visible to every application instance using the same key prefix. Redis enforcement updates use atomic server-side scripts. Memory, file, CSV, and SQLite engines keep request state isolated per `AiwafEngine`; constructing another engine no longer replaces an existing engine's stores. The static `RuntimeStorage` and `BlacklistManager` methods remain compatibility facades for command-line and administrative code.
+
+The Java 1.3 Redis backend supports **standalone Redis only**. Sentinel and Cluster configurations are rejected during validation instead of silently operating with incomplete semantics. `fail_closed` is the default: an unavailable Redis instance prevents startup or raises a request-path storage failure, which results in the application denying availability rather than bypassing protection. `fail_open` permits startup and returns non-blocking enforcement fallbacks while Redis is unavailable; failed mutations return `false` at the `StorageBackend` boundary. Connection, socket, pool size, and pool wait limits are bounded and configurable. `RedisStorage.diagnostics()` reports operation/failure counts, latency, and live pool utilization.
+
+Redis keys include a state-schema version, and each base key prefix has an atomic compatibility marker. Releases using the same schema can share state during a rolling upgrade. A runtime with an incompatible schema refuses the namespace—even in `fail_open` mode. Use a unique key prefix per application and environment; deploy an incompatible schema with a new prefix, migrate deliberately, then retire the old namespace. Serialized persistent values remain JSON within a schema version.
 
 New Java models use the Python-aligned six-feature schema and are written as safe JSON containing the Python `aiwaf_rust.IsolationForest` state. Python can restore Java-generated forest state, and Java can load Python Rust-model artifacts. Existing signed Java binary artifacts, including nine-feature models, remain readable through the restricted legacy loader. Scikit-learn object artifacts are intentionally unsupported.
 
@@ -716,7 +728,7 @@ Release versions and tags must match the relevant manifest.
 | npm `aiwaf` | `js/package.json` | `js-v1.0.2` | `npm-publish.yml` |
 | PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.1` | `rust-publish.yml` |
 | npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.1` | `wasm-publish.yml` |
-| Maven `aiwaf-java` | `java/pom.xml` | `java-v1.2.0` | `java-publish.yml` |
+| Maven `aiwaf-java` | `java/pom.xml` | `java-v1.3.0` | `java-publish.yml` |
 
 Python and Rust publish to PyPI with trusted publishing. The npm workflows use npm trusted publishing and stage packages for approval. Configure the trusted publisher with organization `aiwaf-project`, repository `aiwaf`, the exact workflow filename, and the environment used by that workflow.
 

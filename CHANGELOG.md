@@ -1,5 +1,12 @@
 # Changelog
 
+## Java 1.3.0
+
+- Hardened Redis operation with fail-open/fail-closed policies, bounded
+  connection and pool waits, latency/pool diagnostics, non-blocking key scans,
+  and state-schema compatibility guards for rolling upgrades. Java 1.3
+  explicitly supports standalone Redis and rejects Sentinel/Cluster modes.
+
 ## Java 1.2.0
 
 - Added scoped per-engine storage contexts and a Redis backend with atomic,

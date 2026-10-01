@@ -2,6 +2,7 @@ package com.aiwaf.core;
 
 import com.aiwaf.runtime.BlacklistManager;
 import com.aiwaf.runtime.CidrUtil;
+import com.aiwaf.runtime.RedisStorage;
 import com.aiwaf.runtime.RuntimeState;
 import com.aiwaf.runtime.RuntimeStorage;
 
@@ -35,7 +36,17 @@ public final class AiwafEngine {
                 config.storageBackend,
                 config.storageFilePath,
                 config.storageRedisUrl,
-                config.storageKeyPrefix
+                config.storageKeyPrefix,
+                new RedisStorage.Options(
+                        config.storageRedisMode,
+                        RedisStorage.FailureMode.parse(config.storageRedisFailureMode),
+                        config.storageRedisConnectionTimeoutMillis,
+                        config.storageRedisSocketTimeoutMillis,
+                        config.storageRedisPoolMaxTotal,
+                        config.storageRedisPoolMaxIdle,
+                        config.storageRedisPoolMinIdle,
+                        config.storageRedisPoolMaxWaitMillis
+                )
         ));
     }
 

@@ -213,6 +213,14 @@ public final class AiwafConfig {
     public String storageFilePath = null;
     public String storageRedisUrl = null;
     public String storageKeyPrefix = "aiwaf:";
+    public String storageRedisMode = "standalone";
+    public String storageRedisFailureMode = "fail_closed";
+    public int storageRedisConnectionTimeoutMillis = 1_000;
+    public int storageRedisSocketTimeoutMillis = 2_000;
+    public int storageRedisPoolMaxTotal = 32;
+    public int storageRedisPoolMaxIdle = 16;
+    public int storageRedisPoolMinIdle = 0;
+    public int storageRedisPoolMaxWaitMillis = 250;
     public Set<String> legitimateRouteHints = new HashSet<>();
 
     public boolean isAutoExemptPath(String path) {

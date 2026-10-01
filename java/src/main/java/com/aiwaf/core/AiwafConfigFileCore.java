@@ -77,6 +77,30 @@ public final class AiwafConfigFileCore {
         if ("redis".equals(backend) && (config.storageRedisUrl == null || config.storageRedisUrl.isBlank())) {
             errors.add("storage.redis_url is required for the redis backend");
         }
+        if (!"standalone".equalsIgnoreCase(config.storageRedisMode)) {
+            errors.add("storage.redis_mode must be standalone; Sentinel and Cluster are not supported in Java 1.3");
+        }
+        String failureMode = config.storageRedisFailureMode == null
+                ? "" : config.storageRedisFailureMode.trim().toLowerCase();
+        if (!Set.of("fail_closed", "fail-closed", "closed", "fail_open", "fail-open", "open")
+                .contains(failureMode)) {
+            errors.add("storage.redis_failure_mode must be fail_closed or fail_open");
+        }
+        range(errors, "storage.redis_connection_timeout_millis",
+                config.storageRedisConnectionTimeoutMillis, 1, 120_000);
+        range(errors, "storage.redis_socket_timeout_millis",
+                config.storageRedisSocketTimeoutMillis, 1, 120_000);
+        range(errors, "storage.redis_pool_max_total", config.storageRedisPoolMaxTotal, 1, 10_000);
+        range(errors, "storage.redis_pool_max_idle", config.storageRedisPoolMaxIdle, 0, 10_000);
+        range(errors, "storage.redis_pool_min_idle", config.storageRedisPoolMinIdle, 0, 10_000);
+        range(errors, "storage.redis_pool_max_wait_millis",
+                config.storageRedisPoolMaxWaitMillis, 1, 120_000);
+        if (config.storageRedisPoolMaxIdle > config.storageRedisPoolMaxTotal) {
+            errors.add("storage.redis_pool_max_idle cannot exceed redis_pool_max_total");
+        }
+        if (config.storageRedisPoolMinIdle > config.storageRedisPoolMaxIdle) {
+            errors.add("storage.redis_pool_min_idle cannot exceed redis_pool_max_idle");
+        }
         range(errors, "header_validation.quality_threshold", config.minHeaderQualityScore, 0, 20);
         range(errors, "rate_limiting.max_requests", config.rateLimitMax, 1, 10_000);
         range(errors, "rate_limiting.window_seconds", config.rateLimitWindowSeconds, 1, 86_400);
@@ -101,7 +125,15 @@ public final class AiwafConfigFileCore {
                 "backend", config.storageBackend,
                 "file_path", config.storageFilePath,
                 "redis_url", config.storageRedisUrl,
-                "key_prefix", config.storageKeyPrefix
+                "key_prefix", config.storageKeyPrefix,
+                "redis_mode", config.storageRedisMode,
+                "redis_failure_mode", config.storageRedisFailureMode,
+                "redis_connection_timeout_millis", config.storageRedisConnectionTimeoutMillis,
+                "redis_socket_timeout_millis", config.storageRedisSocketTimeoutMillis,
+                "redis_pool_max_total", config.storageRedisPoolMaxTotal,
+                "redis_pool_max_idle", config.storageRedisPoolMaxIdle,
+                "redis_pool_min_idle", config.storageRedisPoolMinIdle,
+                "redis_pool_max_wait_millis", config.storageRedisPoolMaxWaitMillis
         ));
         root.put("header_validation", map(
                 "enabled", config.headerValidationEnabled,

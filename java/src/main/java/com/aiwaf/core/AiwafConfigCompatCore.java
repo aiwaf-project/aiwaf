@@ -31,6 +31,20 @@ public final class AiwafConfigCompatCore {
         cfg.storageFilePath = str(storage.get("file_path"), cfg.storageFilePath);
         cfg.storageRedisUrl = str(storage.get("redis_url"), cfg.storageRedisUrl);
         cfg.storageKeyPrefix = str(storage.get("key_prefix"), cfg.storageKeyPrefix);
+        cfg.storageRedisMode = str(storage.get("redis_mode"), cfg.storageRedisMode);
+        cfg.storageRedisFailureMode = str(storage.get("redis_failure_mode"), cfg.storageRedisFailureMode);
+        cfg.storageRedisConnectionTimeoutMillis = intval(
+                storage.get("redis_connection_timeout_millis"), cfg.storageRedisConnectionTimeoutMillis);
+        cfg.storageRedisSocketTimeoutMillis = intval(
+                storage.get("redis_socket_timeout_millis"), cfg.storageRedisSocketTimeoutMillis);
+        cfg.storageRedisPoolMaxTotal = intval(
+                storage.get("redis_pool_max_total"), cfg.storageRedisPoolMaxTotal);
+        cfg.storageRedisPoolMaxIdle = intval(
+                storage.get("redis_pool_max_idle"), cfg.storageRedisPoolMaxIdle);
+        cfg.storageRedisPoolMinIdle = intval(
+                storage.get("redis_pool_min_idle"), cfg.storageRedisPoolMinIdle);
+        cfg.storageRedisPoolMaxWaitMillis = intval(
+                storage.get("redis_pool_max_wait_millis"), cfg.storageRedisPoolMaxWaitMillis);
 
         Map<String, Object> hv = map(settings.get("header_validation"));
         cfg.headerValidationEnabled = bool(hv.get("enabled"), cfg.headerValidationEnabled);
@@ -204,6 +218,20 @@ public final class AiwafConfigCompatCore {
         get(env, "AIWAF_STORAGE_FILE_PATH").ifPresent(v -> cfg.storageFilePath = v);
         get(env, "AIWAF_REDIS_URL").ifPresent(v -> cfg.storageRedisUrl = v);
         get(env, "AIWAF_STORAGE_KEY_PREFIX").ifPresent(v -> cfg.storageKeyPrefix = v);
+        get(env, "AIWAF_REDIS_MODE").ifPresent(v -> cfg.storageRedisMode = v);
+        get(env, "AIWAF_REDIS_FAILURE_MODE").ifPresent(v -> cfg.storageRedisFailureMode = v);
+        get(env, "AIWAF_REDIS_CONNECTION_TIMEOUT_MILLIS").ifPresent(v ->
+                cfg.storageRedisConnectionTimeoutMillis = parseInt(v, cfg.storageRedisConnectionTimeoutMillis));
+        get(env, "AIWAF_REDIS_SOCKET_TIMEOUT_MILLIS").ifPresent(v ->
+                cfg.storageRedisSocketTimeoutMillis = parseInt(v, cfg.storageRedisSocketTimeoutMillis));
+        get(env, "AIWAF_REDIS_POOL_MAX_TOTAL").ifPresent(v ->
+                cfg.storageRedisPoolMaxTotal = parseInt(v, cfg.storageRedisPoolMaxTotal));
+        get(env, "AIWAF_REDIS_POOL_MAX_IDLE").ifPresent(v ->
+                cfg.storageRedisPoolMaxIdle = parseInt(v, cfg.storageRedisPoolMaxIdle));
+        get(env, "AIWAF_REDIS_POOL_MIN_IDLE").ifPresent(v ->
+                cfg.storageRedisPoolMinIdle = parseInt(v, cfg.storageRedisPoolMinIdle));
+        get(env, "AIWAF_REDIS_POOL_MAX_WAIT_MILLIS").ifPresent(v ->
+                cfg.storageRedisPoolMaxWaitMillis = parseInt(v, cfg.storageRedisPoolMaxWaitMillis));
         get(env, "AIWAF_RATE_CACHE_BACKEND").ifPresent(v -> {
             if ("redis".equalsIgnoreCase(v)) cfg.storageBackend = "redis";
         });

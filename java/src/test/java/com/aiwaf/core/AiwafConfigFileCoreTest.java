@@ -22,7 +22,9 @@ class AiwafConfigFileCoreTest {
         Path source = tempDir.resolve("aiwaf.json");
         Files.writeString(source, """
                 {
-                  "storage": {"backend": "memory", "key_prefix": "tenant-a"},
+                  "storage": {"backend": "memory", "key_prefix": "tenant-a",
+                              "redis_failure_mode": "fail_open", "redis_pool_max_total": 12,
+                              "redis_pool_max_idle": 6, "redis_pool_max_wait_millis": 90},
                   "rate_limiting": {"max_requests": 31, "window_seconds": 12, "flood_threshold": 50},
                   "ai_anomaly": {"enabled": false},
                   "exemptions": {"private_ips_exempted": false}
@@ -35,12 +37,17 @@ class AiwafConfigFileCoreTest {
         assertFalse(config.aiEnabled);
         assertFalse(config.privateIpsExempted);
         assertEquals("tenant-a", config.storageKeyPrefix);
+        assertEquals("fail_open", config.storageRedisFailureMode);
+        assertEquals(12, config.storageRedisPoolMaxTotal);
+        assertEquals(90, config.storageRedisPoolMaxWaitMillis);
 
         Path saved = tempDir.resolve("nested/saved.json");
         AiwafConfigFileCore.save(config, saved);
         AiwafConfig reloaded = AiwafConfigFileCore.load(saved, Map.of());
         assertEquals(44, reloaded.rateLimitMax);
         assertEquals("tenant-a", reloaded.storageKeyPrefix);
+        assertEquals("fail_open", reloaded.storageRedisFailureMode);
+        assertEquals(12, reloaded.storageRedisPoolMaxTotal);
     }
 
     @Test
@@ -59,11 +66,16 @@ class AiwafConfigFileCoreTest {
         AiwafConfig config = new AiwafConfig();
         config.storageBackend = "redis";
         config.storageRedisUrl = null;
+        config.storageRedisMode = "cluster";
+        config.storageRedisPoolMaxTotal = 1;
+        config.storageRedisPoolMaxIdle = 2;
         config.rateLimitMax = 50;
         config.rateLimitFloodThreshold = 40;
 
         List<String> errors = AiwafConfigFileCore.validate(config);
         assertTrue(errors.stream().anyMatch(value -> value.contains("redis_url")));
+        assertTrue(errors.stream().anyMatch(value -> value.contains("redis_mode")));
+        assertTrue(errors.stream().anyMatch(value -> value.contains("redis_pool_max_idle")));
         assertTrue(errors.stream().anyMatch(value -> value.contains("flood_threshold")));
         assertThrows(IllegalArgumentException.class, () -> {
             Path path = tempDir.resolve("invalid.json");

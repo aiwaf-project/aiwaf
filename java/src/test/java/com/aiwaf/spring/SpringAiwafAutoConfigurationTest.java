@@ -28,6 +28,10 @@ class SpringAiwafAutoConfigurationTest {
                 .withProperty("aiwaf.geo.blocked-countries", "us, ca")
                 .withProperty("aiwaf.storage.redis-url", "redis://localhost:6379/2")
                 .withProperty("aiwaf.storage.key-prefix", "spring-test")
+                .withProperty("aiwaf.storage.redis-failure-mode", "fail_open")
+                .withProperty("aiwaf.storage.redis-connection-timeout-millis", "700")
+                .withProperty("aiwaf.storage.redis-pool-max-total", "18")
+                .withProperty("aiwaf.storage.redis-pool-max-wait-millis", "125")
                 .withProperty("aiwaf.exemptions.private-ips", "false")
                 .withProperty("aiwaf.security.max-parameter-count", "77")
                 .withProperty("aiwaf.path-manifest.enabled", "false")
@@ -40,6 +44,10 @@ class SpringAiwafAutoConfigurationTest {
         assertEquals(java.util.Set.of("US", "CA"), config.geoBlockedCountries);
         assertEquals("redis://localhost:6379/2", config.storageRedisUrl);
         assertEquals("spring-test", config.storageKeyPrefix);
+        assertEquals("fail_open", config.storageRedisFailureMode);
+        assertEquals(700, config.storageRedisConnectionTimeoutMillis);
+        assertEquals(18, config.storageRedisPoolMaxTotal);
+        assertEquals(125, config.storageRedisPoolMaxWaitMillis);
         assertFalse(config.privateIpsExempted);
         assertEquals(77, config.maxParameterCount);
         assertFalse(config.pathManifestEnabled);
