@@ -27,6 +27,21 @@ jobs:
           cache: maven
           cache-dependency-path: java/pom.xml
 
+      - name: Pin Maven to the successful release toolchain
+        shell: bash
+        run: |
+          version=3.9.16
+          archive="apache-maven-${version}-bin.tar.gz"
+          base="https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${version}"
+          curl --fail --silent --show-error --location "$base/$archive" --output "$RUNNER_TEMP/$archive"
+          curl --fail --silent --show-error --location "$base/$archive.sha512" --output "$RUNNER_TEMP/$archive.sha512"
+          printf '%s  %s\n' "$(cat "$RUNNER_TEMP/$archive.sha512")" "$RUNNER_TEMP/$archive" | sha512sum --check --status
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/apache-maven-$version/bin" >> "$GITHUB_PATH"
+
+      - name: Report publishing toolchain
+        run: mvn --version
+
       - name: Check package version and tag
         run: |
           python3 - <<'PY'

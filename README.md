@@ -8,8 +8,6 @@ AIWAF is a defense-in-depth component. It does not replace secure application co
 
 ## Packages
 
-New request controls: [Python/JavaScript SQL injection inspection and Java keyword learning safety](docs/request-inspection.md).
-
 Each package is versioned and released independently.
 
 Python and Node.js 1.1.0 and Java 1.3.1 are local release candidates; see the
