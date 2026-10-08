@@ -34,6 +34,14 @@ async function buildServer(opts = {}) {
 }
 
 describe('AIWAF Hapi plugin', () => {
+  it('blocks SQL login payloads after Hapi parses the body', async () => {
+    const server = await buildServer({ AIWAF_WASM_VALIDATION: false, AIWAF_MIDDLEWARES: ['ip_keyword_block'] });
+    const result = await server.inject({ method: 'POST', url: '/safe',
+      headers: { 'x-forwarded-for': '93.184.217.11' }, payload: { email: "admin'--", password: 'x' } });
+    expect(result.statusCode).toBe(403);
+    expect(result.result.error).toBe('sql_quote_comment');
+    await server.stop();
+  });
   it('implements the response send contract', async () => {
     jest.resetModules();
     jest.doMock('../lib/wafMiddleware', () => () => (_req, res) => res.send('adapter-send'));

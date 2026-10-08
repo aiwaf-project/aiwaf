@@ -39,6 +39,11 @@ function buildApp(opts = {}) {
 }
 
 describe('AIWAF Koa middleware', () => {
+  it('inspects the parsed Koa body', async () => {
+    const app = buildApp({ AIWAF_WASM_VALIDATION: false, AIWAF_MIDDLEWARES: ['ip_keyword_block'] });
+    await request(app.callback()).post('/safe').set('X-Forwarded-For', '93.184.217.12')
+      .send({ email: "admin'--", password: 'x' }).expect(403);
+  });
   it('implements the response send contract', async () => {
     jest.resetModules();
     jest.doMock('../lib/wafMiddleware', () => () => (_req, res) => res.send('adapter-send'));

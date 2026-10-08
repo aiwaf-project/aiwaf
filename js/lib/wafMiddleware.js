@@ -1,4 +1,5 @@
 const rateLimiter = require('./rateLimiter');
+const { createInspector } = require('./sqlInjection');
 const blacklistManager = require('./blacklistManager');
 const keywordDetector = require('./keywordDetector');
 const dynamicKeyword = require('./dynamicKeyword');
@@ -129,6 +130,7 @@ function applyAutoMiddlewareDefaults(opts, enabled, rawOpts = {}) {
 
 module.exports = function aiwaf(rawOpts = {}) {
   let opts = normalizeSettings(rawOpts);
+  const inspectSql = createInspector(opts);
   opts.AIWAF_MIDDLEWARES = normalizedMiddlewareList(opts.AIWAF_MIDDLEWARES);
   opts.AIWAF_DISABLE_MIDDLEWARES = normalizedMiddlewareList(opts.AIWAF_DISABLE_MIDDLEWARES) || [];
   const pathRules = getEffectivePathRules(opts.AIWAF_PATH_RULES, { manifestPath: opts.AIWAF_PATH_MANIFEST });
@@ -174,7 +176,20 @@ module.exports = function aiwaf(rawOpts = {}) {
     ]).catch(() => {});
   }
 
-  return async (req, res, next) => {
+  const inspectPayload = async req => {
+    const path = String(req.path || req.url || '/').split('?')[0].toLowerCase();
+    const ip = req.headers?.['x-forwarded-for']?.split(',')[0].trim() || req.ip;
+    const plan = createRoutePlan(path, pathRules, req.aiwafRoute || {});
+    if (!enabledMiddlewares.has('ip_keyword_block') || !plan.shouldApply('ip_keyword_block')
+        || await exemptions.isExemptRequest(ip, path)) return null;
+    const finding = inspectSql(req);
+    if (finding?.mode === 'monitor') {
+      (opts.logger || console).warn?.({ event: 'aiwaf.payload', rule: finding.rule, mode: finding.mode });
+      return null;
+    }
+    return finding;
+  };
+  const middleware = async (req, res, next) => {
     const ipHdr = req.headers['x-forwarded-for'];
     const ip = ipHdr ? ipHdr.split(',')[0].trim() : req.ip;
     const path = String(req.path || req.url || '/').toLowerCase();
@@ -257,6 +272,9 @@ module.exports = function aiwaf(rawOpts = {}) {
       }
       return deny(403, 'blocked', 'blacklist');
     }
+
+    const payloadFinding = await inspectPayload(req);
+    if (payloadFinding) return deny(payloadFinding.status, payloadFinding.rule, payloadFinding.rule);
 
     if (shouldApply('header_validation')) {
       const headerReason = headerValidation.validate(req);
@@ -464,4 +482,6 @@ module.exports = function aiwaf(rawOpts = {}) {
 
     next();
   };
+  middleware.inspectPayload = inspectPayload;
+  return middleware;
 };

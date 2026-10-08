@@ -84,6 +84,8 @@ class AIWAFConfig:
             },
             'ip_keyword_block': {
                 'enabled': True,
+                'sql_injection_mode': 'block',
+                'payload_max_bytes': 65536,
                 'malicious_keywords': [
                     '.php', 'xmlrpc', 'wp-', '.env', '.git', '.bak', 'shell', 'filemanager'
                 ],
@@ -208,6 +210,8 @@ class AIWAFConfig:
             'AIWAF_BLACKLIST_AUTO_UNBLOCK': ('blacklist', 'auto_unblock_enabled', bool),
             
             # Security
+            'AIWAF_SQL_INJECTION_MODE': ('ip_keyword_block', 'sql_injection_mode', str),
+            'AIWAF_PAYLOAD_MAX_BYTES': ('ip_keyword_block', 'payload_max_bytes', int),
             'AIWAF_LOG_BLOCKED': ('security', 'log_blocked_requests', bool),
             'AIWAF_LOG_SUSPICIOUS': ('security', 'log_suspicious_requests', bool),
             'AIWAF_MAX_HEADER_LENGTH': ('security', 'max_header_length', int),

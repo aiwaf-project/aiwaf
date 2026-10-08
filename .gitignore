@@ -260,3 +260,4 @@ js/aiwaf.sqlite
 /java/**/*.swp
 /java/**/*~
 /java/pom.xml.versionsBackup
+/release-artifacts/

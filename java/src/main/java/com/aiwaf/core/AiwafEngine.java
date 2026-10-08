@@ -569,6 +569,7 @@ public final class AiwafEngine {
         String[] tokens = p.split("\\W+");
         Set<String> learned = new HashSet<>(runtimeStorage.keywordStore().getTopKeywords(100));
         for (String token : tokens) {
+            if (config.legitimatePathKeywords.contains(token) || config.exemptKeywords.contains(token)) continue;
             if (token.length() > 3 && learned.contains(token)) return token;
         }
         return null;
@@ -745,6 +746,8 @@ public final class AiwafEngine {
             if (config.exemptKeywords.contains(seg)) continue;
             if (config.legitimatePathKeywords.contains(seg)) continue;
             if (defaultMaliciousKeywords.contains(seg)) continue;
+            // Query evidence must not label unrelated route segments as malicious.
+            if (!isMaliciousContext(seg, Map.of())) continue;
             runtimeStorage.keywordStore().addKeyword(seg, 1);
             added++;
             if (added >= config.dynamicTopN) {

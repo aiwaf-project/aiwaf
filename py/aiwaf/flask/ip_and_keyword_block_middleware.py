@@ -7,6 +7,7 @@ from .storage import get_keyword_store
 from .exemption_decorators import should_apply_middleware
 from aiwaf.core.ip_keyword import evaluate_keyword_policy, extract_path_segments
 from aiwaf.core.request_context import extract_query_keys_from_flask_request
+from aiwaf.core.sql_injection import SQLInjectionPolicy, inspect_wsgi_request
 
 class IPAndKeywordBlockMiddleware:
     def __init__(self, app=None):
@@ -66,6 +67,7 @@ class IPAndKeywordBlockMiddleware:
         return prefixes
 
     def init_app(self, app):
+        self.sql_policy = SQLInjectionPolicy(app.config.get("AIWAF_SQL_INJECTION_MODE"), app.config.get("AIWAF_PAYLOAD_MAX_BYTES"))
         @app.before_request
         def before_request():
             # Check exemption status first - skip if exempt from this middleware
@@ -90,6 +92,11 @@ class IPAndKeywordBlockMiddleware:
                 return jsonify({"error": "blocked"}), 403
             
             keyword_store = get_keyword_store()
+            finding = inspect_wsgi_request(request, self.sql_policy)
+            if finding:
+                if logger:
+                    logger.mark_request_blocked(finding.rule)
+                return jsonify({"error": finding.rule}), finding.status
             dynamic_top = keyword_store.get_top_keywords(self.dynamic_top_n) if self.keyword_learning_enabled else []
 
             def _is_malicious_context(seg: str) -> bool:

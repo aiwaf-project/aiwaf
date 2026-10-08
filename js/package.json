@@ -1,6 +1,6 @@
 {
     "name": "aiwaf",
-    "version": "1.0.2",
+    "version": "1.1.0",
     "description": "AIWAF Web Application Firewall for JavaScript applications and major Node.js frameworks",
     "main": "index.js",
     "files": [
@@ -35,14 +35,14 @@
         "aiwaf-wasm": "^0.2.0",
         "express": "^4.21.2",
         "glob": "^8.1.0",
-        "jest": "^29.7.0",
         "knex": "^2.4.2",
         "node-cache": "^5.1.2",
         "redis": "^4.6.5",
-        "sqlite3": "^6.0.1",
-        "supertest": "^7.1.0"
+        "sqlite3": "^6.0.1"
     },
     "devDependencies": {
+        "jest": "^29.7.0",
+        "supertest": "^7.1.0",
         "fastify": "^4.29.1",
         "@hapi/hapi": "^21.3.12",
         "koa": "^2.15.4",

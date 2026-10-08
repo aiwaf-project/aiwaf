@@ -24,6 +24,7 @@ describe('geoBlocker MMDB lookup', () => {
   });
 
   afterEach(() => {
+    jest.restoreAllMocks();
     try {
       fs.rmSync(path.dirname(mmdbPath), { recursive: true, force: true });
     } catch (err) {
@@ -78,6 +79,9 @@ describe('geoBlocker MMDB lookup', () => {
   it('uses the shared monorepo MMDB when no packaged copy exists', () => {
     const openSync = jest.fn(() => ({ get: jest.fn() }));
     jest.doMock('maxmind', () => ({ openSync }));
+    const packaged = path.resolve(__dirname, '..', 'geolock', 'ipinfo_lite.mmdb');
+    const existsSync = fs.existsSync.bind(fs);
+    jest.spyOn(fs, 'existsSync').mockImplementation(file => file === packaged ? false : existsSync(file));
 
     jest.isolateModules(() => {
       const geoBlocker = require('../lib/geoBlocker');
@@ -94,5 +98,17 @@ describe('geoBlocker MMDB lookup', () => {
       'geolock',
       'ipinfo_lite.mmdb'
     ));
+  });
+
+  it('prefers the MMDB shipped in the npm package', () => {
+    const packaged = path.resolve(__dirname, '..', 'geolock', 'ipinfo_lite.mmdb');
+    const openSync = jest.fn(() => ({ get: jest.fn() }));
+    jest.doMock('maxmind', () => ({ openSync }));
+    const existsSync = fs.existsSync.bind(fs);
+    jest.spyOn(fs, 'existsSync').mockImplementation(file => file === packaged || existsSync(file));
+    jest.isolateModules(() => {
+      require('../lib/geoBlocker').init({ AIWAF_GEO_BLOCK_ENABLED: true });
+    });
+    expect(openSync).toHaveBeenCalledWith(packaged);
   });
 });

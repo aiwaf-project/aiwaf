@@ -54,6 +54,7 @@ module.exports = function createAdonisMiddleware(opts = {}) {
     if (!req.path) req.path = ctx.request?.url?.() || ctx.request?.url || req.url;
     if (!req.url) req.url = req.path;
     if (!req.ip) req.ip = ctx.request?.ip?.() || ctx.request?.ip;
+    if (req.body === undefined && typeof ctx.request?.body === 'function') req.body = ctx.request.body();
     
     // Don't override headers - the raw request already has them from the HTTP server
 

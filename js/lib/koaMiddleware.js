@@ -41,6 +41,8 @@ module.exports = function createKoaMiddleware(opts = {}) {
     if (!req.path) req.path = ctx.path;
     if (!req.url) req.url = ctx.url;
     if (!req.ip) req.ip = ctx.ip;
+    if (req.body === undefined) req.body = ctx.request?.body;
+    if (req.query === undefined) req.query = ctx.query;
     
     // Don't override headers - use what's already on the raw request
     // ctx.headers is Koa's parsed version, but req.headers from Node.js has the originals

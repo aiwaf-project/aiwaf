@@ -291,6 +291,8 @@ def _get_blacklist_extended_info(request):
 
 class IPAndKeywordBlockMiddleware:
     def __init__(self, get_response):
+        from aiwaf.core.sql_injection import SQLInjectionPolicy
+        self.sql_policy = SQLInjectionPolicy(getattr(settings, "AIWAF_SQL_INJECTION_MODE", None), getattr(settings, "AIWAF_PAYLOAD_MAX_BYTES", None))
         self.get_response = get_response
         self.safe_prefixes = self._collect_safe_prefixes()
         self.exempt_keywords = self._get_exempt_keywords()
@@ -514,6 +516,11 @@ class IPAndKeywordBlockMiddleware:
             _raise_blocked(request, "IP already blacklisted", status_code=403)
         
         # Check if path exists in Django - if yes, be more lenient
+        from aiwaf.core.sql_injection import inspect_wsgi_request
+        finding = inspect_wsgi_request(request, self.sql_policy, django=True)
+        if finding:
+            _log_block(request, finding.rule, status_code=finding.status)
+            return JsonResponse({"error": finding.rule}, status=finding.status)
         path_exists = path_exists_in_django(request.path)
         
         keyword_store = get_keyword_store()

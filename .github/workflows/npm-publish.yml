@@ -35,7 +35,12 @@ jobs:
         run: npm ci
 
       - name: Test
-        run: npm test
+        run: |
+          npm run test:coverage
+          npm run test:wasm
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev
 
       - name: Stage shared package assets
         run: |
@@ -55,7 +60,7 @@ jobs:
             throw new Error(`npm pack returned no file list for aiwaf: ${JSON.stringify(result)}`);
           }
           const files = new Set(pack.files.map(file => file.path));
-          const required = ["LICENSE", "README.md", "geolock/ipinfo_lite.mmdb", "index.js", "package.json"];
+          const required = ["LICENSE", "README.md", "geolock/ipinfo_lite.mmdb", "index.js", "package.json", "lib/sqlInjection.js"];
           const missing = required.filter(file => !files.has(file));
           if (pack.name !== "aiwaf" || missing.length || files.has("INSTALLATION.md")) {
             throw new Error(`Invalid npm package: ${pack.name}; missing ${missing.join(", ")}`);

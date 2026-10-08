@@ -51,6 +51,24 @@ def test_header_validation_uses_rust_backend_when_available(monkeypatch):
     assert response.json()["error"] == "blocked"
 
 
+def test_rust_empty_user_agent_result_rechecks_actual_request_headers(monkeypatch):
+    monkeypatch.setattr("aiwaf.fast.middleware.header_validation.rust_available", lambda: True)
+    monkeypatch.setattr(
+        "aiwaf.fast.middleware.header_validation.rust_validate_headers",
+        lambda *args, **kwargs: "Empty user agent",
+    )
+    app = _build_app()
+    app.add_middleware(HeaderValidationMiddleware, block_suspicious=True)
+    response = TestClient(app).get("/api/data", headers={
+        "user-agent": "Mozilla/5.0 Chrome/122.0 Safari/537.36",
+        "accept": "text/html,application/xml;q=0.9,*/*;q=0.8",
+        "accept-language": "en-US,en;q=0.9",
+        "accept-encoding": "gzip, deflate, br",
+        "connection": "keep-alive",
+    })
+    assert response.status_code == 200
+
+
 def test_header_validation_falls_back_when_rust_returns_none(monkeypatch):
     monkeypatch.setattr(
         "aiwaf.fast.middleware.header_validation.rust_available",

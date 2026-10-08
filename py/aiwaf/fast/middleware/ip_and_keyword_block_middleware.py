@@ -1,4 +1,5 @@
 """FastAPI IP/keyword blocking middleware."""
+import re
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.responses import JSONResponse
@@ -9,11 +10,13 @@ from ..utils import get_blacklist_extended_info, get_ip, is_exempt
 from ..decorators import should_apply_middleware
 from ...core.ip_keyword import evaluate_keyword_policy, extract_path_segments
 from ...core.request_context import extract_query_keys_from_fastapi_request
+from ...core.sql_injection import SQLInjectionPolicy, inspect_asgi_request
 
 
 class IPAndKeywordBlockMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, path_rules=None, malicious_keywords=None):
+    def __init__(self, app, path_rules=None, malicious_keywords=None, sql_injection_mode=None, payload_max_bytes=None):
         super().__init__(app)
+        self.sql_policy = SQLInjectionPolicy(sql_injection_mode, payload_max_bytes)
         self.path_rules = path_rules or []
         self.malicious_keywords = set(malicious_keywords or [
             ".php",
@@ -86,6 +89,11 @@ class IPAndKeywordBlockMiddleware(BaseHTTPMiddleware):
             return JSONResponse({"error": "blocked"}, status_code=403)
 
         keyword_store = get_keyword_store()
+        finding = await inspect_asgi_request(request, self.sql_policy)
+        if finding:
+            request.state.aiwaf_blocked = True
+            request.state.aiwaf_block_reason = finding.rule
+            return JSONResponse({"error": finding.rule}, status_code=finding.status)
         dynamic_top = keyword_store.get_top_keywords(self.dynamic_top_n) if self.keyword_learning_enabled else []
 
         def _is_malicious_context(seg: str) -> bool:

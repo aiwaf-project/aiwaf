@@ -45,6 +45,14 @@ jobs:
       - name: Test
         run: mvn -B test
 
+      - name: Dependency vulnerability gate
+        run: >
+          mvn -B org.owasp:dependency-check-maven:12.2.2:check
+          -DfailBuildOnCVSS=7
+          -DfailOnError=true
+          -DnvdValidForHours=24
+          -DnvdDatafeedUrl=https://dependency-check.github.io/DependencyCheck_Builder/nvd_cache/nvdcve-{0}.json.gz
+
       - name: Import GPG key
         uses: crazy-max/ghaction-import-gpg@v6
         with:

@@ -238,6 +238,8 @@ class AIWAF:
             self.app.add_middleware(
                 IPAndKeywordBlockMiddleware,
                 malicious_keywords=ipkw_cfg.get("malicious_keywords"),
+                sql_injection_mode=ipkw_cfg.get("sql_injection_mode"),
+                payload_max_bytes=ipkw_cfg.get("payload_max_bytes"),
                 path_rules=path_rules,
             )
 

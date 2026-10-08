@@ -8,15 +8,20 @@ AIWAF is a defense-in-depth component. It does not replace secure application co
 
 ## Packages
 
+New request controls: [Python/JavaScript SQL injection inspection and Java keyword learning safety](docs/request-inspection.md).
+
 Each package is versioned and released independently.
+
+Python and Node.js 1.1.0 and Java 1.3.1 are local release candidates; see the
+[upgrade notes](docs/releases/2026-10-request-inspection.md).
 
 | Runtime | Package | Repository version | Primary use |
 | --- | --- | ---: | --- |
-| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.0.8` | Django, Flask, and FastAPI protection |
-| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.0.2` | Express and Node framework middleware |
+| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.1.0` | Django, Flask, and FastAPI protection |
+| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.1.0` | Express and Node framework middleware |
 | Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.1` | Native Python acceleration and JSON model inference |
 | WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.1` | Rust detection and model primitives for JavaScript |
-| Java | `io.github.aiwaf-project:aiwaf-java` | `1.3.0` | Spring MVC and Jakarta Servlet protection |
+| Java | `io.github.aiwaf-project:aiwaf-java` | `1.3.1` | Spring MVC and Jakarta Servlet protection |
 
 Supported framework integrations include Django, Flask, FastAPI, Express, Fastify, Hapi, Koa, NestJS, Next.js API routes, AdonisJS, Sails.js, Spring MVC, and Jakarta Servlet.
 
@@ -75,19 +80,19 @@ npm install aiwaf
 npm install aiwaf-wasm
 ```
 
-Java 1.3.0, after it is published to Maven Central:
+Java 1.3.1, after it is published to Maven Central:
 
 ```xml
 <dependency>
   <groupId>io.github.aiwaf-project</groupId>
   <artifactId>aiwaf-java</artifactId>
-  <version>1.3.0</version>
+  <version>1.3.1</version>
 </dependency>
 ```
 
 ## Python package
 
-The Python package requires Python 3.8 or newer. Framework dependencies are optional, so install only the extra needed by the application.
+The Python package requires Python 3.10 or newer. Framework dependencies are optional, so install only the extra needed by the application.
 
 ### Flask
 
@@ -462,7 +467,7 @@ cp ../LICENSE crates/aiwaf_wasm/pkg/LICENSE
 
 ## Java package
 
-AIWAF Java 1.3.0 targets Java 17, Spring Framework 7.0, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
+AIWAF Java 1.3.1 targets Java 17, Spring Framework 7.0, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
 
 ### Core engine
 
@@ -551,7 +556,7 @@ UUID protection uses Python-compatible weighted signals: malformed input, valid 
 Generate a route manifest from the live Spring application rather than supplying controller methods manually:
 
 ```bash
-java -cp "your-app.jar:aiwaf-java-1.3.0.jar" \
+java -cp "your-app.jar:aiwaf-java-1.3.1.jar" \
   com.aiwaf.cli.AiwafConsole init \
   --app com.example.Application \
   --output .aiwaf/paths.json
@@ -724,11 +729,11 @@ Release versions and tags must match the relevant manifest.
 
 | Package | Manifest | Tag | Workflow |
 | --- | --- | --- | --- |
-| Python `aiwaf` | `pyproject.toml` | `python-v1.0.8` | `python-publish.yml` |
-| npm `aiwaf` | `js/package.json` | `js-v1.0.2` | `npm-publish.yml` |
+| Python `aiwaf` | `pyproject.toml` | `python-v1.1.0` | `python-publish.yml` |
+| npm `aiwaf` | `js/package.json` | `js-v1.1.0` | `npm-publish.yml` |
 | PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.1` | `rust-publish.yml` |
 | npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.1` | `wasm-publish.yml` |
-| Maven `aiwaf-java` | `java/pom.xml` | `java-v1.3.0` | `java-publish.yml` |
+| Maven `aiwaf-java` | `java/pom.xml` | `java-v1.3.1` | `java-publish.yml` |
 
 Python and Rust publish to PyPI with trusted publishing. The npm workflows use npm trusted publishing and stage packages for approval. Configure the trusted publisher with organization `aiwaf-project`, repository `aiwaf`, the exact workflow filename, and the environment used by that workflow.
 

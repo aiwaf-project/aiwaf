@@ -23,10 +23,26 @@ jobs:
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip
-          python -m pip install build
+          python -m pip install build twine pytest pytest-cov coverage httpx pip-audit
+          python -m pip install ".[django,flask,fastapi,rust]"
+
+      - name: Verify Python release tests and coverage
+        run: python aiwaf_test.py --python-only --coverage
+
+      - name: Audit production dependencies
+        run: |
+          python scripts/python_release_requirements.py > production-requirements.txt
+          python -m pip_audit --strict --no-deps --disable-pip -r production-requirements.txt
 
       - name: Build wheel and sdist
         run: python -m build
+
+      - name: Validate distributions and installed wheel
+        run: |
+          python -m twine check dist/*
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+          cd /tmp
+          PYTHONPATH="$GITHUB_WORKSPACE" python -m unittest tests.core.test_sql_injection tests.django.test_sql_injection tests.flask.test_sql_injection tests.fast.test_sql_injection
 
       - name: Upload distributions
         uses: actions/upload-artifact@v6

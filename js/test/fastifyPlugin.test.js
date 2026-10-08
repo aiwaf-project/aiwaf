@@ -31,6 +31,14 @@ async function buildServer(opts = {}) {
 }
 
 describe('AIWAF Fastify plugin', () => {
+  it('blocks SQL login payloads after Fastify parses the body', async () => {
+    const fastify = await buildServer({ AIWAF_WASM_VALIDATION: false, AIWAF_MIDDLEWARES: ['ip_keyword_block'] });
+    const result = await fastify.inject({ method: 'POST', url: '/safe',
+      headers: { 'x-forwarded-for': '93.184.217.10' }, payload: { email: "admin'--", password: 'x' } });
+    expect(result.statusCode).toBe(403);
+    expect(result.json().error).toBe('sql_quote_comment');
+    await fastify.close();
+  });
   it('implements the response send contract', async () => {
     jest.resetModules();
     jest.doMock('../lib/wafMiddleware', () => () => (_req, res, next) => {
@@ -39,7 +47,7 @@ describe('AIWAF Fastify plugin', () => {
     });
     const plugin = require('../lib/fastifyPlugin');
     let hook;
-    plugin({ addHook: (_name, fn) => { hook = fn; } }, {}, jest.fn());
+    plugin({ addHook: (name, fn) => { if (name === 'onRequest') hook = fn; } }, {}, jest.fn());
     const reply = { raw: { on: jest.fn(), statusCode: 200 }, send: jest.fn(), sent: false };
     await hook({ raw: {} }, reply);
     expect(reply.send).toHaveBeenCalledWith('adapter-send');

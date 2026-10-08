@@ -50,6 +50,15 @@ module.exports = {
   register: async (server, opts = {}) => {
     const middleware = createExpressMiddleware(opts);
 
+    server.ext('onPreHandler', async (request, h) => {
+      const finding = await middleware.inspectPayload({
+        headers: request.headers, ip: request.info?.remoteAddress,
+        path: request.path, url: request.url?.href,
+        body: request.payload, query: request.query, aiwafRoute: request.raw.req.aiwafRoute
+      });
+      return finding ? h.response({ error: finding.rule }).code(finding.status).takeover() : h.continue;
+    });
+
     server.ext('onRequest', async (request, h) => {
       const res = createExpressLikeResponse(h, request.raw.res);
       const req = request.raw.req;
