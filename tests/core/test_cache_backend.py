@@ -1,4 +1,5 @@
 import builtins
+import json
 from contextlib import nullcontext
 
 import pytest
@@ -74,6 +75,52 @@ def test_redis_json_cache_serializes_values(monkeypatch):
     assert backend.is_shared is True
     assert backend.clear() is None
     assert redis.calls[-1][:3] == ("setex", "test:two", 3)
+
+
+@pytest.mark.parametrize(('count', 'expected'), [
+    (1, 'allow'), (20, 'allow'), (21, 'throttle'),
+    (40, 'throttle'), (41, 'flood_block'),
+])
+@pytest.mark.parametrize(('prefix', 'window', 'script_window'), [
+    ('test:', 60, '60.0'), ('', 0, '1.0'),
+])
+def test_redis_atomic_rate_decisions_without_live_server(
+        monkeypatch, count, expected, prefix, window, script_window):
+    from aiwaf.core.rate_limit import consume_rate_limit
+
+    redis = FakeRedis()
+    timestamps = [100.0] * count
+    calls = []
+
+    def evaluate(*args):
+        calls.append(args)
+        return json.dumps(timestamps).encode('utf-8')
+
+    monkeypatch.setattr(redis, 'eval', evaluate, raising=False)
+    monkeypatch.setattr(redis, 'get', lambda *_: pytest.fail('Atomic dispatch must not read/write a local bucket'))
+    monkeypatch.setattr(cache, '_redis_from_url', lambda _url: redis)
+    backend = cache.RedisJSONCache('redis://localhost', key_prefix=prefix)
+    decision = consume_rate_limit(backend, 'client', now=100, window_seconds=window,
+                                  max_requests=20, flood_threshold=40)
+    assert (decision.action, decision.count, decision.timestamps) == (expected, count, timestamps)
+    assert calls == [(backend._RATE_SCRIPT, 1, prefix + 'client', '100.0', script_window)]
+
+
+def test_redis_atomic_failure_is_sanitized_without_live_server(monkeypatch):
+    from aiwaf.core.rate_limit import consume_rate_limit, RateCacheUnavailable
+
+    redis = FakeRedis()
+
+    def unavailable(*_args):
+        raise ConnectionError('redis://secret:password@private-host')
+
+    monkeypatch.setattr(redis, 'eval', unavailable, raising=False)
+    monkeypatch.setattr(cache, '_redis_from_url', lambda _url: redis)
+    backend = cache.RedisJSONCache('redis://localhost')
+    with pytest.raises(RateCacheUnavailable, match='^Rate cache unavailable$') as caught:
+        consume_rate_limit(backend, 'client', now=100, window_seconds=60,
+                           max_requests=20, flood_threshold=40)
+    assert caught.value.__cause__ is None
 
 
 @pytest.mark.parametrize(
