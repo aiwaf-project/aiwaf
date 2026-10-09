@@ -26,3 +26,4 @@ urlpatterns = [
     path('admin/login/', test_view, name='admin_login'),
     path('api/users/', test_view, name='api_users'),
 ]
+__test__ = False  # URL fixture views in this module are not pytest test functions.

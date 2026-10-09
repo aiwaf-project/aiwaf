@@ -71,6 +71,9 @@ public final class AiwafConfigFileCore {
             return errors;
         }
         String backend = config.storageBackend == null ? "" : config.storageBackend.trim().toLowerCase();
+        if (config.sqlInjectionMode == null || !Set.of("block", "monitor", "off").contains(config.sqlInjectionMode)) {
+            errors.add("security.sql_injection_mode must be block, monitor, or off");
+        }
         if (!Set.of("memory", "file", "csv", "db", "redis").contains(backend)) {
             errors.add("storage.backend must be memory, file, csv, db, or redis");
         }
@@ -216,6 +219,7 @@ public final class AiwafConfigFileCore {
                 "max_request_body_bytes", config.maxRequestBodyBytes,
                 "request_body_inspection_bytes", config.requestBodyInspectionBytes,
                 "request_body_inspection_enabled", config.requestBodyInspectionEnabled,
+                "sql_injection_mode", config.sqlInjectionMode,
                 "allow_compressed_request_bodies", config.allowCompressedRequestBodies,
                 "max_parameter_count", config.maxParameterCount,
                 "max_parameter_bytes", config.maxParameterBytes,

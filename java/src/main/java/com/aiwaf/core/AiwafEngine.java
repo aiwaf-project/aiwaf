@@ -161,6 +161,20 @@ public final class AiwafEngine {
             return finalizeDecision(d, startedNs, "method_validation");
         }
 
+        if (!pathExempted && !ipExempted && config.ipKeywordBlockEnabled
+                && !isRuleDisabled(req, rule, config, "ip_keyword_block")
+                && !"off".equals(config.sqlInjectionMode)) {
+            String finding = SqlInjectionCore.inspect(req, config);
+            if (finding != null) {
+                telemetryIncrement("middleware.request_inspection." + finding);
+                if (!"monitor".equals(config.sqlInjectionMode)) {
+                    return finalizeDecision(AiwafDecision.deny(
+                            "payload_inspection_limit".equals(finding) ? 413 : 403, finding),
+                            startedNs, "request_inspection");
+                }
+            }
+        }
+
         if (!pathExempted && !isRuleDisabled(req, rule, config, "ip_keyword_block")
                 && config.ipKeywordBlockEnabled) {
             String matchedKeyword = detectMaliciousKeyword(req.path());
@@ -570,7 +584,10 @@ public final class AiwafEngine {
         Set<String> learned = new HashSet<>(runtimeStorage.keywordStore().getTopKeywords(100));
         for (String token : tokens) {
             if (config.legitimatePathKeywords.contains(token) || config.exemptKeywords.contains(token)) continue;
-            if (token.length() > 3 && learned.contains(token)) return token;
+            // Older releases learned ordinary route words from malicious queries.
+            // Retain stored evidence, but require attack evidence in the token itself.
+            if (token.length() > 3 && learned.contains(token)
+                    && isMaliciousContext(token, Map.of())) return token;
         }
         return null;
     }

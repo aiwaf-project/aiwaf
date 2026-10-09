@@ -11,7 +11,8 @@ from aiwaf.core.rate_limit import (
     THROTTLE,
     FLOOD_BLOCK,
     build_rate_limit_key,
-    evaluate_rate_limit,
+    consume_rate_limit,
+    RateCacheUnavailable,
     normalize_rate_key_mode,
 )
 
@@ -57,7 +58,6 @@ class RateLimitMiddleware:
             key = build_rate_limit_key("ratelimit", ip, path, key_mode=key_mode, app_key=app_key)
             now = time.time()
             cache_backend = getattr(app, "_aiwaf_rate_cache_backend", _default_cache_backend)
-            timestamps = cache_backend.get(key) or []
             window = app.config.get("AIWAF_RATE_WINDOW", 10)
             max_req = app.config.get("AIWAF_RATE_MAX", 20)
             flood = app.config.get("AIWAF_RATE_FLOOD", 40)
@@ -70,14 +70,16 @@ class RateLimitMiddleware:
                 max_req = overrides.get("MAX", max_req)
                 flood = overrides.get("FLOOD", flood)
 
-            decision = evaluate_rate_limit(
-                timestamps=timestamps,
-                now=now,
-                window_seconds=window,
-                max_requests=max_req,
-                flood_threshold=flood,
-            )
-            cache_backend.set(key, decision.timestamps, ttl_seconds=window)
+            try:
+                decision = consume_rate_limit(
+                    cache_backend, key,
+                    now=now,
+                    window_seconds=window,
+                    max_requests=max_req,
+                    flood_threshold=flood,
+                )
+            except RateCacheUnavailable:
+                return jsonify({'error': 'temporarily_unavailable'}), 503
 
             if decision.action == FLOOD_BLOCK:
                 BlacklistManager.block(
@@ -120,8 +122,5 @@ def _resolve_rate_cache_backend(app):
     if backend == "redis":
         redis_url = app.config.get("AIWAF_REDIS_URL")
         key_prefix = app.config.get("AIWAF_RATE_CACHE_KEY_PREFIX", "aiwaf:rate:")
-        try:
-            return make_cache_backend(CacheBackendConfig(backend="redis", redis_url=redis_url, key_prefix=key_prefix))
-        except Exception:
-            return _default_cache_backend
-    return _default_cache_backend
+        return make_cache_backend(CacheBackendConfig(backend="redis", redis_url=redis_url, key_prefix=key_prefix))
+    raise ValueError("Unknown AIWAF_RATE_CACHE_BACKEND")

@@ -5,7 +5,7 @@ from aiwaf.fast import AIWAF
 from aiwaf.fast.middleware.rate_limit_middleware import _AIWAF_CACHE
 
 
-def test_fastapi_rate_limit_redis_backend_missing_url_falls_back():
+def test_fastapi_rate_limit_redis_backend_missing_url_rejects_requests():
     app = FastAPI()
 
     @app.get("/rl")
@@ -22,11 +22,11 @@ def test_fastapi_rate_limit_redis_backend_missing_url_falls_back():
             "window_seconds": 60,
             "max_requests": 1,
             "flood_threshold": 100,
-            "cache_backend": "redis",  # no redis_url configured, should fall back
+            "cache_backend": "redis",
         },
     )
 
     client = TestClient(app)
-    assert client.get("/rl").status_code == 200
-    assert client.get("/rl").status_code == 429
+    assert client.get("/rl").status_code == 503
+    assert client.get("/rl").json() == {'error': 'temporarily_unavailable'}
 

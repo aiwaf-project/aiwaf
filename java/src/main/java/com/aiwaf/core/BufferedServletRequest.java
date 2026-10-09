@@ -38,6 +38,9 @@ public final class BufferedServletRequest extends HttpServletRequestWrapper {
 
         byte[] bytes = request.getInputStream().readNBytes(max + 1);
         if (bytes.length > max) return new Result(request, "", true);
+        if ("block".equals(config.sqlInjectionMode) && bytes.length > config.requestBodyInspectionBytes) {
+            return new Result(request, "", true);
+        }
         BufferedServletRequest wrapped = new BufferedServletRequest(request, bytes);
         int previewLength = Math.min(bytes.length, Math.max(0, config.requestBodyInspectionBytes));
         String preview = bytes.length >= 4

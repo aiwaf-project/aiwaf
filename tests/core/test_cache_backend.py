@@ -134,9 +134,6 @@ def test_simple_redis_io_errors_and_error_reply():
 def test_redis_url_parser_and_backend_factory(monkeypatch):
     with pytest.raises(ValueError):
         cache._redis_from_url("http://localhost")
-    with pytest.raises(RuntimeError):
-        cache._redis_from_url("rediss://localhost")
-
     real_import = builtins.__import__
     monkeypatch.setattr(
         builtins,
@@ -146,6 +143,8 @@ def test_redis_url_parser_and_backend_factory(monkeypatch):
         else real_import(name, *args, **kwargs),
     )
     client = cache._redis_from_url("redis://:p%40ss@host:6380/4")
+    with pytest.raises(RuntimeError, match="requires redis-py"):
+        cache._redis_from_url("rediss://localhost")
     assert (client._host, client._port, client._password, client._db) == (
         "host",
         6380,
@@ -157,3 +156,13 @@ def test_redis_url_parser_and_backend_factory(monkeypatch):
         cache.make_cache_backend(cache.CacheBackendConfig(backend="redis"))
     with pytest.raises(ValueError, match="Unknown"):
         cache.make_cache_backend(cache.CacheBackendConfig(backend="other"))
+
+
+def test_tls_redis_url_reaches_installed_driver(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    calls = []
+    driver = SimpleNamespace(Redis=SimpleNamespace(from_url=lambda url: calls.append(url) or FakeRedis()))
+    monkeypatch.setitem(sys.modules, 'redis', driver)
+    assert isinstance(cache._redis_from_url('rediss://redis.local:6380/4'), FakeRedis)
+    assert calls == ['rediss://redis.local:6380/4']

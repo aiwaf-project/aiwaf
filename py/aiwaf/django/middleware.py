@@ -61,7 +61,6 @@ from ..core.rate_limit import (
     THROTTLE,
     FLOOD_BLOCK,
     build_rate_limit_key,
-    evaluate_rate_limit,
     normalize_rate_key_mode,
 )
 from ..core.honeypot import (
@@ -590,15 +589,18 @@ class RateLimitMiddleware:
             key_mode=self.KEY_MODE,
         )
         now = time.time()
-        timestamps = cache.get(key, [])
-        decision = evaluate_rate_limit(
-            timestamps=timestamps,
-            now=now,
-            window_seconds=window,
-            max_requests=max_requests,
-            flood_threshold=flood,
-        )
-        cache.set(key, decision.timestamps, timeout=window)
+        from .rate_cache import consume_django_rate_limit
+        from ..core.rate_limit import RateCacheUnavailable
+        try:
+            decision = consume_django_rate_limit(
+                cache, key,
+                now=now,
+                window_seconds=window,
+                max_requests=max_requests,
+                flood_threshold=flood,
+            )
+        except RateCacheUnavailable:
+            return JsonResponse({'error': 'temporarily_unavailable'}, status=503)
 
         if decision.action == FLOOD_BLOCK:
             # Double-check exemption before blocking

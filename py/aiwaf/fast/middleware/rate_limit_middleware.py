@@ -17,7 +17,8 @@ from ...core.rate_limit import (
     THROTTLE,
     FLOOD_BLOCK,
     build_rate_limit_key,
-    evaluate_rate_limit,
+    consume_rate_limit,
+    RateCacheUnavailable,
     normalize_rate_key_mode,
 )
 from ...core.block_responses import blocked_response, throttle_response
@@ -46,6 +47,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.key_mode = normalize_rate_key_mode(key_mode)
         self.soft_block_blacklist = bool(soft_block_blacklist)
         self.cache_backend = cache_backend
+        self._explicit_cache_backend = cache_backend is not None
         self._initial_app = app
         self._runtime_bound = False
         # Initialize lazily (some Starlette stacks pass a wrapped app lacking `.state`).
@@ -79,11 +81,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 pass
 
         if backend:
-            try:
-                return make_cache_backend(CacheBackendConfig(backend=str(backend), redis_url=redis_url, key_prefix=str(key_prefix)))
-            except Exception:
-                # Fall back to in-memory cache on config errors.
-                return _DEFAULT_CACHE_BACKEND
+            return make_cache_backend(CacheBackendConfig(backend=str(backend), redis_url=redis_url, key_prefix=str(key_prefix)))
 
         return _DEFAULT_CACHE_BACKEND
 
@@ -103,12 +101,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 cfg = getattr(state, "aiwaf_config", None) if state is not None else None
                 if cfg is None:
                     continue
-                if (not self._runtime_bound) and (self.cache_backend is None):
+                if not self._runtime_bound and not self._explicit_cache_backend:
+                    self.cache_backend = None
                     self._init_from_app(candidate)
                     self._runtime_bound = True
                     break
         except Exception:
-            pass
+            return JSONResponse({'error': 'temporarily_unavailable'}, status_code=503)
 
         if not should_apply_middleware(request, "rate_limit", self.path_rules):
             return await call_next(request)
@@ -119,7 +118,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         path = request.url.path or "unknown"
         key = build_rate_limit_key("ratelimit", ip, path, key_mode=self.key_mode, app_key=self.app_key)
         now = time.time()
-        timestamps = (self.cache_backend or _DEFAULT_CACHE_BACKEND).get(key) or []
 
         window = self.window_seconds
         max_req = self.max_requests
@@ -130,14 +128,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             max_req = int(overrides.get("MAX", max_req))
             flood = int(overrides.get("FLOOD", flood))
 
-        decision = evaluate_rate_limit(
-            timestamps=timestamps,
-            now=now,
-            window_seconds=window,
-            max_requests=max_req,
-            flood_threshold=flood,
-        )
-        (self.cache_backend or _DEFAULT_CACHE_BACKEND).set(key, decision.timestamps, ttl_seconds=window)
+        try:
+            decision = consume_rate_limit(
+                self.cache_backend or _DEFAULT_CACHE_BACKEND, key,
+                now=now,
+                window_seconds=window,
+                max_requests=max_req,
+                flood_threshold=flood,
+            )
+        except RateCacheUnavailable:
+            request.state.aiwaf_blocked = True
+            request.state.aiwaf_block_reason = 'Rate cache unavailable'
+            return JSONResponse({'error': 'temporarily_unavailable'}, status_code=503)
 
         if decision.action == FLOOD_BLOCK:
             BlacklistManager.block(ip, "Flood pattern", extended_request_info=get_blacklist_extended_info(request))

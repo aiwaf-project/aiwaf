@@ -5,6 +5,12 @@ let cacheBackend;
 let opts;
 let cleanupInterval;
 
+function unavailable() {
+  const error = new Error('Rate cache unavailable');
+  error.code = 'AIWAF_RATE_CACHE_UNAVAILABLE';
+  return error;
+}
+
 const defaultMemoryCache = new NodeCache({ stdTTL: 60, checkperiod: 120 }); // Auto cleanup every 2 minutes
 
 const fallbackCache = {
@@ -84,11 +90,13 @@ module.exports = {
       WINDOW_SEC: o?.WINDOW_SEC ?? 60,
       MAX_REQ: o?.MAX_REQ ?? 100,
       FLOOD_REQ: o?.FLOOD_REQ ?? 200,
+      failureMode: o?.AIWAF_RATE_CACHE_FAILURE_MODE ?? 'closed',
       cache: o?.cache
     };
     const requiredOps = ['lPush', 'expire', 'lLen', 'lRange'];
     const externalCache = opts.cache;
     const hasRequiredOps = externalCache && requiredOps.every(op => typeof externalCache[op] === 'function');
+    if (!['closed', 'open'].includes(opts.failureMode)) throw new Error('AIWAF_RATE_CACHE_FAILURE_MODE must be closed or open');
     cacheBackend = hasRequiredOps ? externalCache : fallbackCache;
 
     // Start cleanup interval for fallback cache
@@ -114,7 +122,8 @@ module.exports = {
         await blacklistManager.block(ip, 'flood');
       }
     } catch (err) {
-      console.warn('Cache error in record().', err.message);
+      console.warn('Rate cache unavailable in record().');
+      if (opts.failureMode === 'closed') throw unavailable();
     }
   },
 
@@ -123,7 +132,8 @@ module.exports = {
     try {
       if (await blacklistManager.isBlocked(ip)) return true;
     } catch (err) {
-      console.warn('Blacklist check error:', err.message);
+      console.warn('Blacklist unavailable during rate check.');
+      if (opts.failureMode === 'closed') throw unavailable();
     }
 
     try {
@@ -133,7 +143,8 @@ module.exports = {
       const within = timestamps.filter(t => now - t < effective.WINDOW_SEC * 1000);
       return within.length > effective.MAX_REQ;
     } catch (err) {
-      console.warn('Cache error in isBlocked().', err.message);
+      console.warn('Rate cache unavailable in isBlocked().');
+      if (opts.failureMode === 'closed') throw unavailable();
       return false; // Fail open
     }
   },

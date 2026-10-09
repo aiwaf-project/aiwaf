@@ -33,6 +33,7 @@ module.exports.koa = createKoaMiddleware;
 module.exports.nest = createNestMiddleware;
 module.exports.next = createNextHandler;
 module.exports.adonis = createAdonisMiddleware;
+module.exports.bodyParser = require('./lib/bodyParser');
 module.exports.sails = createExpressMiddleware;
 module.exports.auto = withMiddlewares('auto');
 module.exports.all = withMiddlewares('all');

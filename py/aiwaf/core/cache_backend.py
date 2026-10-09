@@ -105,13 +105,21 @@ class DictCacheBackend(CacheBackend):
 
 
 class RedisJSONCache(CacheBackend):
-    """Redis cache storing values as JSON.
+    """Redis JSON cache with atomic sliding-window rate-limit updates."""
 
-    Notes:
-    - This is a minimal adapter. Rate limiting updates are not atomic across
-      concurrent requests; for strict correctness under high concurrency, use a
-      Redis-native data structure + Lua script.
-    """
+    _RATE_SCRIPT = """
+local raw = redis.call('GET', KEYS[1])
+local old = raw and cjson.decode(raw) or {}
+local now, window = tonumber(ARGV[1]), tonumber(ARGV[2])
+local current = {}
+for _, timestamp in ipairs(old) do
+    if now - timestamp < window then table.insert(current, timestamp) end
+end
+table.insert(current, now)
+local encoded = cjson.encode(current)
+redis.call('SET', KEYS[1], encoded, 'PX', math.ceil(window * 1000))
+return encoded
+"""
 
     def __init__(self, redis_url: str, *, key_prefix: str = "aiwaf:"):
         self._redis = _redis_from_url(redis_url)
@@ -142,6 +150,15 @@ class RedisJSONCache(CacheBackend):
     def clear(self) -> None:  # pragma: no cover
         # Not safe to flush the whole DB; best-effort no-op.
         return
+
+    def consume_rate_limit(self, key, *, now, window_seconds, max_requests, flood_threshold):
+        from .rate_limit import RateLimitDecision, ALLOW, THROTTLE, FLOOD_BLOCK
+        raw = self._redis.eval(self._RATE_SCRIPT, 1, self._k(key),
+                               str(float(now)), str(max(float(window_seconds), 1.0)))
+        timestamps = json.loads(raw)
+        count = len(timestamps)
+        action = FLOOD_BLOCK if count > int(flood_threshold) else THROTTLE if count > int(max_requests) else ALLOW
+        return RateLimitDecision(action, count, timestamps)
 
     @property
     def is_shared(self) -> bool:
@@ -254,6 +271,9 @@ class _SimpleRedisClient:
     def setex(self, key: str, ttl_seconds: int, value: str) -> None:
         self._exec("SETEX", key, str(int(ttl_seconds)), value)
 
+    def eval(self, script: str, numkeys: int, *args):
+        return self._exec("EVAL", script, str(numkeys), *(str(arg) for arg in args))
+
 
 def _redis_from_url(redis_url: str):
     """Return a redis client (redis-py if installed, else a simple TCP client)."""
@@ -261,8 +281,6 @@ def _redis_from_url(redis_url: str):
     scheme = (parsed.scheme or "").lower()
     if scheme not in {"redis", "rediss"}:
         raise ValueError(f"Unsupported Redis URL scheme: {parsed.scheme}")
-    if scheme == "rediss":
-        raise RuntimeError("rediss:// requires redis-py; TLS not supported by built-in client")
 
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or 6379
@@ -277,6 +295,8 @@ def _redis_from_url(redis_url: str):
     try:
         import redis  # type: ignore
     except Exception:
+        if scheme == 'rediss':
+            raise RuntimeError('rediss:// requires redis-py; TLS not supported by built-in client') from None
         return _SimpleRedisClient(host, port, password=password, db=db)
 
     client = redis.Redis.from_url(redis_url)

@@ -169,6 +169,7 @@ public final class AiwafConfig {
     public int maxRequestBodyBytes = 1024 * 1024;
     public int requestBodyInspectionBytes = 64 * 1024;
     public boolean requestBodyInspectionEnabled = true;
+    public String sqlInjectionMode = "block";
     public boolean allowCompressedRequestBodies = false;
     public int maxRuntimeStateEntries = 10_000;
     public int maxParameterCount = 200;

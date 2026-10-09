@@ -134,6 +134,7 @@ function normalizeSettings(rawOpts = {}) {
     AIWAF_ROUTE_PLAN_VERSION: firstDefined(rawOpts.AIWAF_ROUTE_PLAN_VERSION, rawOpts.routePlanVersion, legacy.routePlanVersion, process.env.AIWAF_ROUTE_PLAN_VERSION, 0),
     AIWAF_ACCESS_LOG: firstDefined(rawOpts.AIWAF_ACCESS_LOG, rawOpts.accessLog, process.env.AIWAF_ACCESS_LOG, process.env.NODE_LOG_PATH),
 
+    AIWAF_RATE_CACHE_FAILURE_MODE: firstDefined(rawOpts.AIWAF_RATE_CACHE_FAILURE_MODE, process.env.AIWAF_RATE_CACHE_FAILURE_MODE, 'closed'),
     AIWAF_FORCE_JSON_ERRORS: toBool(firstDefined(rawOpts.AIWAF_FORCE_JSON_ERRORS, rawOpts.forceJsonErrors, legacy.errors?.forceJson), true)
   };
 

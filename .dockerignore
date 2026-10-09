@@ -1,0 +1,14 @@
+.git
+.github
+.agents
+**/node_modules
+**/.venv
+**/venv
+**/target
+**/__pycache__
+**/*.pyc
+**/*.log
+**/*.sqlite3
+**/.env
+release-artifacts
+rust/target

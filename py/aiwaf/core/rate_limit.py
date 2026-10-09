@@ -2,6 +2,9 @@
 
 from dataclasses import dataclass
 from typing import Iterable, List
+import threading
+
+_bucket_lock = threading.RLock()
 
 
 ALLOW = "allow"
@@ -14,6 +17,10 @@ class RateLimitDecision:
     action: str
     count: int
     timestamps: List[float]
+
+
+class RateCacheUnavailable(RuntimeError):
+    """A backend failure must not turn a shared rate limit into an allow."""
 
 
 def normalize_rate_key_mode(mode: str) -> str:
@@ -62,3 +69,27 @@ def evaluate_rate_limit(
         action = THROTTLE
 
     return RateLimitDecision(action=action, count=count, timestamps=trimmed)
+
+
+def consume_rate_limit(cache, key, *, now, window_seconds, max_requests, flood_threshold):
+    try:
+        return _consume_rate_limit(cache, key, now=now, window_seconds=window_seconds,
+                                   max_requests=max_requests, flood_threshold=flood_threshold)
+    except RateCacheUnavailable:
+        raise
+    except Exception:
+        raise RateCacheUnavailable('Rate cache unavailable') from None
+
+
+def _consume_rate_limit(cache, key, *, now, window_seconds, max_requests, flood_threshold):
+    """Update a bucket atomically, including across workers for Redis backends."""
+    atomic = getattr(cache, "consume_rate_limit", None)
+    if callable(atomic):
+        return atomic(key, now=now, window_seconds=window_seconds,
+                      max_requests=max_requests, flood_threshold=flood_threshold)
+    # Legacy dict/custom local caches still need one lock around read/modify/write.
+    with _bucket_lock:
+        decision = evaluate_rate_limit(cache.get(key) or [], now, window_seconds,
+                                       max_requests, flood_threshold)
+        cache.set(key, decision.timestamps, ttl_seconds=max(float(window_seconds), 1.0))
+        return decision

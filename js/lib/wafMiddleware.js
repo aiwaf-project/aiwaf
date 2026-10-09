@@ -390,17 +390,24 @@ module.exports = function aiwaf(rawOpts = {}) {
     }
 
     if (shouldApply('rate_limit')) {
-      const rateOverrides = routePlan.getOverrides('RATE_LIMIT');
-      await rateLimiter.record(ip, rateOverrides);
+      try {
+        const rateOverrides = routePlan.getOverrides('RATE_LIMIT');
+        await rateLimiter.record(ip, rateOverrides);
 
-      if (await rateLimiter.isBlocked(ip, rateOverrides)) {
-        if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
-          console.error(`[AIWAF-BLOCK-RATE] ip=${ip}`);
+        if (await rateLimiter.isBlocked(ip, rateOverrides)) {
+          if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
+            console.error(`[AIWAF-BLOCK-RATE] ip=${ip}`);
+          }
+          if (await blacklistManager.isBlocked(ip)) {
+            return deny(403, 'blocked', 'flood_or_blacklist');
+          }
+          return deny(429, 'too_many_requests', 'rate_limit');
         }
-        if (await blacklistManager.isBlocked(ip)) {
-          return deny(403, 'blocked', 'flood_or_blacklist');
+      } catch (error) {
+        if (error.code === 'AIWAF_RATE_CACHE_UNAVAILABLE') {
+          return deny(503, 'temporarily_unavailable', 'rate_cache_unavailable');
         }
-        return deny(429, 'too_many_requests', 'rate_limit');
+        throw error;
       }
     }
 
