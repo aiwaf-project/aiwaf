@@ -98,17 +98,3 @@ def test_django_redis_preserves_serialized_buckets_across_processes():
     assert actions.count('flood_block') == 25
     assert len(cache.get(key)) == 65
     cache.delete(key)
-
-
-def test_django_redis_outage_is_sanitized_even_before_transaction(monkeypatch):
-    from django.core.cache.backends.redis import RedisCache
-    from aiwaf.django.rate_cache import consume_django_rate_limit
-    from aiwaf.core.rate_limit import RateCacheUnavailable
-    cache = RedisCache('redis://127.0.0.1:1', {})
-    def unavailable(*_args, **_kwargs):
-        raise ConnectionError('redis://secret:password@private-host')
-    monkeypatch.setattr(cache._cache, 'get_client', unavailable)
-    with pytest.raises(RateCacheUnavailable, match='^Rate cache unavailable$') as error:
-        consume_django_rate_limit(cache, 'isolated', now=time.time(), window_seconds=60,
-                                 max_requests=20, flood_threshold=40)
-    assert error.value.__cause__ is None

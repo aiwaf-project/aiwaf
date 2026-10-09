@@ -57,7 +57,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[django,flask,fastapi,rust]"
-          python -m pip install pytest pytest-cov coverage httpx
+          python -m pip install pytest pytest-cov coverage httpx redis
 
       - name: Install JavaScript dependencies
         run: npm ci --prefix js
