@@ -11,3 +11,10 @@ class AiwafConfig(AppConfig):
             apply_legacy_settings()
         except Exception:
             pass
+        from pathlib import Path
+        from django.conf import settings
+        from aiwaf.core.edge_bridge import edge_configuration
+        path = getattr(settings, 'AIWAF_BOUVANE_CONFIG', Path(getattr(settings, 'BASE_DIR', '.')) / '.bouvane.json')
+        middleware = 'aiwaf.django.edge.EdgeAssistedMiddleware'
+        if edge_configuration(path) and middleware not in settings.MIDDLEWARE:
+            settings.MIDDLEWARE = [middleware, *settings.MIDDLEWARE]

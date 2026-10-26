@@ -65,6 +65,8 @@ class AIWAF:
 
     def init_app(self, app, middlewares: Iterable[str] | None = None, disable_middlewares: Iterable[str] | None = None, use_database=None):
         self.app = app
+        from aiwaf.core.edge_bridge import install_flask
+        install_flask(app)
         if app.config.get('AIWAF_USE_CSV', True) and use_database is not True:
             from aiwaf.core.policy_csv_storage import PolicyCSVStorage
             from .storage import _get_data_dir
