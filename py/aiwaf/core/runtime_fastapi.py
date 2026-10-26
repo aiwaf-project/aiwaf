@@ -106,6 +106,11 @@ class AIWAF:
         
         # Add middleware in reverse order (FastAPI adds them in reverse)
         self._add_middleware()
+        from .edge_bridge import create_agent, EdgeASGIMiddleware
+        agent = create_agent(self.config.get('AIWAF_BOUVANE_CONFIG', '.bouvane.json'), framework='fastapi', app=app)
+        if agent:
+            app.state.aiwaf_edge = agent
+            app.add_middleware(EdgeASGIMiddleware, agent=agent)
         
         # Add startup and shutdown events
         self._add_lifecycle_events(app)

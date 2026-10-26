@@ -1,5 +1,7 @@
 # AIWAF
 
+Optional Bouvane integration: [reload synchronization and verified edge-assisted mode](docs/bouvane-edge.md).
+
 AIWAF is a multi-runtime web application firewall toolkit for Python, Node.js, WebAssembly, and Java applications. It combines deterministic request controls with route-aware policies, reputation tracking, request logging, training pipelines, and optional Isolation Forest anomaly detection.
 
 This is the single authoritative README for the monorepo and every published AIWAF package. Release workflows stage this file, the root `LICENSE`, `NOTICE`, and `licenses/` into package artifacts when a registry requires package-local copies.
