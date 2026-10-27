@@ -27,10 +27,11 @@ def create_agent(path='.bouvane.json', *, framework, app=None):
         return None
     try:
         from bloud.agent import ReloadAgent
+        from bloud.context import application_context
     except ImportError:
         if value.get('_implicit_edge'):
             return None
-        raise RuntimeError('Edge-assisted mode requires the bouvane Python package.') from None
+        raise RuntimeError('Edge-assisted mode requires the current bouvane Python package with recommendation support (release 0.1.0).') from None
     from aiwaf import __version__
     from .path_manifest import build_manifest
 
@@ -49,7 +50,14 @@ def create_agent(path='.bouvane.json', *, framework, app=None):
             raise ValueError('Unsupported Bouvane application framework.')
         return build_manifest(framework=framework, routes=routes)
 
-    return ReloadAgent(value, manifest, aiwaf_version=__version__, base_dir=Path(path).resolve().parent)
+    def context():
+        if framework == 'flask':
+            with app.app_context():
+                return application_context(framework, app)
+        return application_context(framework, app)
+
+    return ReloadAgent(value, manifest, aiwaf_version=__version__, base_dir=Path(path).resolve().parent,
+                       context_factory=context)
 
 
 def install_flask(app):
