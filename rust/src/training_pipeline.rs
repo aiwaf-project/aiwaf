@@ -112,9 +112,9 @@ impl TrainingCSVReader {
 static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
 fn patterns() -> &'static Vec<Regex> {
     PATTERNS.get_or_init(|| [
-        r#"(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" (\d{3}).*?"(.*?)" "(.*?)".*?response-time=(\d+\.\d+)"#,
-        r#"(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" (\d{3}) (\d+) "(.*?)" "(.*?)""#,
-        r#"(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" (\d{3}) (\d+)"#,
+        r#"(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" (\d{3}).*?"(.*?)" "(.*?)".*?response-time=(\d+\.\d+)"#,
+        r#"(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" (\d{3}) (\d+) "(.*?)" "(.*?)""#,
+        r#"(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" (\d{3}) (\d+)"#,
     ].iter().map(|s| Regex::new(s).unwrap()).collect())
 }
 
