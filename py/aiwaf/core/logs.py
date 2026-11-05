@@ -47,17 +47,17 @@ def write_csv_log(csv_file: str, headers: list[str], row: dict, *, durable: bool
 _LOG_RX_PATTERNS = [
     # Combined log format with response time (IPv4 + IPv6)
     re.compile(
-        r'(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" '
+        r'(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" '
         r'(\d{3}).*?"(.*?)" "(.*?)".*?response-time=(\d+\.\d+)'
     ),
     # Standard combined log format (IPv4 + IPv6)
     re.compile(
-        r'(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" '
+        r'(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" '
         r'(\d{3}) (\d+) "(.*?)" "(.*?)"'
     ),
     # Common log format (IPv4 + IPv6)
     re.compile(
-        r'(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" '
+        r'(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" '
         r'(\d{3}) (\d+)'
     ),
 ]

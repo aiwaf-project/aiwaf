@@ -2,6 +2,7 @@
 
 ## Python 1.1.8 / Rust-Python 0.2.7 / Node.js 1.1.5 / WASM 0.2.5 / Java 1.3.5 — prepared release
 
+- Recognize PATCH HTTP method in Python and Rust access log parsers.
 - Update package versions and matching native dependency requirements for the next release.
 - Remove benchmark/profiling utilities and consolidate release documentation into README/CHANGELOG.
 - Remove the deprecated Rust floating-point module import.

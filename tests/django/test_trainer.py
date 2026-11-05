@@ -116,6 +116,30 @@ class TrainerFunctionsTestCase(AIWAFTestCase):
         self.assertEqual(result["ip"], "2001:db8::1")
         self.assertEqual(result["path"], "/test-ipv6")
         self.assertEqual(result["status"], "200")
+
+    def test_parse_log_line_patch(self):
+        """PATCH requests are parsed and retained for training across log formats."""
+        log_rt = '203.0.113.5 - - [05/Nov/2026:10:00:00 +0000] "PATCH /api/resource HTTP/1.1" 200 12 "-" "ua" response-time=0.045'
+        res_rt = self.trainer_module._parse(log_rt)
+        self.assertIsNotNone(res_rt)
+        self.assertEqual(res_rt["ip"], "203.0.113.5")
+        self.assertEqual(res_rt["path"], "/api/resource")
+        self.assertEqual(res_rt["status"], "200")
+        self.assertEqual(res_rt["response_time"], 0.045)
+
+        log_comb = '203.0.113.5 - - [05/Nov/2026:10:00:00 +0000] "PATCH /api/resource HTTP/1.1" 200 12 "https://example.com" "ua"'
+        res_comb = self.trainer_module._parse(log_comb)
+        self.assertIsNotNone(res_comb)
+        self.assertEqual(res_comb["ip"], "203.0.113.5")
+        self.assertEqual(res_comb["path"], "/api/resource")
+        self.assertEqual(res_comb["status"], "200")
+
+        log_common = '203.0.113.5 - - [05/Nov/2026:10:00:00 +0000] "PATCH /api/resource HTTP/1.1" 200 12'
+        res_common = self.trainer_module._parse(log_common)
+        self.assertIsNotNone(res_common)
+        self.assertEqual(res_common["ip"], "203.0.113.5")
+        self.assertEqual(res_common["path"], "/api/resource")
+        self.assertEqual(res_common["status"], "200")
     
     @patch('aiwaf.django.trainer._get_logs_from_model')
     def test_get_logs_from_model(self, mock_get_logs):
