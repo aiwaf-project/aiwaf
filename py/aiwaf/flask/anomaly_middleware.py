@@ -302,10 +302,10 @@ class AIAnomalyMiddleware:
             except (RequestRedirect, MethodNotAllowed):
                 # Route exists but wrong method or redirect
                 return True
-            except:
+            except Exception:
                 # No route found
                 return False
-        except:
+        except Exception:
             return False
 
     def _calculate_features(self, request_obj, ip, response_time=0):

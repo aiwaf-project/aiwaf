@@ -339,7 +339,7 @@ def _analyze_csv_logs(log_file, stats):
             try:
                 response_time = int(row.get('response_time_ms', 0))
                 stats['response_times'].append(response_time)
-            except:
+            except Exception:
                 pass
             
             # Track hourly distribution
@@ -347,7 +347,7 @@ def _analyze_csv_logs(log_file, stats):
                 timestamp = row.get('timestamp', '')
                 hour = timestamp.split('T')[1].split(':')[0] if 'T' in timestamp else '00'
                 stats['hourly_distribution'][hour] = stats['hourly_distribution'].get(hour, 0) + 1
-            except:
+            except Exception:
                 pass
 
 

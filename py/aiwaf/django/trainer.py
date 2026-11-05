@@ -86,7 +86,7 @@ def path_exists_in_django(path: str) -> bool:
     try:
         get_resolver().resolve(f"/{candidate}")
         return True
-    except:
+    except Exception:
         pass
     
     # Also try with trailing slash if it doesn't have one
@@ -94,7 +94,7 @@ def path_exists_in_django(path: str) -> bool:
         try:
             get_resolver().resolve(f"/{candidate}/")
             return True
-        except:
+        except Exception:
             pass
     
     # Try without trailing slash if it has one
@@ -102,7 +102,7 @@ def path_exists_in_django(path: str) -> bool:
         try:
             get_resolver().resolve(f"/{candidate.rstrip('/')}")
             return True
-        except:
+        except Exception:
             pass
 
     # If direct resolution fails, be conservative
@@ -245,7 +245,7 @@ def _extract_django_route_keywords() -> set:
                     try:
                         for nested_pattern in pattern.url_patterns:
                             extract_from_pattern(nested_pattern, prefix)
-                    except:
+                    except Exception:
                         pass
                 
                 elif isinstance(pattern, URLPattern):
