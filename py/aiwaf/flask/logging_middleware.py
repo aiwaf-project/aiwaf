@@ -8,7 +8,7 @@ Creates standard web server access logs with AIWAF security annotations.
 import csv
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from flask import request, g
 from .exemption_decorators import should_apply_middleware
@@ -107,7 +107,7 @@ class AIWAFLoggingMiddleware:
         ip = self._get_client_ip()
         ctx = extract_logging_context_from_flask_request(request, ip=ip)
         # Use a timezone-safe timestamp format for cross-platform compatibility
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         timestamp = now.strftime('[%d/%b/%Y:%H:%M:%S +0000]')
         method = ctx["method"]
         path = ctx["path_with_query"]
@@ -149,7 +149,7 @@ class AIWAFLoggingMiddleware:
         ]
 
         row = {
-            'timestamp': datetime.now().isoformat(),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
             **extract_logging_context_from_flask_request(request, ip=self._get_client_ip()),
             'status_code': response.status_code,
             'content_length': response.content_length or 0,
@@ -190,7 +190,7 @@ class AIWAFLoggingMiddleware:
         response_time_ms = int((time.time() - start_time) * 1000)
         
         log_data = {
-            'timestamp': datetime.now().isoformat(),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
             **extract_logging_context_from_flask_request(request, ip=self._get_client_ip()),
             'status_code': response.status_code,
             'content_length': response.content_length or 0,
@@ -205,7 +205,7 @@ class AIWAFLoggingMiddleware:
     
     def _log_error(self, response):
         """Log errors in standard error log format."""
-        timestamp = datetime.now().strftime('[%Y-%m-%d %H:%M:%S]')
+        timestamp = datetime.now(timezone.utc).strftime('[%Y-%m-%d %H:%M:%S]')
         ctx = extract_logging_context_from_flask_request(request, ip=self._get_client_ip())
         status_code = response.status_code
         user_agent = ctx["user_agent"] or '-'
@@ -220,7 +220,7 @@ class AIWAFLoggingMiddleware:
     
     def _log_aiwaf_event(self, response):
         """Log AIWAF specific security events."""
-        timestamp = datetime.now().strftime('[%Y-%m-%d %H:%M:%S]')
+        timestamp = datetime.now(timezone.utc).strftime('[%Y-%m-%d %H:%M:%S]')
         ctx = extract_logging_context_from_flask_request(request, ip=self._get_client_ip())
         block_reason = getattr(g, 'aiwaf_block_reason', 'unknown')
         user_agent = ctx["user_agent"] or '-'
