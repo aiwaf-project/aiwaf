@@ -69,6 +69,27 @@ class MiddlewareLoggerTestCase(AIWAFMiddlewareTestCase):
     
 
 
+class CsvLogPathTestCase(AIWAFMiddlewareTestCase):
+    """The middleware CSV path only rewrites a trailing .log (issue #41)."""
+
+    CSV_PATH_CASES = [
+        ("aiwaf_requests.log", "aiwaf_requests.csv"),
+        ("logs/aiwaf.log", "logs/aiwaf.csv"),
+        ("/var/app.logs/access.log", "/var/app.logs/access.csv"),
+        ("/srv/my.log.d/aiwaf.log", "/srv/my.log.d/aiwaf.csv"),
+        ("/var/app.logs/x.csv", "/var/app.logs/x.csv"),
+        ("access.log.old", "access.log.old"),
+        ("requests.txt", "requests.txt"),
+    ]
+
+    def test_get_csv_path_only_rewrites_trailing_log(self):
+        for configured, expected in self.CSV_PATH_CASES:
+            with self.subTest(configured=configured):
+                with override_settings(AIWAF_MIDDLEWARE_LOG=configured):
+                    middleware = AIWAFLoggerMiddleware(MagicMock())
+                self.assertEqual(middleware._get_csv_path(), expected)
+
+
 if __name__ == "__main__":
     import unittest
     unittest.main()
