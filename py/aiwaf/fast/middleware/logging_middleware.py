@@ -3,7 +3,7 @@
 import csv
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -52,7 +52,7 @@ class AIWAFLoggingMiddleware(BaseHTTPMiddleware):
         response_time_ms = int((time.time() - start_time) * 1000)
         ip = get_ip(request)
         ctx = extract_logging_context_from_fastapi_request(request, ip=ip)
-        timestamp = datetime.now().strftime("[%d/%b/%Y:%H:%M:%S +0000]")
+        timestamp = datetime.now(timezone.utc).strftime("[%d/%b/%Y:%H:%M:%S +0000]")
         path = ctx["path_with_query"]
         protocol = ctx["protocol"]
         content_length = response.headers.get("content-length", "-")

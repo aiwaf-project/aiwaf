@@ -213,3 +213,34 @@ def test_logging_factory_block_event_and_json_analysis(tmp_path):
     stats = {"total_requests": 0, "status_codes": {}, "ips": {}, "blocked_requests": 0}
     logging_middleware._analyze_json_logs(log, stats)
     assert stats["total_requests"] == 1
+
+
+def test_combined_log_timestamp_is_utc_on_non_utc_server(tmp_path, monkeypatch):
+    import time
+    from datetime import datetime, timezone
+    from flask import Flask
+    from aiwaf.flask.logging_middleware import AIWAFLoggingMiddleware
+
+    monkeypatch.setenv("TZ", "Etc/GMT+5")  # POSIX sign: UTC-5
+    time.tzset()
+    try:
+        app = Flask(__name__)
+        app.config["AIWAF_LOG_DIR"] = str(tmp_path)
+        app.config["AIWAF_LOG_FORMAT"] = "combined"
+        AIWAFLoggingMiddleware(app)
+
+        @app.route("/ok")
+        def ok():
+            return "ok"
+
+        before = datetime.now(timezone.utc).replace(microsecond=0)
+        app.test_client().get("/ok")
+        after = datetime.now(timezone.utc)
+
+        line = (tmp_path / "access.log").read_text(encoding="utf-8")
+        stamp = line.split("[", 1)[1].split("]", 1)[0]
+        logged = datetime.strptime(stamp, "%d/%b/%Y:%H:%M:%S %z")
+        assert before <= logged <= after
+    finally:
+        monkeypatch.undo()
+        time.tzset()

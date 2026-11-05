@@ -8,7 +8,7 @@ Creates standard web server access logs with AIWAF security annotations.
 import csv
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from flask import request, g
 from .exemption_decorators import should_apply_middleware
@@ -106,8 +106,8 @@ class AIWAFLoggingMiddleware:
         
         ip = self._get_client_ip()
         ctx = extract_logging_context_from_flask_request(request, ip=ip)
-        # Use a timezone-safe timestamp format for cross-platform compatibility
-        now = datetime.now()
+        # Combined log timestamps are labelled +0000, so they must be in UTC
+        now = datetime.now(timezone.utc)
         timestamp = now.strftime('[%d/%b/%Y:%H:%M:%S +0000]')
         method = ctx["method"]
         path = ctx["path_with_query"]
