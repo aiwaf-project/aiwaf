@@ -152,7 +152,7 @@ class AIWAFLoggingMiddleware:
         ]
 
         row = {
-            'timestamp': datetime.now().isoformat(),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
             **extract_logging_context_from_flask_request(request, ip=self._get_client_ip()),
             'status_code': response.status_code,
             'content_length': response.content_length or 0,
@@ -193,7 +193,7 @@ class AIWAFLoggingMiddleware:
         response_time_ms = int((time.time() - start_time) * 1000)
         
         log_data = {
-            'timestamp': datetime.now().isoformat(),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
             **extract_logging_context_from_flask_request(request, ip=self._get_client_ip()),
             'status_code': response.status_code,
             'content_length': response.content_length or 0,
@@ -208,7 +208,7 @@ class AIWAFLoggingMiddleware:
     
     def _log_error(self, response):
         """Log errors in standard error log format."""
-        timestamp = datetime.now().strftime('[%Y-%m-%d %H:%M:%S]')
+        timestamp = datetime.now(timezone.utc).strftime('[%Y-%m-%d %H:%M:%S]')
         ctx = extract_logging_context_from_flask_request(request, ip=self._get_client_ip())
         status_code = response.status_code
         user_agent = ctx["user_agent"] or '-'
@@ -223,7 +223,7 @@ class AIWAFLoggingMiddleware:
     
     def _log_aiwaf_event(self, response):
         """Log AIWAF specific security events."""
-        timestamp = datetime.now().strftime('[%Y-%m-%d %H:%M:%S]')
+        timestamp = datetime.now(timezone.utc).strftime('[%Y-%m-%d %H:%M:%S]')
         ctx = extract_logging_context_from_flask_request(request, ip=self._get_client_ip())
         block_reason = getattr(g, 'aiwaf_block_reason', 'unknown')
         user_agent = ctx["user_agent"] or '-'
