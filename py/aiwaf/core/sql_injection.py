@@ -149,9 +149,11 @@ class _PrefixStream(io.RawIOBase):
         return len(data)
 
 
-def inspect_wsgi_request(request, policy, *, django=False, evaluator=None):
+def inspect_wsgi_request(request, policy, *, django=False, evaluator=None, observer=None):
     """Read at most budget+1 bytes and prepend them for the application's parser."""
     if policy.mode == "off":
+        if observer is not None:
+            observer(request.META.get("QUERY_STRING", "") if django else request.query_string, None)
         if evaluator is not None:
             query = request.META.get("QUERY_STRING", "") if django else request.query_string
             return evaluator(query, None)
@@ -175,12 +177,16 @@ def inspect_wsgi_request(request, policy, *, django=False, evaluator=None):
             stream = request.stream
             body = stream.read(policy.max_bytes + 1)
             request.stream = io.BufferedReader(_PrefixStream(body, stream))
+    if observer is not None:
+        observer(query, body)
     return policy.enforce((evaluator or policy.inspect)(query, body))
 
 
-async def inspect_asgi_request(request, policy, *, evaluator=None):
+async def inspect_asgi_request(request, policy, *, evaluator=None, observer=None):
     """Replay exact ASGI messages, including an over-budget monitor-mode prefix."""
     if policy.mode == "off":
+        if observer is not None:
+            observer(request.scope.get("query_string", b""), None)
         if evaluator is not None:
             return evaluator(request.scope.get("query_string", b""), None)
         return None
@@ -215,4 +221,6 @@ async def inspect_asgi_request(request, policy, *, evaluator=None):
             if exhausted:
                 return policy.enforce(Finding("payload_inspection_limit", 413))
     query = request.scope.get("query_string", b"")
+    if observer is not None:
+        observer(query, body)
     return policy.enforce((evaluator or policy.inspect)(query, body))

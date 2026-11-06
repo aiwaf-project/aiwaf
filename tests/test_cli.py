@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from aiwaf.cli import _handle_init
+from aiwaf.cli import _handle_audit, _handle_init, main
 
 
 def _drop_app_module():
@@ -102,3 +102,40 @@ def test_detect_calls_django_trainer(monkeypatch):
     monkeypatch.setattr("aiwaf.django.trainer.train", lambda: calls.append(True))
     cli.aiwaf_detect()
     assert calls == [True]
+
+
+VULNERABLE_VIEW = (
+    "import os\n"
+    "def view(request):\n"
+    "    os.system(request.GET['cmd'])\n"
+)
+
+
+def test_audit_exit_codes_and_reports(tmp_path, capsys):
+    (tmp_path / "views.py").write_text(VULNERABLE_VIEW, encoding="utf-8")
+
+    assert _handle_audit([str(tmp_path)]) == 0
+    assert "found 1 possible" in capsys.readouterr().out
+    assert _handle_audit([str(tmp_path), "--fail-on-findings"]) == 1
+    capsys.readouterr()
+
+    report = tmp_path / "report.json"
+    assert _handle_audit([str(tmp_path), "--format", "json", "--output", str(report)]) == 0
+    assert json.loads(report.read_text(encoding="utf-8"))["language"] == "python"
+    assert capsys.readouterr().out == ""
+
+
+def test_audit_reports_a_missing_path(tmp_path, capsys):
+    assert _handle_audit([str(tmp_path / "missing")]) == 2
+    assert "missing" in capsys.readouterr().err
+
+
+def test_main_dispatches_audit(monkeypatch, tmp_path, capsys):
+    (tmp_path / "views.py").write_text(VULNERABLE_VIEW, encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["aiwaf", "audit", str(tmp_path), "--fail-on-findings"])
+
+    with pytest.raises(SystemExit) as stopped:
+        main()
+
+    assert stopped.value.code == 1
+    assert "os.system" in capsys.readouterr().out

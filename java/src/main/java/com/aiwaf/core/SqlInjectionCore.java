@@ -12,7 +12,7 @@ import java.util.regex.Pattern;
 public final class SqlInjectionCore {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Pattern COMMENTS = Pattern.compile("/\\*[\\s\\S]*?\\*/");
-    private static final Map<String, Pattern> RULES = Map.of(
+    static final Map<String, Pattern> RULES = Map.of(
         "sql_union_select", Pattern.compile("\\bunion\\s+(?:all\\s+)?select\\b", Pattern.CASE_INSENSITIVE),
         "sql_boolean_tautology", Pattern.compile("['\"`]\\s*(?:or|and)\\s+(?:true\\b|\\d+\\s*=\\s*\\d+|['\"][^'\"\\r\\n]{0,80}['\"]\\s*=\\s*['\"])", Pattern.CASE_INSENSITIVE),
         "sql_quote_comment", Pattern.compile("['\"`]\\s*(?:--|#)"),

@@ -162,6 +162,11 @@ public final class AiwafEngine {
         }
 
         if (!pathExempted && !ipExempted && config.ipKeywordBlockEnabled
+                && !isRuleDisabled(req, rule, config, "ip_keyword_block")) {
+            RouteRiskCore.observe(req, config);
+        }
+
+        if (!pathExempted && !ipExempted && config.ipKeywordBlockEnabled
                 && !isRuleDisabled(req, rule, config, "ip_keyword_block")
                 && !"off".equals(config.sqlInjectionMode)) {
             String finding = SqlInjectionCore.inspect(req, config);

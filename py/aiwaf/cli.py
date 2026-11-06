@@ -116,6 +116,44 @@ def _prepend_cwd_to_syspath() -> None:
     sys.path.insert(0, project_root)
 
 
+def _handle_audit(argv) -> int:
+    """Report possible injection paths. This reads source files and runs no application code."""
+    import argparse
+
+    from aiwaf.core.injection_analysis import analyze_path, format_report, to_json
+
+    parser = argparse.ArgumentParser(
+        prog="aiwaf audit",
+        description="Report where request input reaches SQL, commands, files and other dangerous operations.",
+    )
+    parser.add_argument("path", nargs="?", default=".", help="File or folder to scan (default: current folder)")
+    parser.add_argument("--format", choices=["text", "json"], default="text")
+    parser.add_argument("--output", help="Write the report to this file")
+    parser.add_argument("--include-tests", action="store_true", help="Also scan test files")
+    parser.add_argument("--fail-on-findings", action="store_true", help="Exit with status 1 if anything is found")
+    parser.add_argument("--manifest", help="Save findings to this route manifest for AIWAF_INJECTION_RISK_MODE=log")
+    args = parser.parse_args(argv)
+    try:
+        report = analyze_path(args.path, include_tests=args.include_tests)
+    except FileNotFoundError as error:
+        print(error, file=sys.stderr)
+        return 2
+    content = to_json(report) if args.format == "json" else format_report(report)
+    if args.output:
+        Path(args.output).write_text(content + "\n", encoding="utf-8")
+    else:
+        print(content)
+    if args.manifest:
+        from aiwaf.core.route_risks import format_counts, update_manifest
+
+        try:
+            print(format_counts(update_manifest(report, args.manifest), args.manifest))
+        except (OSError, ValueError) as error:
+            print(error, file=sys.stderr)
+            return 2
+    return 1 if args.fail_on_findings and report["findings"] else 0
+
+
 def _handle_init(argv) -> None:
     import argparse
     import importlib
@@ -198,6 +236,9 @@ def main() -> None:
     if argv and argv[0] == "init":
         _handle_init(argv[1:])
         return
+
+    if argv and argv[0] == "audit":
+        raise SystemExit(_handle_audit(argv[1:]))
 
     if argv and argv[0] in frameworks:
         framework = _normalize_framework(argv[0])

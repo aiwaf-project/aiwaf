@@ -145,6 +145,7 @@ public final class AiwafConfigCompatCore {
         cfg.requestBodyInspectionBytes = intval(security.get("request_body_inspection_bytes"), cfg.requestBodyInspectionBytes);
         cfg.requestBodyInspectionEnabled = bool(security.get("request_body_inspection_enabled"), cfg.requestBodyInspectionEnabled);
         cfg.sqlInjectionMode = str(security.get("sql_injection_mode"), cfg.sqlInjectionMode).toLowerCase(Locale.ROOT);
+        cfg.injectionRiskMode = str(security.get("injection_risk_mode"), cfg.injectionRiskMode).toLowerCase(Locale.ROOT);
         cfg.allowCompressedRequestBodies = bool(security.get("allow_compressed_request_bodies"), cfg.allowCompressedRequestBodies);
         cfg.maxParameterCount = intval(security.get("max_parameter_count"), cfg.maxParameterCount);
         cfg.maxParameterBytes = intval(security.get("max_parameter_bytes"), cfg.maxParameterBytes);
@@ -217,6 +218,7 @@ public final class AiwafConfigCompatCore {
         get(env, "AIWAF_UUID_SCORE_SUCCESS_DECAY").ifPresent(v -> cfg.uuidSuccessDecay = parseInt(v, cfg.uuidSuccessDecay));
         get(env, "AIWAF_STORAGE_BACKEND").ifPresent(v -> cfg.storageBackend = v.toLowerCase(Locale.ROOT));
         get(env, "AIWAF_SQL_INJECTION_MODE").ifPresent(v -> cfg.sqlInjectionMode = v.toLowerCase(Locale.ROOT));
+        get(env, "AIWAF_INJECTION_RISK_MODE").ifPresent(v -> cfg.injectionRiskMode = v.toLowerCase(Locale.ROOT));
         get(env, "AIWAF_STORAGE_FILE_PATH").ifPresent(v -> cfg.storageFilePath = v);
         get(env, "AIWAF_REDIS_URL").ifPresent(v -> cfg.storageRedisUrl = v);
         get(env, "AIWAF_STORAGE_KEY_PREFIX").ifPresent(v -> cfg.storageKeyPrefix = v);

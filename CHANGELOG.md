@@ -14,6 +14,16 @@
 - Rust and WASM: `validate_headers_with_config` now enforces every required header. It
   previously checked only `User-Agent` and `Accept`, and only `HTTP_`-style names. The
   Django, FastAPI, Flask and Node.js middleware already enforced these headers themselves.
+- Add `audit` to the Python, Node.js and Java command lines. It parses source without
+  running it and reports where request input can reach dangerous operations. It's
+  report-only and doesn't affect request handling.
+- Add `AIWAF_INJECTION_RISK_MODE=log` and `audit --manifest`. Saved findings tell AIWAF
+  which operation each route's input reaches, and matching requests are logged for that
+  operation. It's off by default, never blocks, and logs no request values.
+- Java can now read source with the JDK Compiler Tree API. `aiwaf-cli init --source`
+  builds a route manifest without starting the application, including for plain Servlet
+  applications, and reads method bodies for API, form and login signals. Source analysis
+  needs a JDK.
 - CI builds `aiwaf-rust` from this repository for Python tests instead of installing it from PyPI.
 - Update package versions and matching native dependency requirements for the next release.
 - Remove benchmark/profiling utilities and consolidate release documentation into README/CHANGELOG.

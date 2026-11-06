@@ -89,6 +89,78 @@ By default, loopback, RFC 1918, link-local, and IPv6 unique-local peers are trus
 
 If untrusted hosts can reach the application directly from your private network, narrow the list to your proxy's addresses. Addresses already resolved by Flask's `ProxyFix`, Uvicorn's `--proxy-headers`, or Express `trust proxy` are respected, except that AIWAF still walks the headers when the resolved address is itself in a trusted range. The Rust-owned Node pipeline uses `req.ip` only, so configure `trust proxy` there.
 
+## Injection audit
+
+`audit` reads your source code and reports where request input can reach SQL, NoSQL,
+shell commands, file paths, outbound requests, code evaluation, templates or
+deserialization. It parses files without running them, and it doesn't change how
+requests are handled.
+
+```bash
+aiwaf audit path/to/app                                    # Python
+npx aiwaf audit path/to/app                                # Node.js
+java -cp <classpath> com.aiwaf.cli.AiwafConsole audit src  # Java, needs a JDK
+```
+
+| Language | Frameworks | Parser |
+| --- | --- | --- |
+| Python | Django, Flask, FastAPI | `ast` |
+| Node.js | Express, Fastify, Hapi, Koa, NestJS, Next.js, AdonisJS, Sails | `@babel/parser` |
+| Java | Spring, Jakarta Servlet, JAX-RS parameters | JDK Compiler Tree API |
+
+All three accept `--format text|json`, `--output <file>`, `--include-tests` and
+`--fail-on-findings` and `--manifest <file>`. The exit status is 0 when the scan completes, 1 with
+`--fail-on-findings` when something is found, and 2 for a bad path or argument.
+
+A finding is a path worth reading, not a confirmed vulnerability. A reverse proxy, for
+example, will report its upstream request because forwarding input is its job. A clean
+report doesn't prove the code is safe: input that crosses files, classes or dynamic
+calls can be missed, because helpers are only followed within one file or class.
+
+Java can also build a route manifest from source, without starting the application.
+This is how plain Servlet applications get a manifest:
+
+```bash
+java -cp <classpath> com.aiwaf.cli.AiwafConsole init --source src --output .aiwaf/paths.json
+```
+
+### Log-only checks on live requests
+
+Audit findings can guide what AIWAF looks for on each route. Save them to your route
+manifest, then turn on log mode:
+
+```bash
+aiwaf audit path/to/app --manifest .aiwaf/paths.json
+export AIWAF_INJECTION_RISK_MODE=log
+```
+
+Generate the manifest first with `init`, and run the audit again after `init`, because
+`init` replaces the saved results. `AIWAF_INJECTION_RISK_MODE` is `off` by default. Flask,
+Django and the Node.js options accept the same name, and Spring uses
+`aiwaf.injection-risk-mode`. The Node.js native pipeline reads `AIWAF_INJECTION_RISK_MODE`
+and `AIWAF_PATH_MANIFEST` from the environment.
+
+In log mode, a request to a route with a saved finding is checked for patterns that matter
+to that operation. A route whose input reaches a file path is checked for traversal, for
+example, in the parameter that reaches it. Matches are logged like this:
+
+```json
+{"event": "aiwaf.injection_risk", "mode": "log", "method": "GET", "route": "/files", "sink": "path", "input": "name", "rule": "path_traversal", "confidence": "medium"}
+```
+
+- **It doesn't block:** log mode never changes a request or a response, and there's no
+  blocking mode yet. Use these logs to see how often it would be wrong on your traffic.
+- **It only adds checks:** a route with no findings keeps its normal protection, and saved
+  findings never turn a protection off.
+- **Logs hold no request values:** events contain route, rule and parameter names from the
+  manifest only.
+- **What it reads:** query strings, route values, and buffered JSON or form bodies. Headers,
+  cookies and multipart uploads aren't checked.
+- **Unlinked findings:** the audit reports any finding it can't tie to a manifest route, and
+  those get no route-specific checks. Handlers are matched by path or function name, so
+  routes missing from the manifest, or reused function names in Node.js, can stay unlinked.
+- **Stale results:** the file isn't updated when code changes, so run the audit in your build.
+
 ## Repository layout
 
 ```text

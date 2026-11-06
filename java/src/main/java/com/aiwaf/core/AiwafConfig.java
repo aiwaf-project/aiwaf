@@ -170,6 +170,8 @@ public final class AiwafConfig {
     public int requestBodyInspectionBytes = 64 * 1024;
     public boolean requestBodyInspectionEnabled = true;
     public String sqlInjectionMode = "block";
+    /** "log" records route-specific matches from saved audit findings. It never blocks a request. */
+    public String injectionRiskMode = "off";
     public boolean allowCompressedRequestBodies = false;
     public int maxRuntimeStateEntries = 10_000;
     public int maxParameterCount = 200;

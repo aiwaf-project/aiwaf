@@ -518,8 +518,11 @@ class IPAndKeywordBlockMiddleware:
             _raise_blocked(request, "IP already blocklisted", status_code=403)
         
         # Check if path exists in Django - if yes, be more lenient
+        from aiwaf.core.route_risks import observer_for
         from aiwaf.core.sql_injection import inspect_wsgi_request
-        finding = inspect_wsgi_request(request, self.sql_policy, django=True)
+        finding = inspect_wsgi_request(request, self.sql_policy, django=True, observer=observer_for(
+            getattr(settings, "AIWAF_INJECTION_RISK_MODE", None),
+            getattr(settings, "AIWAF_PATH_MANIFEST", None), request.path, request.method))
         if finding:
             _log_block(request, finding.rule, status_code=finding.status)
             return JsonResponse({"error": finding.rule}, status=finding.status)

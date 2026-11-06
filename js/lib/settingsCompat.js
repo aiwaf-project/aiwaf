@@ -132,6 +132,7 @@ function normalizeSettings(rawOpts = {}) {
     AIWAF_DISABLE_MIDDLEWARES: toArray(firstDefined(rawOpts.AIWAF_DISABLE_MIDDLEWARES, rawOpts.disableMiddlewares, rawOpts.disabledMiddlewares, legacy.middlewares?.disabled, process.env.AIWAF_DISABLE_MIDDLEWARES), []),
     AIWAF_PATH_RULES: toPathRules(firstDefined(rawOpts.AIWAF_PATH_RULES, rawOpts.pathRules, legacy.pathRules, process.env.AIWAF_PATH_RULES), []),
     AIWAF_PATH_MANIFEST: firstDefined(rawOpts.AIWAF_PATH_MANIFEST, rawOpts.pathManifest, legacy.pathManifest, process.env.AIWAF_PATH_MANIFEST, '.aiwaf/paths.json'),
+    AIWAF_INJECTION_RISK_MODE: firstDefined(rawOpts.AIWAF_INJECTION_RISK_MODE, rawOpts.injectionRiskMode, process.env.AIWAF_INJECTION_RISK_MODE, 'off'),
     AIWAF_ROUTE_PLAN_VERSION: firstDefined(rawOpts.AIWAF_ROUTE_PLAN_VERSION, rawOpts.routePlanVersion, legacy.routePlanVersion, process.env.AIWAF_ROUTE_PLAN_VERSION, 0),
     AIWAF_ACCESS_LOG: firstDefined(rawOpts.AIWAF_ACCESS_LOG, rawOpts.accessLog, process.env.AIWAF_ACCESS_LOG, process.env.NODE_LOG_PATH),
 

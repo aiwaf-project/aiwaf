@@ -121,6 +121,8 @@ module.exports = async function createNativeMiddleware(options = {}) {
   const contextKey = Symbol('aiwaf.native.context');
   const pending = new Set();
   const report = error => { if (options.onError) options.onError(error); else console.error('AIWAF native finalization failed:', error.message); };
+  // This pipeline takes no general settings, so these two come from the environment.
+  const observeRisks = require('./routeRisks').createObserver({ AIWAF_PATH_MANIFEST: process.env.AIWAF_PATH_MANIFEST });
   function payload(req) {
     const b = safeBody(req, maxBytes);
     const query = String(req.originalUrl || req.url || '').split('?').slice(1).join('?');
@@ -133,6 +135,8 @@ module.exports = async function createNativeMiddleware(options = {}) {
     const start = performance.now();
     try {
       const meta = req.aiwafRoute || {};
+      if (observeRisks && !meta.fullyExempt && !(meta.exemptMiddlewares || []).includes('ip_keyword_block')
+          && (!profile.enabled || profile.enabled.includes('ip_keyword_block'))) observeRisks(req);
       const required = new Set((meta.requiredMiddlewares || []).map(normalizeMiddlewareName));
       const disabled = new Set((meta.fullyExempt ? ALL_MIDDLEWARES : meta.exemptMiddlewares || []).map(normalizeMiddlewareName));
       for (const key of required) disabled.delete(key);
@@ -172,6 +176,7 @@ module.exports = async function createNativeMiddleware(options = {}) {
     const disabled = req.aiwafRoute?.exemptMiddlewares || [];
     if (profile.enabled && !profile.enabled.includes('ip_keyword_block')) return null;
     if (req.aiwafRoute?.fullyExempt || disabled.includes('ip_keyword_block')) return null;
+    if (observeRisks) observeRisks(req);
     return payload(req);
   };
   middleware.diagnostics = () => JSON.parse(native.diagnostics());

@@ -58,4 +58,4 @@ function createInspector(options = {}) {
   };
 }
 
-module.exports = { createInspector };
+module.exports = { createInspector, RULES };

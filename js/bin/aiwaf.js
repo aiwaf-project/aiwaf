@@ -304,12 +304,17 @@ async function main() {
         'whois <domain|ip>',
         'diagnose <ip>',
         'reset [--blocklist] [--keywords] [--exemptions] [--all] --confirm',
-        'pathshell'
+        'pathshell',
+        'audit [path] [--format text|json] [--output file] [--include-tests] [--fail-on-findings]'
       ]
     });
     return;
   }
 
+  if (cmd === 'audit') {
+    process.exitCode = require('../lib/injectionAnalysis').runAuditCommand([subcmd, ...args].filter(item => item !== undefined));
+    return;
+  }
   if (cmd === 'train') return runTrain();
   if (cmd === 'pathshell') return runPathShell();
   if (cmd === 'reset') return runReset([subcmd, ...args].filter(Boolean));

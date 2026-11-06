@@ -146,6 +146,7 @@ module.exports = function aiwaf(rawOpts = {}) {
   opts.AIWAF_MIDDLEWARES = normalizedMiddlewareList(opts.AIWAF_MIDDLEWARES);
   opts.AIWAF_DISABLE_MIDDLEWARES = normalizedMiddlewareList(opts.AIWAF_DISABLE_MIDDLEWARES) || [];
   const pathRules = getEffectivePathRules(opts.AIWAF_PATH_RULES, { manifestPath: opts.AIWAF_PATH_MANIFEST });
+  const observeRisks = require('./routeRisks').createObserver(opts);
 
   let enabledMiddlewares = planEnabledMiddlewares({
     orderedAvailable: [
@@ -194,6 +195,7 @@ module.exports = function aiwaf(rawOpts = {}) {
     const plan = createRoutePlan(path, pathRules, req.aiwafRoute || {});
     if (!enabledMiddlewares.has('ip_keyword_block') || !plan.shouldApply('ip_keyword_block')
         || await exemptions.isExemptRequest(ip, path)) return null;
+    if (observeRisks) observeRisks(req);
     const finding = inspectSql(req);
     if (finding?.mode === 'monitor') {
       (opts.logger || console).warn?.({ event: 'aiwaf.payload', rule: finding.rule, mode: finding.mode });
