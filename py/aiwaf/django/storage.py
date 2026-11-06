@@ -38,7 +38,9 @@ from ..core.runtime_storage import (
 FeatureSample = BlocklistEntry = IPExemption = ExemptPath = DynamicKeyword = None
 
 # Fallback storage for when Django models are unavailable
-_fallback_storage_path = os.path.join(os.path.dirname(__file__), 'fallback_keywords.json')
+_fallback_storage_path = os.environ.get('AIWAF_FALLBACK_KEYWORDS_PATH') or os.path.join(
+    os.path.dirname(__file__), 'fallback_keywords.json'
+)
 _fallback_store = KeywordFallbackStore(_fallback_storage_path)
 logger = logging.getLogger("aiwaf.django.storage")
 

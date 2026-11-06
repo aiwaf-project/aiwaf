@@ -70,6 +70,25 @@ Supported framework integrations include Django, Flask, FastAPI, Express, Fastif
 
 The runtimes share policy intent and training feature names, but their framework adapters and model implementations remain language-native. Model artifacts are not generally interchangeable across languages.
 
+## Client IP addresses and proxies
+
+Blocks, exemptions, rate limits, and geo policies all depend on the client address. Python and Node.js read `X-Forwarded-For` and `X-Real-IP` only when the connecting peer is a trusted proxy. They walk `X-Forwarded-For` from the right and stop at the first untrusted address, because anything further left is client-supplied. `CF-Connecting-IP` and other vendor headers are not read for this purpose.
+
+By default, loopback, RFC 1918, link-local, and IPv6 unique-local peers are trusted, so a proxy on a private network needs no configuration. Set `AIWAF_TRUSTED_PROXIES` to a list or comma-separated string of addresses and CIDR ranges to replace those defaults. An empty value trusts no proxy.
+
+| Runtime | Where to set it |
+| --- | --- |
+| Django | `AIWAF_TRUSTED_PROXIES` in settings, or the environment variable |
+| Flask | `app.config["AIWAF_TRUSTED_PROXIES"]`, or the environment variable |
+| FastAPI | The environment variable |
+| Node.js | The `AIWAF_TRUSTED_PROXIES` or `trustedProxies` option, or the environment variable |
+| Java | `trustedProxyCidrs` (defaults to loopback only) |
+
+> [!IMPORTANT]
+> If your proxy or CDN connects from a public address (Cloudflare or Google Cloud load balancers, for example), add its ranges to `AIWAF_TRUSTED_PROXIES`. Otherwise every visitor appears to come from the proxy, and rate limiting or a block can then affect all of them.
+
+If untrusted hosts can reach the application directly from your private network, narrow the list to your proxy's addresses. Addresses already resolved by Flask's `ProxyFix`, Uvicorn's `--proxy-headers`, or Express `trust proxy` are respected, except that AIWAF still walks the headers when the resolved address is itself in a trusted range. The Rust-owned Node pipeline uses `req.ip` only, so configure `trust proxy` there.
+
 ## Repository layout
 
 ```text
@@ -1289,7 +1308,7 @@ Do not train directly on unreviewed sensitive request bodies or authentication h
 - Configure the outermost proxy to overwrite client-supplied forwarding headers.
 - Use Redis, a database, or another shared backend when multiple workers must share rate-limit, blocklist, or exemption state.
 - Keep health checks, static assets, and trusted webhook routes explicitly scoped instead of disabling protection globally.
-- Start anomaly detection in observe-only or conservative mode and tune it with representative normal traffic.
+- Tune anomaly detection with representative normal traffic before relying on it in production.
 - Rotate logs and exclude secrets, authorization headers, cookies, and personal data.
 - Sign model/configuration artifacts where the runtime supports HMAC verification.
 - Run AIWAF alongside normal secure-development controls and an edge/reverse-proxy layer.

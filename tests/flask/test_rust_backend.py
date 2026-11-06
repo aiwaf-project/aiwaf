@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from aiwaf.core import rust_backend as core_rust_backend
 from aiwaf.flask import rust_backend
 from aiwaf.core import header_validation
 
@@ -140,7 +141,7 @@ def test_supports_chunked_feature_extraction_with_fake_module(monkeypatch):
         def finalize_feature_state(self, static_keywords, state):
             return {"features": []}
 
-    monkeypatch.setattr(rust_backend, "aiwaf_rust", FakeRust())
+    monkeypatch.setattr(core_rust_backend, "aiwaf_rust", FakeRust())
     assert rust_backend.supports_chunked_feature_extraction() is True
 
 
@@ -159,7 +160,7 @@ def test_extract_features_batch_and_finalize_with_fake_module(monkeypatch):
             calls["finalize"].append((static_keywords, state))
             return {"features": [{"ip": "final", "path_len": 0}]}
 
-    monkeypatch.setattr(rust_backend, "aiwaf_rust", FakeRust())
+    monkeypatch.setattr(core_rust_backend, "aiwaf_rust", FakeRust())
 
     features, state = rust_backend.extract_features_batch(
         [{"ip": "1.2.3.4", "path_len": 9}],
@@ -190,7 +191,7 @@ def test_validate_headers_prefers_config_api_when_available(monkeypatch):
             calls["plain"] += 1
             return "plain"
 
-    monkeypatch.setattr(rust_backend, "aiwaf_rust", FakeRust())
+    monkeypatch.setattr(core_rust_backend, "aiwaf_rust", FakeRust())
     out = rust_backend.validate_headers(
         {"HTTP_USER_AGENT": "ua"},
         required_headers={"GET": ["User-Agent"]},
@@ -206,7 +207,7 @@ def test_validate_headers_falls_back_to_none_on_exception(monkeypatch):
         def validate_headers(self, headers):
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(rust_backend, "aiwaf_rust", FakeRust())
+    monkeypatch.setattr(core_rust_backend, "aiwaf_rust", FakeRust())
     assert rust_backend.validate_headers({"HTTP_USER_AGENT": "ua"}) is None
 
 
@@ -215,7 +216,7 @@ def test_extract_features_batch_supports_tuple_return(monkeypatch):
         def extract_features_batch_with_state(self, records, static_keywords, state):
             return [{"ip": "1.2.3.4", "path_len": 9}], {"seen": 1}
 
-    monkeypatch.setattr(rust_backend, "aiwaf_rust", FakeRust())
+    monkeypatch.setattr(core_rust_backend, "aiwaf_rust", FakeRust())
     features, state = rust_backend.extract_features_batch([{"ip": "1.2.3.4", "path_len": 9}], ["wp-admin"])
     assert features == [{"ip": "1.2.3.4", "path_len": 9}]
     assert state == {"seen": 1}
@@ -226,7 +227,7 @@ def test_extract_features_batch_returns_none_for_invalid_contract(monkeypatch):
         def extract_features_batch_with_state(self, records, static_keywords, state):
             return "not-a-valid-contract"
 
-    monkeypatch.setattr(rust_backend, "aiwaf_rust", FakeRust())
+    monkeypatch.setattr(core_rust_backend, "aiwaf_rust", FakeRust())
     features, state = rust_backend.extract_features_batch([{"ip": "1.2.3.4", "path_len": 9}], ["wp-admin"], {"seen": 0})
     assert features is None
     assert state == {"seen": 0}
@@ -237,7 +238,7 @@ def test_extract_features_batch_returns_none_on_exception(monkeypatch):
         def extract_features_batch_with_state(self, records, static_keywords, state):
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(rust_backend, "aiwaf_rust", FakeRust())
+    monkeypatch.setattr(core_rust_backend, "aiwaf_rust", FakeRust())
     features, state = rust_backend.extract_features_batch([{"ip": "1.2.3.4", "path_len": 9}], ["wp-admin"], {"seen": 0})
     assert features is None
     assert state == {"seen": 0}
@@ -248,5 +249,5 @@ def test_finalize_feature_state_returns_none_on_exception(monkeypatch):
         def finalize_feature_state(self, static_keywords, state):
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(rust_backend, "aiwaf_rust", FakeRust())
+    monkeypatch.setattr(core_rust_backend, "aiwaf_rust", FakeRust())
     assert rust_backend.finalize_feature_state(["wp-admin"], {"seen": 1}) is None

@@ -2,6 +2,15 @@
 
 ## Python 1.1.8 / Rust-Python 0.2.7 / Node.js 1.1.5 / WASM 0.2.5 / Java 1.3.5 — prepared release
 
+- **Security:** Python and Node.js no longer let a client choose its own address with
+  `X-Forwarded-For`, which could evade blocks and rate limits or match `AIWAF_EXEMPT_IPS`.
+  Forwarded headers now count only from a trusted peer and are walked from the right.
+  **Upgrade check:** proxies connecting from public addresses must be added to the new
+  `AIWAF_TRUSTED_PROXIES` setting, or all visitors will appear as the proxy.
+  `CF-Connecting-IP` and `Forwarded`-style fallbacks are no longer read for the client IP.
+- **Security:** Java stops reading `X-Forwarded-For` at a malformed entry instead of
+  skipping it, so entries left of it can't be taken as the client address. It then
+  falls back to `X-Real-IP` or the peer address.
 - Update package versions and matching native dependency requirements for the next release.
 - Remove benchmark/profiling utilities and consolidate release documentation into README/CHANGELOG.
 - Remove the deprecated Rust floating-point module import.

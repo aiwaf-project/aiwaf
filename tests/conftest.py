@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -27,6 +28,12 @@ if loaded_tests is not None:
 
 # Default Django settings module for tests that call django.setup() directly.
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "tests.django.test_settings")
+
+# Keep keyword fallback writes out of the tracked package directory.
+os.environ.setdefault(
+    "AIWAF_FALLBACK_KEYWORDS_PATH",
+    os.path.join(tempfile.mkdtemp(prefix="aiwaf-fallback-"), "fallback_keywords.json"),
+)
 
 
 def pytest_ignore_collect(collection_path, config):

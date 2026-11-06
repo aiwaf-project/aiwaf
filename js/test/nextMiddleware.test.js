@@ -169,14 +169,15 @@ describe('AIWAF Next.js handler wrapper', () => {
       MAX_REQ: 1,
       FLOOD_REQ: 2
     });
-    const headers = { accept: 'application/json', 'x-forwarded-for': '198.51.100.51' };
+    const ip = '198.51.100.51';
+    const headers = { accept: 'application/json' };
 
-    const firstReq = createMockReq({ path: '/safe', headers });
+    const firstReq = createMockReq({ path: '/safe', headers, ip });
     const firstRes = createMockRes();
     await wrapped(firstReq, firstRes);
     expect(firstRes.statusCode).toBe(200);
 
-    const secondReq = createMockReq({ path: '/safe', headers });
+    const secondReq = createMockReq({ path: '/safe', headers, ip });
     const secondRes = createMockRes();
     await wrapped(secondReq, secondRes);
     expect(secondRes.statusCode).toBe(429);

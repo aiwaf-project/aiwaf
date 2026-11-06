@@ -1,7 +1,21 @@
 import json
+import sys
+from types import ModuleType
 from unittest.mock import Mock, patch
 import pytest
 from aiwaf.core.edge_bridge import create_agent, edge_configuration, install_flask, EdgeASGIMiddleware
+
+
+@pytest.fixture
+def fake_bloud():
+    """Stand in for the separately distributed Bouvane package."""
+    package, agent, context = ModuleType('bloud'), ModuleType('bloud.agent'), ModuleType('bloud.context')
+    agent.ReloadAgent = Mock()
+    context.application_context = Mock()
+    package.agent, package.context = agent, context
+    modules = {'bloud': package, 'bloud.agent': agent, 'bloud.context': context}
+    with patch.dict(sys.modules, modules):
+        yield package
 
 
 def test_installation_alone_does_not_enable_edge_mode(tmp_path):
@@ -9,7 +23,7 @@ def test_installation_alone_does_not_enable_edge_mode(tmp_path):
     assert create_agent(path, framework='django') is None
 
 
-def test_registered_legacy_project_automatically_enables_context_sync(tmp_path):
+def test_registered_legacy_project_automatically_enables_context_sync(tmp_path, fake_bloud):
     path = tmp_path / '.bouvane.json'
     path.write_text(json.dumps({'application': '00000000-0000-0000-0000-000000000001',
                                 'api_url': 'https://example.com/api/v1'}))
@@ -32,7 +46,7 @@ def test_explicit_mode_requires_the_optional_package(tmp_path):
             create_agent(path, framework='django')
 
 
-def test_create_agent_is_lazy_and_uses_actual_route_export(tmp_path):
+def test_create_agent_is_lazy_and_uses_actual_route_export(tmp_path, fake_bloud):
     from flask import Flask
     app = Flask(__name__)
     app.add_url_rule('/example', view_func=lambda: 'example')
@@ -46,6 +60,21 @@ def test_create_agent_is_lazy_and_uses_actual_route_export(tmp_path):
         manifest = factory()
     assert manifest['framework'] == 'flask'
     assert '/example' in manifest['routes']
+
+
+def test_context_factory_runs_inside_the_flask_app_context(tmp_path, fake_bloud):
+    from flask import Flask, has_app_context
+    app = Flask(__name__)
+    path = tmp_path / '.bouvane.json'
+    path.write_text(json.dumps({'application': '00000000-0000-0000-0000-000000000001',
+        'api_url': 'https://example.com/api/v1', 'edge': {'enabled': True}}))
+    seen = []
+    fake_bloud.context.application_context.side_effect = lambda framework, target: seen.append(
+        (framework, target, has_app_context())) or 'facts'
+    create_agent(path, framework='flask', app=app)
+    factory = fake_bloud.agent.ReloadAgent.call_args.kwargs['context_factory']
+    assert factory() == 'facts'
+    assert seen == [('flask', app, True)]
 
 
 def test_flask_hook_preserves_local_fallback_and_strips_origin_secret():

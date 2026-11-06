@@ -11,9 +11,12 @@ from django.urls.resolvers import URLPattern, URLResolver
 from aiwaf.core.api_detection import detect_api_endpoint
 from aiwaf.core.auth_detection import detect_auth_endpoint
 from aiwaf.core.path_manifest import build_manifest, build_route_entry, is_internal_aiwaf_path, write_manifest
-from aiwaf.core.source_methods import infer_methods_from_source
-
-HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
+from aiwaf.core.source_methods import (
+    infer_methods_from_source,
+    methods_from_route_hint as _methods_from_route_hint,
+    normalize_methods as _normalize_methods,
+)
+from aiwaf.core.request_declarations import django_declarations, merge_entries, mask_shadowed_declarations
 
 
 def _clean_pattern(pattern: Any) -> str:
@@ -74,15 +77,6 @@ def _auth_required(callback: Any, raw_path: str) -> bool:
     return False
 
 
-def _normalize_methods(methods: Any) -> list[str]:
-    normalized = sorted({
-        str(method).upper()
-        for method in (methods or [])
-        if str(method).upper() in HTTP_METHODS
-    })
-    return normalized
-
-
 def _methods_from_closure(callback: Any) -> list[str]:
     closure = getattr(callback, "__closure__", None) or ()
     for cell in closure:
@@ -115,29 +109,6 @@ def _methods_from_view_class(view_class: Any) -> list[str]:
         if any(hasattr(view_class, handler) for handler in method_handlers.get(method, ()))
     ]
     return detected
-
-
-def _methods_from_route_hint(raw_path: str = "", route_name: str = "") -> list[str]:
-    text = f"/{raw_path.lstrip('/')} {route_name}".lower()
-    methods = {"GET"}
-    if any(
-        token in text
-        for token in (
-            "login",
-            "signin",
-            "upload",
-            "create",
-            "edit",
-            "update",
-            "delete",
-            "submit",
-            "save",
-            "add",
-            "post",
-        )
-    ):
-        methods.add("POST")
-    return sorted(methods)
 
 
 def _methods(callback: Any, raw_path: str = "", route_name: str = "") -> list[str]:
@@ -178,7 +149,8 @@ def _collect_routes(patterns: Any, prefix: str = "") -> dict[str, dict[str, Any]
             nested = prefix + _clean_pattern(pattern.pattern)
             if nested and not nested.endswith("/"):
                 nested += "/"
-            routes.update(_collect_routes(pattern.url_patterns, nested))
+            for path, entry in _collect_routes(pattern.url_patterns, nested).items():
+                routes[path] = merge_entries(routes.get(path), entry)
             continue
         if not isinstance(pattern, URLPattern):
             continue
@@ -210,12 +182,13 @@ def _collect_routes(patterns: Any, prefix: str = "") -> dict[str, dict[str, Any]
                 "request_body": api_detection.request_body if api_detection.request_body else None,
             },
         )
-        routes[path] = entry
+        entry['request_constraints'] = django_declarations(callback, methods)
+        routes[path] = merge_entries(routes.get(path), entry)
     return routes
 
 def extract_django_routes() -> dict[str, dict[str, Any]]:
     resolver = get_resolver()
-    return _collect_routes(resolver.url_patterns)
+    return mask_shadowed_declarations(_collect_routes(resolver.url_patterns))
 
 def generate_django_manifest(output_path: str = ".aiwaf/paths.json") -> dict[str, Any]:
     manifest = build_manifest(framework="django", routes=extract_django_routes())

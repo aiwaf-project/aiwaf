@@ -44,6 +44,7 @@ from .storage import get_exemption_store, get_keyword_store, _get_storage_mode, 
 from .blocklist_manager import BlocklistManager
 from .utils import is_exempt, is_path_exempt
 from .geoip import lookup_country_name
+from aiwaf.core.geoip import emit_geoip_summary
 from aiwaf.core.constants import STATUS_IDX as CORE_STATUS_IDX
 from aiwaf.core.logs import parse_log_line as core_parse_log_line
 from aiwaf.core.training_pipeline import parse_training_logs, iter_csv_training_batches, aggregate_training_records, learn_training_keywords, anomaly_statistics
@@ -891,24 +892,12 @@ def _print_geoip_summary(ips, title):
         print("GeoIP summary skipped: AIWAF_GEOIP_DB_PATH not set or file missing.")
         return
 
-    counts = Counter()
-    unknown = 0
-    for ip in ips:
-        name = lookup_country_name(ip, cache_prefix=None, cache_seconds=None, db_path=db_path)
-        if name:
-            counts[name] += 1
-        else:
-            unknown += 1
-
-    if not counts and not unknown:
-        return
-
-    top = counts.most_common(10)
-    print(title)
-    for code, cnt in top:
-        print(f"  - {code}: {cnt}")
-    if unknown:
-        print(f"  - UNKNOWN: {unknown}")
+    emit_geoip_summary(
+        ips,
+        title,
+        lambda ip: lookup_country_name(ip, cache_prefix=None, cache_seconds=None, db_path=db_path),
+        print,
+    )
 
 
 def _get_blocked_ips():

@@ -1,5 +1,6 @@
 import logging
 import os
+from collections import Counter
 
 try:
     from geoip2.database import Reader as GeoIPReader
@@ -160,3 +161,24 @@ def lookup_country_name(ip, db_path, cache_prefix=None, cache_seconds=3600, cach
             except Exception:
                 pass
     return None
+
+
+def emit_geoip_summary(ips, title, lookup_name, emit):
+    """Report the ten most common countries for ``ips`` through ``emit``."""
+    counts = Counter()
+    unknown = 0
+    for ip in ips:
+        name = lookup_name(ip)
+        if name:
+            counts[name] += 1
+        else:
+            unknown += 1
+
+    if not counts and not unknown:
+        return
+
+    emit(title)
+    for code, cnt in counts.most_common(10):
+        emit(f"  - {code}: {cnt}")
+    if unknown:
+        emit(f"  - UNKNOWN: {unknown}")

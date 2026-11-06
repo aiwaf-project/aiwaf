@@ -12,7 +12,7 @@ const geoBlocker = require('./geoBlocker');
 const middlewareLogger = require('./middlewareLogger');
 const exemptions = require('./exemptions');
 const requestLogStore = require('./requestLogStore');
-const { extractExtendedRequestInfo } = require('./runtimeUtils');
+const { extractExtendedRequestInfo, getRequestIp } = require('./runtimeUtils');
 const { extractFeatures, init: initFeatureUtils, markRequestStart, STATIC_KW } = require('./featureUtils');
 const { normalizeSettings } = require('./settingsCompat');
 const {
@@ -190,7 +190,7 @@ module.exports = function aiwaf(rawOpts = {}) {
 
   const inspectPayload = async req => {
     const path = String(req.path || req.url || '/').split('?')[0].toLowerCase();
-    const ip = req.headers?.['x-forwarded-for']?.split(',')[0].trim() || req.ip;
+    const ip = getRequestIp(req, opts.AIWAF_TRUSTED_PROXIES);
     const plan = createRoutePlan(path, pathRules, req.aiwafRoute || {});
     if (!enabledMiddlewares.has('ip_keyword_block') || !plan.shouldApply('ip_keyword_block')
         || await exemptions.isExemptRequest(ip, path)) return null;
@@ -202,8 +202,9 @@ module.exports = function aiwaf(rawOpts = {}) {
     return finding;
   };
   const middleware = async (req, res, next) => {
-    const ipHdr = req.headers['x-forwarded-for'];
-    const ip = ipHdr ? ipHdr.split(',')[0].trim() : req.ip;
+    const ip = getRequestIp(req, opts.AIWAF_TRUSTED_PROXIES);
+    // Geo checks and logging must judge the same address as this middleware.
+    req.aiwafClientIp = ip;
     const path = String(req.path || req.url || '/').toLowerCase();
     const method = String(req.method || 'GET').toUpperCase();
     if (isAutoSelection(opts.AIWAF_MIDDLEWARES)) {

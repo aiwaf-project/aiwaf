@@ -11,9 +11,13 @@ from typing import Any
 from aiwaf.core.api_detection import detect_api_endpoint
 from aiwaf.core.auth_detection import detect_auth_endpoint
 from aiwaf.core.path_manifest import build_manifest, build_route_entry, is_internal_aiwaf_path, write_manifest
-from aiwaf.core.source_methods import infer_methods_from_source
-
-HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
+from aiwaf.core.source_methods import (
+    decorator_name as _decorator_name,
+    infer_methods_from_source,
+    methods_from_route_hint as _methods_from_route_hint,
+    normalize_methods as _normalize_methods,
+)
+from aiwaf.core.request_declarations import flask_declarations, merge_entries, mask_shadowed_declarations
 
 
 def _view_name(view_func: Any) -> str:
@@ -35,14 +39,6 @@ def _unwrap_view(view_func: Any) -> Any:
         return view_func
 
 
-def _normalize_methods(methods: Any) -> list[str]:
-    return sorted({
-        str(method).upper()
-        for method in (methods or [])
-        if str(method).upper() in HTTP_METHODS
-    })
-
-
 def _methods_from_view_class(view_class: Any) -> list[str]:
     if view_class is None:
         return []
@@ -60,39 +56,6 @@ def _methods_from_view_class(view_class: Any) -> list[str]:
         for method in candidates
         if any(hasattr(view_class, handler) for handler in method_handlers.get(method, ()))
     ]
-
-
-def _methods_from_route_hint(raw_path: str = "", route_name: str = "") -> list[str]:
-    text = f"{raw_path} {route_name}".lower()
-    methods = {"GET"}
-    if any(
-        token in text
-        for token in (
-            "login",
-            "signin",
-            "upload",
-            "create",
-            "edit",
-            "update",
-            "delete",
-            "submit",
-            "save",
-            "add",
-            "post",
-        )
-    ):
-        methods.add("POST")
-    return sorted(methods)
-
-
-def _decorator_name(node: ast.AST) -> str:
-    if isinstance(node, ast.Call):
-        return _decorator_name(node.func)
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        return node.attr
-    return ""
 
 
 def _has_login_required_decorator(view_func: Any) -> bool:
@@ -200,8 +163,9 @@ def extract_flask_routes(app) -> dict[str, dict[str, Any]]:
         )
         if metadata["blueprint"]:
             entry["blueprint"] = metadata["blueprint"]
-        routes[path] = entry
-    return routes
+        entry['request_constraints'] = flask_declarations(app, methods)
+        routes[path] = merge_entries(routes.get(path), entry)
+    return mask_shadowed_declarations(routes)
 
 
 def generate_flask_manifest(app, output_path: str = ".aiwaf/paths.json") -> dict[str, Any]:

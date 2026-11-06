@@ -13,7 +13,10 @@ from pathlib import Path
 from flask import request, g
 from .exemption_decorators import should_apply_middleware
 import time
-from aiwaf.core.request_context import extract_logging_context_from_flask_request
+from aiwaf.core.request_context import (
+    extract_ip_from_flask_request,
+    extract_logging_context_from_flask_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -243,15 +246,7 @@ class AIWAFLoggingMiddleware:
         if not request:
             return 'unknown'
         
-        # Check for forwarded headers (common in reverse proxy setups)
-        if 'X-Forwarded-For' in request.headers:
-            return request.headers['X-Forwarded-For'].split(',')[0].strip()
-        elif 'X-Real-IP' in request.headers:
-            return request.headers['X-Real-IP']
-        elif 'CF-Connecting-IP' in request.headers:  # Cloudflare
-            return request.headers['CF-Connecting-IP']
-        else:
-            return request.remote_addr or 'unknown'
+        return extract_ip_from_flask_request(request) or 'unknown'
 
 
 def get_logging_middleware():

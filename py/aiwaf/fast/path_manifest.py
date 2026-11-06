@@ -10,9 +10,13 @@ from typing import Any
 from aiwaf.core.api_detection import detect_api_endpoint
 from aiwaf.core.auth_detection import detect_auth_endpoint
 from aiwaf.core.path_manifest import build_manifest, build_route_entry, is_internal_aiwaf_path, write_manifest
-from aiwaf.core.source_methods import infer_methods_from_source
-
-HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
+from aiwaf.core.source_methods import (
+    decorator_name as _decorator_name,
+    infer_methods_from_source,
+    methods_from_route_hint,
+    normalize_methods as _normalize_methods,
+)
+from aiwaf.core.request_declarations import fastapi_declarations, merge_entries, mask_shadowed_declarations
 
 
 def _view_name(endpoint: Any) -> str:
@@ -36,14 +40,6 @@ def _unwrap_endpoint(endpoint: Any) -> Any:
         return inspect.unwrap(endpoint)
     except Exception:
         return endpoint
-
-
-def _normalize_methods(methods: Any) -> list[str]:
-    return sorted({
-        str(method).upper()
-        for method in (methods or [])
-        if str(method).upper() in HTTP_METHODS
-    })
 
 
 def _methods_from_endpoint_class(endpoint: Any) -> list[str]:
@@ -72,37 +68,8 @@ def _methods_from_endpoint_class(endpoint: Any) -> list[str]:
 
 
 def _methods_from_route_hint(raw_path: str = "", route_name: str = "") -> list[str]:
-    text = f"{raw_path} {route_name}".lower()
-    methods = {"GET"}
-    if any(
-        token in text
-        for token in (
-            "login",
-            "signin",
-            "token",
-            "upload",
-            "create",
-            "edit",
-            "update",
-            "delete",
-            "submit",
-            "save",
-            "add",
-            "post",
-        )
-    ):
-        methods.add("POST")
-    return sorted(methods)
-
-
-def _decorator_name(node: ast.AST) -> str:
-    if isinstance(node, ast.Call):
-        return _decorator_name(node.func)
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        return node.attr
-    return ""
+    # FastAPI token endpoints (OAuth2 password flow) are conventionally POST.
+    return methods_from_route_hint(raw_path, route_name, extra_tokens=("token",))
 
 
 def _has_auth_dependency_in_source(endpoint: Any) -> bool:
@@ -206,8 +173,11 @@ def extract_fastapi_routes(app) -> dict[str, dict[str, Any]]:
         )
         if tags:
             entry["tags"] = tags
-        routes[path] = entry
-    return routes
+        entry['request_constraints'] = fastapi_declarations(route, methods)
+        routes[path] = merge_entries(routes.get(path), entry)
+    from starlette.routing import Mount
+    mounted = [route.path.rstrip('/') + '/' for route in getattr(app, 'routes', []) if isinstance(route, Mount)]
+    return mask_shadowed_declarations(routes, mounted)
 
 
 def generate_fastapi_manifest(app, output_path: str = ".aiwaf/paths.json") -> dict[str, Any]:

@@ -83,6 +83,7 @@ function normalizeSettings(rawOpts = {}) {
 
     AIWAF_EXEMPT_PATHS: toArray(firstDefined(rawOpts.AIWAF_EXEMPT_PATHS, rawOpts.exemptPaths, legacy.exemptions?.paths, process.env.AIWAF_EXEMPT_PATHS), []),
     AIWAF_EXEMPT_IPS: toArray(firstDefined(rawOpts.AIWAF_EXEMPT_IPS, rawOpts.exemptIps, legacy.exemptions?.ips, process.env.AIWAF_EXEMPT_IPS), []),
+    AIWAF_TRUSTED_PROXIES: toArray(firstDefined(rawOpts.AIWAF_TRUSTED_PROXIES, rawOpts.trustedProxies, process.env.AIWAF_TRUSTED_PROXIES), null),
     AIWAF_ALLOWED_PATH_KEYWORDS: toArray(firstDefined(rawOpts.AIWAF_ALLOWED_PATH_KEYWORDS, rawOpts.allowedPathKeywords, legacy.exemptions?.allowedPathKeywords, process.env.AIWAF_ALLOWED_PATH_KEYWORDS), []),
     AIWAF_EXEMPT_KEYWORDS: toArray(firstDefined(rawOpts.AIWAF_EXEMPT_KEYWORDS, rawOpts.exemptKeywords, legacy.exemptions?.keywords, process.env.AIWAF_EXEMPT_KEYWORDS), []),
     AIWAF_EXEMPTIONS_DB: toBool(firstDefined(rawOpts.AIWAF_EXEMPTIONS_DB, rawOpts.exemptionsDb, legacy.exemptions?.dbEnabled, process.env.AIWAF_EXEMPTIONS_DB), true),
