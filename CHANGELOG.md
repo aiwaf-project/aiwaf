@@ -11,6 +11,10 @@
 - **Security:** Java stops reading `X-Forwarded-For` at a malformed entry instead of
   skipping it, so entries left of it can't be taken as the client address. It then
   falls back to `X-Real-IP` or the peer address.
+- Rust and WASM: `validate_headers_with_config` now enforces every required header. It
+  previously checked only `User-Agent` and `Accept`, and only `HTTP_`-style names. The
+  Django, FastAPI, Flask and Node.js middleware already enforced these headers themselves.
+- CI builds `aiwaf-rust` from this repository for Python tests instead of installing it from PyPI.
 - Update package versions and matching native dependency requirements for the next release.
 - Remove benchmark/profiling utilities and consolidate release documentation into README/CHANGELOG.
 - Remove the deprecated Rust floating-point module import.

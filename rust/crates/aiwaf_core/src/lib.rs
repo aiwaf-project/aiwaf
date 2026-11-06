@@ -125,6 +125,35 @@ fn has_header(headers: &HashMap<String, String>, key: &str) -> bool {
     }
 }
 
+/// Accept HTTP header names and WSGI environ keys, matching the Python adapter.
+fn canonical_header_name(name: &str) -> String {
+    let name = name.to_uppercase().replace('-', "_");
+    if name.starts_with("HTTP_")
+        || matches!(
+            name.as_str(),
+            "CONTENT_TYPE" | "CONTENT_LENGTH" | "SERVER_PROTOCOL"
+        )
+    {
+        name
+    } else {
+        format!("HTTP_{name}")
+    }
+}
+
+fn has_required_header(headers: &HashMap<String, String>, canonical: &str) -> bool {
+    headers
+        .iter()
+        .any(|(key, value)| !value.is_empty() && canonical_header_name(key) == canonical)
+}
+
+fn display_header_name(canonical: &str) -> String {
+    canonical
+        .strip_prefix("HTTP_")
+        .unwrap_or(canonical)
+        .replace('_', "-")
+        .to_lowercase()
+}
+
 fn check_user_agent(user_agent: &str) -> Option<String> {
     if user_agent.is_empty() {
         return None;
@@ -285,20 +314,20 @@ pub fn validate_headers_with_config(
     required_headers: Option<Vec<String>>,
     min_score: Option<i32>,
 ) -> Option<String> {
-    let required = required_headers
-        .unwrap_or_else(|| vec!["HTTP_USER_AGENT".to_string(), "HTTP_ACCEPT".to_string()]);
-    let required_set: HashSet<String> = required.iter().cloned().collect();
+    let mut required_set = HashSet::new();
+    let required: Vec<String> = required_headers
+        .unwrap_or_else(|| vec!["HTTP_USER_AGENT".to_string(), "HTTP_ACCEPT".to_string()])
+        .iter()
+        .map(|name| canonical_header_name(name))
+        .filter(|name| required_set.insert(name.clone()))
+        .collect();
     let check_required = !required.is_empty();
 
-    let mut missing = Vec::new();
-    if check_required {
-        if required_set.contains("HTTP_USER_AGENT") && !has_header(headers, "HTTP_USER_AGENT") {
-            missing.push("user-agent".to_string());
-        }
-        if required_set.contains("HTTP_ACCEPT") && !has_header(headers, "HTTP_ACCEPT") {
-            missing.push("accept".to_string());
-        }
-    }
+    let missing: Vec<String> = required
+        .iter()
+        .filter(|name| !has_required_header(headers, name))
+        .map(|name| display_header_name(name))
+        .collect();
 
     if !missing.is_empty() {
         return Some(format!("Missing required headers: {}", missing.join(", ")));
@@ -1949,6 +1978,192 @@ mod tests {
         );
         forest.fit(vec![vec![0.0], vec![0.1], vec![0.2], vec![10.0]]);
         assert!(forest.offset_.is_finite());
+    }
+}
+#[cfg(test)]
+mod model_contract_tests {
+    use super::*;
+
+    fn forest() -> IsolationForest {
+        let mut forest = IsolationForest::new(
+            50,
+            MaxSamples::Auto,
+            Contamination::Auto,
+            MaxFeatures::Float(1.0),
+            false,
+            Some(42),
+            0,
+            false,
+        );
+        let mut data: Vec<Vec<f64>> = (0..64)
+            .map(|i| vec![(i % 8) as f64 * 0.01, (i % 4) as f64 * 0.01])
+            .collect();
+        data.push(vec![50.0, 50.0]);
+        forest.fit(data);
+        forest
+    }
+
+    fn browser_headers() -> HashMap<String, String> {
+        [
+            ("HTTP_USER_AGENT", "Mozilla/5.0"),
+            ("HTTP_ACCEPT", "text/html"),
+            ("HTTP_ACCEPT_LANGUAGE", "en"),
+            ("HTTP_ACCEPT_ENCODING", "gzip"),
+            ("HTTP_CONNECTION", "keep-alive"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
+    }
+
+    fn required(names: &[&str]) -> Option<Vec<String>> {
+        Some(names.iter().map(|name| name.to_string()).collect())
+    }
+
+    #[test]
+    fn custom_required_headers_are_enforced_in_any_name_form() {
+        for name in ["HTTP_X_API_KEY", "x-api-key", "X-Api-Key", "X_API_KEY"] {
+            assert_eq!(
+                validate_headers_with_config(&browser_headers(), required(&[name]), Some(0))
+                    .as_deref(),
+                Some("Missing required headers: x-api-key"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_required_headers_are_found_in_any_key_form() {
+        for key in ["HTTP_X_API_KEY", "x-api-key", "X-Api-Key"] {
+            let mut headers = browser_headers();
+            headers.insert(key.to_string(), "secret".to_string());
+            assert_eq!(
+                validate_headers_with_config(&headers, required(&["x-api-key"]), Some(0)),
+                None,
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_required_headers_count_as_missing() {
+        let mut headers = browser_headers();
+        headers.insert("HTTP_X_API_KEY".to_string(), String::new());
+        assert_eq!(
+            validate_headers_with_config(&headers, required(&["HTTP_X_API_KEY"]), Some(0))
+                .as_deref(),
+            Some("Missing required headers: x-api-key")
+        );
+    }
+
+    #[test]
+    fn missing_required_headers_are_listed_once_in_order() {
+        assert_eq!(
+            validate_headers_with_config(
+                &browser_headers(),
+                required(&["x-b", "HTTP_X_A", "X-B"]),
+                Some(0)
+            )
+            .as_deref(),
+            Some("Missing required headers: x-b, x-a")
+        );
+    }
+
+    #[test]
+    fn content_headers_do_not_get_an_http_prefix() {
+        let mut headers = browser_headers();
+        assert_eq!(
+            validate_headers_with_config(&headers, required(&["content-type"]), Some(0)).as_deref(),
+            Some("Missing required headers: content-type")
+        );
+        headers.insert("CONTENT_TYPE".to_string(), "text/plain".to_string());
+        assert_eq!(
+            validate_headers_with_config(&headers, required(&["content-type"]), Some(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn default_required_headers_keep_their_message() {
+        assert_eq!(
+            validate_headers_with_config(&HashMap::new(), None, None).as_deref(),
+            Some("Missing required headers: user-agent, accept")
+        );
+    }
+
+    #[test]
+    fn empty_required_list_still_skips_required_checks() {
+        assert_eq!(
+            validate_headers_with_config(&HashMap::new(), required(&[]), Some(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn max_samples_resolve_stays_within_the_dataset() {
+        assert_eq!(MaxSamples::Auto.resolve(1000), 256);
+        assert_eq!(MaxSamples::Auto.resolve(10), 10);
+        assert_eq!(MaxSamples::Auto.resolve(0), 1);
+        assert_eq!(MaxSamples::Int(500).resolve(100), 100);
+        assert_eq!(MaxSamples::Int(0).resolve(100), 1);
+        assert_eq!(MaxSamples::Float(0.5).resolve(100), 50);
+        assert_eq!(MaxSamples::Float(0.0001).resolve(100), 1);
+        assert_eq!(MaxSamples::Float(2.0).resolve(100), 100);
+    }
+
+    #[test]
+    fn max_features_resolve_stays_within_the_dataset() {
+        assert_eq!(MaxFeatures::Int(9).resolve(6), 6);
+        assert_eq!(MaxFeatures::Int(0).resolve(6), 1);
+        assert_eq!(MaxFeatures::Float(0.5).resolve(6), 3);
+        assert_eq!(MaxFeatures::Float(0.01).resolve(6), 1);
+        assert_eq!(MaxFeatures::Float(2.0).resolve(6), 6);
+    }
+
+    #[test]
+    fn finalize_feature_state_returns_an_empty_batch() {
+        let result = finalize_feature_state();
+        assert!(result.features.is_empty());
+        assert!(result.state.timestamps_by_ip.is_empty());
+    }
+
+    #[test]
+    fn is_anomaly_compares_the_score_with_the_threshold() {
+        let forest = forest();
+        let point = [0.01, 0.01];
+        let score = forest.anomaly_score(&point);
+        assert!(forest.is_anomaly(&point, score - 0.01));
+        assert!(!forest.is_anomaly(&point, score));
+        assert!(!forest.is_anomaly(&point, 1.0));
+    }
+
+    #[test]
+    fn outliers_score_higher_than_normal_points() {
+        let forest = forest();
+        assert!(forest.anomaly_score(&[50.0, 50.0]) > forest.anomaly_score(&[0.01, 0.01]));
+    }
+
+    #[test]
+    fn decision_function_is_the_score_minus_the_offset() {
+        let forest = forest();
+        let data = vec![vec![0.01, 0.01], vec![50.0, 50.0]];
+        let scores = forest.score_samples(&data);
+        let decisions = forest.decision_function(&data);
+        for (score, decision) in scores.iter().zip(&decisions) {
+            assert!((score - forest.offset_ - decision).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn predict_follows_the_sign_of_the_decision_function() {
+        let forest = forest();
+        let data = vec![vec![0.01, 0.01], vec![50.0, 50.0]];
+        let decisions = forest.decision_function(&data);
+        let predictions = forest.predict(&data);
+        for (decision, prediction) in decisions.iter().zip(&predictions) {
+            assert_eq!(*prediction, if *decision < 0.0 { -1 } else { 1 });
+        }
+        assert_eq!(predictions[1], -1);
     }
 }
 pub mod training_evidence;

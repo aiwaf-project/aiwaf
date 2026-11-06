@@ -245,3 +245,130 @@ fn test_isolation_forest_roundtrip() {
         .retrain(to_value(&vec![vec![0.1], vec![0.2], vec![9.5]]).unwrap())
         .unwrap();
 }
+
+use aiwaf_wasm::{
+    KeywordMatcher, NativeTrainingEvidence, extract_training_features, validate_headers_with_config,
+};
+
+const EMPTY_EVIDENCE: &str = r#"{"version":1,"ips":{}}"#;
+const EVIDENCE_RECORDS: &str = r#"[["1.1.1.1","t1","/x","404"],["1.1.1.1","t2","/y","404"]]"#;
+
+fn header_map() -> JsValue {
+    to_value(&serde_json::json!({
+        "HTTP_USER_AGENT": "Mozilla/5.0",
+        "HTTP_ACCEPT": "text/html",
+        "HTTP_ACCEPT_LANGUAGE": "en-US",
+        "HTTP_ACCEPT_ENCODING": "gzip, deflate",
+        "HTTP_CONNECTION": "keep-alive"
+    }))
+    .unwrap()
+}
+
+#[wasm_bindgen_test]
+fn validate_headers_with_config_treats_null_as_defaults() {
+    let reason = validate_headers_with_config(header_map(), JsValue::NULL, JsValue::UNDEFINED).unwrap();
+    let reason: Option<String> = from_value(reason).unwrap();
+    assert!(reason.is_none());
+}
+
+#[wasm_bindgen_test]
+fn validate_headers_with_config_reports_a_missing_accept_header() {
+    let headers = to_value(&serde_json::json!({ "HTTP_USER_AGENT": "Mozilla/5.0" })).unwrap();
+    let required = to_value(&vec!["HTTP_ACCEPT"]).unwrap();
+    let reason = validate_headers_with_config(headers, required, JsValue::NULL).unwrap();
+    let reason: Option<String> = from_value(reason).unwrap();
+    assert_eq!(reason.as_deref(), Some("Missing required headers: accept"));
+}
+
+#[wasm_bindgen_test]
+fn validate_headers_with_config_enforces_lowercase_custom_headers_from_js() {
+    let required = to_value(&vec!["x-required-security-header"]).unwrap();
+    let reason = validate_headers_with_config(header_map(), required, JsValue::NULL).unwrap();
+    let reason: Option<String> = from_value(reason).unwrap();
+    assert_eq!(
+        reason.as_deref(),
+        Some("Missing required headers: x-required-security-header")
+    );
+
+    let headers = to_value(&serde_json::json!({
+        "HTTP_USER_AGENT": "Mozilla/5.0",
+        "HTTP_ACCEPT": "text/html",
+        "HTTP_ACCEPT_LANGUAGE": "en-US",
+        "HTTP_ACCEPT_ENCODING": "gzip, deflate",
+        "HTTP_CONNECTION": "keep-alive",
+        "x-required-security-header": "present"
+    }))
+    .unwrap();
+    let required = to_value(&vec!["x-required-security-header"]).unwrap();
+    let reason = validate_headers_with_config(headers, required, JsValue::NULL).unwrap();
+    let reason: Option<String> = from_value(reason).unwrap();
+    assert_eq!(reason, None);
+}
+
+#[wasm_bindgen_test]
+fn validate_headers_with_config_rejects_invalid_arguments() {
+    let required = to_value(&"not-a-list").unwrap();
+    assert!(validate_headers_with_config(header_map(), required, JsValue::NULL).is_err());
+    let score = to_value(&"not-a-number").unwrap();
+    assert!(validate_headers_with_config(header_map(), JsValue::NULL, score).is_err());
+}
+
+#[wasm_bindgen_test]
+fn extract_training_features_returns_one_row_per_record() {
+    let records = to_value(&vec![aiwaf_core::FeatureRecordInput {
+        ip: "1.2.3.4".to_string(),
+        path_lower: "/wp-admin".to_string(),
+        path_len: 9,
+        timestamp: 10.0,
+        response_time: 0.03,
+        status_idx: 3,
+        kw_check: true,
+        total_404: 5,
+    }])
+    .unwrap();
+    let keywords = to_value(&vec!["wp"]).unwrap();
+    let output = extract_training_features(records, keywords).unwrap();
+    assert!(Array::is_array(&output));
+    assert_eq!(Array::from(&output).length(), 1);
+}
+
+#[wasm_bindgen_test]
+fn extract_training_features_rejects_invalid_records() {
+    let records = to_value(&"not-records").unwrap();
+    let keywords = to_value(&vec!["wp"]).unwrap();
+    assert!(extract_training_features(records, keywords).is_err());
+}
+
+#[wasm_bindgen_test]
+fn keyword_matcher_returns_the_first_match() {
+    let matcher = KeywordMatcher::new(to_value(&vec![".env", "admin"]).unwrap()).unwrap();
+    assert_eq!(matcher.first_match("/admin/.env").as_deref(), Some(".env"));
+    assert_eq!(matcher.first_match("/safe"), None);
+}
+
+#[wasm_bindgen_test]
+fn training_evidence_prevents_replay_after_restart() {
+    let mut first = NativeTrainingEvidence::new(EMPTY_EVIDENCE).unwrap();
+    assert!(!first.had_history());
+    assert_eq!(first.fresh_indices(EVIDENCE_RECORDS).unwrap(), "[0,1]");
+    assert!(first.can_block("1.1.1.1"));
+    assert!(!first.can_block("9.9.9.9"));
+    let state = first.committed_state("1.1.1.1").unwrap();
+    first.commit("1.1.1.1").unwrap();
+    assert!(!first.can_block("1.1.1.1"));
+
+    let mut second = NativeTrainingEvidence::new(&state).unwrap();
+    assert!(second.had_history());
+    assert_eq!(second.fresh_indices(EVIDENCE_RECORDS).unwrap(), "[]");
+    assert!(!second.can_block("1.1.1.1"));
+}
+
+#[wasm_bindgen_test]
+fn training_evidence_rejects_invalid_input() {
+    assert!(NativeTrainingEvidence::new(r#"{"version":2,"ips":{}}"#).is_err());
+    assert!(NativeTrainingEvidence::new("not json").is_err());
+    let mut evidence = NativeTrainingEvidence::new(EMPTY_EVIDENCE).unwrap();
+    assert!(evidence.fresh_indices("not json").is_err());
+    assert!(evidence.commit("1.1.1.1").is_err());
+    assert!(evidence.committed_state("1.1.1.1").is_err());
+}

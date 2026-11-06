@@ -366,3 +366,248 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(policy_keyword, m)?)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn set(values: &[&str]) -> HashSet<String> {
+        values.iter().map(|v| v.to_string()).collect()
+    }
+
+    fn keyword(
+        path: &str,
+        exists: bool,
+        static_kw: &[&str],
+        contexts: &[&str],
+    ) -> (Option<String>, Vec<String>, Vec<String>) {
+        policy_keyword(
+            path.into(),
+            set(&[]),
+            exists,
+            false,
+            set(static_kw),
+            set(&[]),
+            set(&[]),
+            set(&[]),
+            vec![],
+            set(&[]),
+            set(contexts),
+        )
+    }
+
+    #[test]
+    fn rate_escalates_from_allow_to_throttle_to_flood() {
+        assert_eq!(policy_rate(vec![99.0], 100.0, 60.0, 2, 3).0, "allow");
+        assert_eq!(policy_rate(vec![98.0, 99.0], 100.0, 60.0, 2, 3).0, "throttle");
+        assert_eq!(policy_rate(vec![97.0, 98.0, 99.0], 100.0, 60.0, 2, 3).0, "flood_block");
+    }
+
+    #[test]
+    fn rate_drops_timestamps_outside_the_window() {
+        let (action, count, kept) = policy_rate(vec![40.0, 41.0], 100.0, 60.0, 5, 10);
+        assert_eq!((action.as_str(), count), ("allow", 2));
+        assert_eq!(kept, vec![41.0, 100.0]);
+    }
+
+    #[test]
+    fn rate_window_is_never_below_one_second() {
+        assert_eq!(policy_rate(vec![99.5], 100.0, 0.0, 5, 10).1, 2);
+        assert_eq!(policy_rate(vec![99.0], 100.0, 0.0, 5, 10).1, 1);
+    }
+
+    #[test]
+    fn geo_allow_list_overrides_block_lists() {
+        let (blocked, _, _) = policy_geo("FR".into(), set(&["US"]), set(&[]), set(&[]));
+        assert!(blocked);
+        let (blocked, _, reason) = policy_geo("US".into(), set(&["US"]), set(&["US"]), set(&[]));
+        assert!(!blocked);
+        assert_eq!(reason, "");
+    }
+
+    #[test]
+    fn geo_normalizes_country_and_checks_dynamic_blocks() {
+        let (blocked, country, reason) = policy_geo(" ru ".into(), set(&[]), set(&[]), set(&["RU"]));
+        assert!(blocked);
+        assert_eq!(country, "RU");
+        assert_eq!(reason, "Geo blocked: RU");
+    }
+
+    #[test]
+    fn geo_never_blocks_an_unknown_country() {
+        assert!(!policy_geo("  ".into(), set(&["US"]), set(&[]), set(&[])).0);
+    }
+
+    #[test]
+    fn form_without_a_page_view_is_allowed() {
+        assert_eq!(policy_form(100.0, None, "/form".into(), 1.0, 300.0).0, "allow");
+    }
+
+    #[test]
+    fn form_expires_after_max_time() {
+        let (action, _, status, message) = policy_form(500.0, Some(100.0), "/form".into(), 1.0, 300.0);
+        assert_eq!((action.as_str(), status), ("page_expired", Some(409)));
+        assert!(message.unwrap().contains("expired"));
+    }
+
+    #[test]
+    fn form_blocks_submissions_faster_than_min_time() {
+        let (action, reason, status, _) = policy_form(100.5, Some(100.0), "/form".into(), 1.0, 300.0);
+        assert_eq!((action.as_str(), status), ("block", Some(403)));
+        assert_eq!(reason.unwrap(), "Form submitted too quickly (0.50s)");
+        assert_eq!(policy_form(101.0, Some(100.0), "/form".into(), 1.0, 300.0).0, "allow");
+    }
+
+    #[test]
+    fn login_forms_use_a_shorter_minimum() {
+        for path in ["/login/", "/ACCOUNTS/LOGIN/", "/admin/login/", "/signin/"] {
+            assert_eq!(policy_form(100.5, Some(100.0), path.into(), 1.0, 300.0).0, "allow", "{path}");
+        }
+        assert_eq!(policy_form(100.05, Some(100.0), "/login/".into(), 1.0, 300.0).0, "block");
+    }
+
+    #[test]
+    fn uuid_requires_36_chars_and_32_hex_digits() {
+        assert!(policy_uuid("123e4567-e89b-12d3-a456-426614174000".into()));
+        assert!(policy_uuid(" 123E4567-E89B-12D3-A456-426614174000 ".into()));
+        assert!(!policy_uuid("123e4567e89b12d3a456426614174000".into()));
+        assert!(!policy_uuid("g23e4567-e89b-12d3-a456-426614174000".into()));
+        assert!(!policy_uuid("123e4567-e89b-12d3-a456-42661417400-".into()));
+    }
+
+    #[test]
+    fn reputation_weights_follow_the_reason() {
+        for (reason, expected) in [("SQLi probe", 40), ("xss", 30), ("scanner", 20), ("other", 10)] {
+            assert_eq!(policy_reputation(0, 0, vec![], reason.into()).0, expected, "{reason}");
+        }
+    }
+
+    #[test]
+    fn reputation_score_is_capped_at_100() {
+        assert_eq!(policy_reputation(90, 0, vec![], "sqli".into()).0, 100);
+    }
+
+    #[test]
+    fn reputation_deduplicates_reasons_and_names_blank_ones() {
+        let (_, offenses, reasons, _, _) = policy_reputation(
+            0,
+            4,
+            vec!["Scanner".into(), " scanner ".into(), "".into()],
+            "   ".into(),
+        );
+        assert_eq!(offenses, 5);
+        assert_eq!(reasons, vec!["Scanner".to_string(), "unknown".to_string()]);
+    }
+
+    #[test]
+    fn reputation_block_duration_escalates() {
+        let block = |score, offenses| {
+            let (_, _, _, blocked, duration) = policy_reputation(score, offenses, vec![], "other".into());
+            (blocked, duration)
+        };
+        assert_eq!(block(40, 0), (false, None));
+        assert_eq!(block(50, 0), (true, Some(900)));
+        assert_eq!(block(50, 1), (true, Some(3600)));
+        assert_eq!(block(50, 2), (true, Some(86400)));
+        assert_eq!(block(70, 0), (true, Some(86400)));
+    }
+
+    #[test]
+    fn keyword_blocks_probe_paths_only_when_the_route_is_missing() {
+        assert!(keyword("/.env", false, &[], &[]).0.unwrap().contains("probe path"));
+        assert_eq!(keyword("/.env", true, &[], &[]).0, None);
+    }
+
+    #[test]
+    fn keyword_leaves_normal_paths_alone() {
+        assert_eq!(keyword("/docs/getting-started", true, &["shell"], &[]).0, None);
+    }
+
+    #[test]
+    fn keyword_flags_inherently_suspicious_missing_paths() {
+        let reason = keyword("/hackme", false, &[], &[]).0.unwrap();
+        assert_eq!(reason, "Keyword block: Inherently suspicious: hackme");
+    }
+
+    #[test]
+    fn keyword_only_blocks_existing_routes_with_strong_evidence() {
+        assert_eq!(keyword("/shell/page", true, &["shell"], &["shell"]).0, None);
+        let reason = keyword("/shell/<script", true, &["shell"], &["shell"]).0.unwrap();
+        assert_eq!(reason, "Keyword block: Learned keyword: shell");
+    }
+
+    #[test]
+    fn keyword_segments_are_lowercase_and_longer_than_three_chars() {
+        assert_eq!(keyword("/API/a/LongName", true, &[], &[]).2, vec!["longname".to_string()]);
+    }
+
+    #[test]
+    fn keyword_learns_only_from_missing_routes_with_context() {
+        let learn = |exists: bool, contexts: &[&str], legitimate: &[&str]| {
+            policy_keyword(
+                "/wpconfig/page".into(),
+                set(&[]),
+                exists,
+                true,
+                set(&[]),
+                set(&[]),
+                set(legitimate),
+                set(&[]),
+                vec![],
+                set(&[]),
+                set(contexts),
+            )
+            .1
+        };
+        assert_eq!(learn(false, &["wpconfig"], &[]), vec!["wpconfig".to_string()]);
+        assert!(learn(true, &["wpconfig"], &[]).is_empty());
+        assert!(learn(false, &[], &[]).is_empty());
+        assert!(learn(false, &["wpconfig"], &["wpconfig"]).is_empty());
+    }
+
+    #[test]
+    fn keyword_safe_prefixes_skip_learned_keywords() {
+        let check = |prefixes: Vec<String>| {
+            policy_keyword(
+                "/admin/panel".into(),
+                set(&[]),
+                false,
+                false,
+                set(&["panel"]),
+                set(&[]),
+                set(&[]),
+                set(&[]),
+                prefixes,
+                set(&[]),
+                set(&[]),
+            )
+            .0
+        };
+        assert!(check(vec![]).is_some());
+        assert_eq!(check(vec!["admin".to_string()]), None);
+    }
+
+    #[test]
+    fn sql_signatures_detect_common_attacks() {
+        for (text, rule) in [
+            ("1 UNION ALL SELECT password", "sql_union_select"),
+            ("x' OR 1=1", "sql_boolean_tautology"),
+            ("x'--", "sql_quote_comment"),
+            ("1; DROP TABLE users", "sql_stacked_statement"),
+        ] {
+            assert_eq!(sql_signature(text).as_deref(), Some(rule), "{text}");
+        }
+    }
+
+    #[test]
+    fn sql_signatures_see_through_inline_comments() {
+        assert_eq!(sql_signature("1 union/**/select 2").as_deref(), Some("sql_union_select"));
+    }
+
+    #[test]
+    fn sql_signatures_ignore_normal_text() {
+        for text in ["", "credit union selection", "it's a nice day", "select a seat"] {
+            assert_eq!(sql_signature(text), None, "{text}");
+        }
+    }
+}
