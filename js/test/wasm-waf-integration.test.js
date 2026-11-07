@@ -1,6 +1,18 @@
 const express = require('express');
 const request = require('supertest');
 
+// Loaded before any mock so the mocked module can still run the SQL and route checks.
+let realChecks;
+beforeAll(async () => {
+  realChecks = await require('../lib/wasmChecks').load();
+  // Each test then loads its own mocked aiwaf-wasm.
+  jest.resetModules();
+});
+const checkFunctions = () => {
+  const { sql_inspect, sql_tokenizer, route_rule, RouteRiskChecker } = realChecks;
+  return { sql_inspect, sql_tokenizer, route_rule, RouteRiskChecker };
+};
+
 describe('WASM validation integration', () => {
   afterEach(() => {
     jest.resetModules();
@@ -9,6 +21,8 @@ describe('WASM validation integration', () => {
 
   it('blocks when wasm validators return reasons', async () => {
     jest.doMock('aiwaf-wasm', () => ({
+      // The request checks need the real aiwaf-wasm functions.
+      ...checkFunctions(),
       default: jest.fn(async () => {}),
       validate_headers: jest.fn(() => null),
       validate_url: jest.fn(() => 'wasm_url_bad'),
@@ -37,6 +51,8 @@ describe('WASM validation integration', () => {
 
   it('allows traffic when wasm validation is disabled', async () => {
     jest.doMock('aiwaf-wasm', () => ({
+      // The request checks need the real aiwaf-wasm functions.
+      ...checkFunctions(),
       default: jest.fn(async () => {}),
       validate_headers: jest.fn(() => 'wasm_header_bad'),
       validate_url: jest.fn(() => 'wasm_url_bad'),

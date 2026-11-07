@@ -72,7 +72,7 @@ def test_unsupported_ranking_disabled_and_custom_hooks(native, tmp_path, monkeyp
     assert prepare(owner, '/docs', file, enabled=False) is None
     with native_override(False):
         assert prepare(owner, '/docs', file) is None
-        assert compiled[0](b'q=1+UNION+SELECT', None).rule == 'sql_union_select'
+        assert compiled[0](b'q=1+UNION+SELECT+1', None).rule == 'sql_breakout_numeric'
     policy = SQLInjectionPolicy('monitor')
     assert prepare(owner, '/docs', file, policy=policy) is None
     policy = SQLInjectionPolicy()

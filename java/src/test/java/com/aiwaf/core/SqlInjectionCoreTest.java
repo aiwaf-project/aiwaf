@@ -27,7 +27,7 @@ class SqlInjectionCoreTest {
         "{\"email\":\"admin'--\"}",
         "{\"user\":{\"email\":\"admin\\u0027 OR 1=1--\"}}",
         "email=admin%2527%2520OR%25201%253D1--",
-        "{\"search\":\"UNION/**/SELECT password\"}"
+        "{\"search\":\"1 UNION/**/SELECT password\"}"
     })
     void denies_json_form_encoded_and_nested_sql(String payload) {
         AiwafDecision decision = engine().evaluate(request(payload, Map.of()));

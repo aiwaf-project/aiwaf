@@ -163,7 +163,10 @@ def _handle_init(argv) -> None:
     parser.add_argument("--app", help="App import path for Flask/FastAPI (module:app or module:create_app)")
     parser.add_argument("--settings", help="Django settings module for standalone `aiwaf init`")
     parser.add_argument("--output", default=".aiwaf/paths.json", help="Output manifest path")
+    parser.add_argument("--source", default=".", help="Source to audit for injection checks (default: current folder)")
+    parser.add_argument("--no-audit", action="store_true", help="Don't audit source or save injection checks")
     args = parser.parse_args(argv)
+    audit_source = None if args.no_audit else args.source
 
     framework = _normalize_framework(args.framework)
     app = None
@@ -191,23 +194,26 @@ def _handle_init(argv) -> None:
 
         from aiwaf.django.path_manifest import generate_django_manifest
 
-        manifest = generate_django_manifest(args.output)
+        manifest = generate_django_manifest(args.output, audit_source=audit_source)
     else:
         if app is None:
             parser.error("--app is required for Flask/FastAPI")
         if framework == "flask":
             from aiwaf.flask.path_manifest import generate_flask_manifest
 
-            manifest = generate_flask_manifest(app, args.output)
+            manifest = generate_flask_manifest(app, args.output, audit_source=audit_source)
         else:
             from aiwaf.fast.path_manifest import generate_fastapi_manifest
 
-            manifest = generate_fastapi_manifest(app, args.output)
+            manifest = generate_fastapi_manifest(app, args.output, audit_source=audit_source)
+
+    from aiwaf.core.route_risks import describe_audit
 
     print(f"Generated {args.output}")
     print(f"Framework: {manifest['framework']}")
     print(f"Routes: {len(manifest.get('routes', {}))}")
     print(f"Context hash: {manifest['context_hash']}")
+    print(describe_audit(manifest))
 
 
 def aiwaf_detect() -> None:

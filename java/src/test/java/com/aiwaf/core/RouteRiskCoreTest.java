@@ -209,10 +209,19 @@ class RouteRiskCoreTest {
         assertFalse(logged.get(0).contains("evil_name"));
     }
 
+    @Test
+    void blockModeIsTheDefaultAndBlocks() throws IOException {
+        AiwafConfig config = config(manifest("/search", risk("path", "")), new AiwafConfig().injectionRiskMode);
+        assertEquals("block", config.injectionRiskMode);
+        assertEquals("path_traversal", RouteRiskCore.observe(request("/search", Map.of("x", "../y")), config));
+        assertTrue(logged.get(0).contains("\"mode\":\"block\""));
+        assertNull(RouteRiskCore.observe(request("/search", Map.of("x", "fine")), config));
+    }
+
     @ParameterizedTest
-    @ValueSource(strings = {"off", "", "block", "monitor"})
-    void onlyLogModeTurnsThisOn(String mode) throws IOException {
-        RouteRiskCore.observe(request("/search", Map.of("x", "../y")), config(manifest("/search", risk("path", "")), mode));
+    @ValueSource(strings = {"off", "", "monitor"})
+    void otherModesDoNotBlockOrLog(String mode) throws IOException {
+        assertNull(RouteRiskCore.observe(request("/search", Map.of("x", "../y")), config(manifest("/search", risk("path", "")), mode)));
         assertEquals(List.of(), logged);
     }
 
@@ -241,6 +250,39 @@ class RouteRiskCoreTest {
         AiwafConfig off = config(manifest("/search", risk("command", "q")), "off");
         assertEquals(decision.allowed(), new AiwafEngine(off).evaluate(request("/search", Map.of("q", "$(id)"))).allowed());
         assertEquals(List.of(), logged);
+    }
+
+    @Test
+    void ordinaryTextIsNeverBlocked() throws IOException {
+        List<String> sinks = List.of("sql", "nosql", "command", "path", "ssrf", "code", "template", "deserialization");
+        List<Map<String, Object>> risks = new ArrayList<>();
+        for (String sink : sinks) risks.add(risk(sink, ""));
+        Map<String, Object> entry = new HashMap<>();
+        entry.put("injection_risks", risks);
+        Map<String, Object> saved = Map.of("routes", Map.of("/login", entry));
+        AiwafEngine blocking = new AiwafEngine(config(saved, "block"));
+        RouteRiskCore.clearCache();
+        List<String> blocked = new ArrayList<>();
+        for (JsonNode node : MAPPER.readTree(Path.of("..", "tests", "fixtures", "ordinary_text.json").toFile()).get("values")) {
+            String value = node.asText();
+            for (String sink : sinks) {
+                if (RouteRiskCore.ruleFor(sink, value) != null) blocked.add(sink + ": " + value);
+            }
+            AiwafRequest request = new AiwafRequest("POST", "/login", "203.0.113.5", "", Map.of(), Map.of("q", value), 0L, Set.of(),
+                    MAPPER.writeValueAsString(Map.of("email", value)));
+            if (SqlInjectionCore.inspect(request, new AiwafConfig()) != null || RouteRiskCore.observe(request, blocking.config()) != null) {
+                blocked.add("request: " + value);
+            }
+        }
+        assertEquals(List.of(), blocked);
+    }
+
+    @Test
+    void theEngineBlocksInBlockMode() throws IOException {
+        AiwafDecision decision = new AiwafEngine(config(manifest("/search", risk("command", "q")), "block"))
+                .evaluate(request("/search", Map.of("q", "$(id)")));
+        assertFalse(decision.allowed());
+        assertEquals("command_substitution", decision.reason());
     }
 
     @ParameterizedTest

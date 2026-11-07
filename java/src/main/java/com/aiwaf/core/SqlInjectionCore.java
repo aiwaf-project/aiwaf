@@ -5,23 +5,18 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
-import java.util.Map;
-import java.util.regex.Pattern;
 
-/** Bounded deterministic SQL signatures. Findings never contain request values. */
+/** Bounded SQL injection checks with the SQL tokenizer. Findings never contain request values. */
 public final class SqlInjectionCore {
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final Pattern COMMENTS = Pattern.compile("/\\*[\\s\\S]*?\\*/");
-    static final Map<String, Pattern> RULES = Map.of(
-        "sql_union_select", Pattern.compile("\\bunion\\s+(?:all\\s+)?select\\b", Pattern.CASE_INSENSITIVE),
-        "sql_boolean_tautology", Pattern.compile("['\"`]\\s*(?:or|and)\\s+(?:true\\b|\\d+\\s*=\\s*\\d+|['\"][^'\"\\r\\n]{0,80}['\"]\\s*=\\s*['\"])", Pattern.CASE_INSENSITIVE),
-        "sql_quote_comment", Pattern.compile("['\"`]\\s*(?:--|#)"),
-        "sql_stacked_statement", Pattern.compile(";\\s*(?:drop\\s+table|delete\\s+from|insert\\s+into|update\\s+\\w+\\s+set)\\b", Pattern.CASE_INSENSITIVE)
-    );
     private record Item(Object value, int depth) {}
     private SqlInjectionCore() {}
 
     public static String inspect(AiwafRequest request, AiwafConfig config) {
+        return scan(request, config, SqlTokenizerCore::classifyFields);
+    }
+
+    private static String scan(AiwafRequest request, AiwafConfig config, java.util.function.UnaryOperator<String> detect) {
         ArrayDeque<Item> pending = new ArrayDeque<>();
         int bytes = 0;
         if (request.query() != null) {
@@ -60,17 +55,37 @@ public final class SqlInjectionCore {
                 continue;
             }
             String value = String.valueOf(item.value());
+            String original = value;
             for (int i = 0; i < 2; i++) {
                 try { value = URLDecoder.decode(value, StandardCharsets.UTF_8); }
                 catch (IllegalArgumentException ignored) { break; }
             }
-            String trimmed = value.stripLeading();
-            if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-                try { pending.add(new Item(JSON.readTree(value), item.depth() + 1)); }
-                catch (Exception ignored) { /* Non-JSON strings still receive signature checks. */ }
+            // A JSON document is checked by its values, so its own quotes aren't read as a
+            // breakout. Parse it before decoding when that works, so a literal + survives.
+            boolean parsed = false;
+            for (String candidate : new String[]{original, value}) {
+                String trimmed = candidate.stripLeading();
+                if (parsed || !(trimmed.startsWith("{") || trimmed.startsWith("["))) continue;
+                try {
+                    pending.add(new Item(JSON.readTree(candidate), item.depth() + 1));
+                    parsed = true;
+                } catch (Exception ignored) { /* Not JSON: checked as text below. */ }
             }
-            value = COMMENTS.matcher(value).replaceAll(" ");
-            for (var rule : RULES.entrySet()) if (rule.getValue().matcher(value).find()) return rule.getKey();
+            if (parsed) continue;
+            // Form decoding turns a literal + into a space, as in '+(SELECT 1)+', so also check the
+            // value with only its %XX escapes decoded.
+            String kept = original;
+            for (int i = 0; i < 2; i++) {
+                try { kept = URLDecoder.decode(kept.replace("+", "%2B"), StandardCharsets.UTF_8); }
+                catch (IllegalArgumentException ignored) { break; }
+            }
+            // Only the raw body is split into form fields. A query value or JSON value, as in
+            // "--warp=e=mc^2", is one value.
+            java.util.function.UnaryOperator<String> check =
+                    item.value() == request.bodyPreview() ? detect : SqlTokenizerCore::classify;
+            String rule = check.apply(value);
+            if (rule == null && !kept.equals(value)) rule = check.apply(kept);
+            if (rule != null) return rule;
         }
         return null;
     }

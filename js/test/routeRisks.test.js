@@ -4,13 +4,15 @@ const path = require('path');
 const { analyzeSource, runAuditCommand } = require('../lib/injectionAnalysis');
 const { loadManifest, compileManifestToPathRules } = require('../lib/pathManifest');
 const {
-  applyReport, compileRisks, compileRoute, createObserver, formatCounts, inputFromSource, inspectRisks, requestInputs, ruleFor, updateManifest
+  applyReport, compileRisks, createObserver, formatCounts, inputFromSource, inspectRisks, ruleFor, updateManifest
 } = require('../lib/routeRisks');
 
 const CASES = JSON.parse(fs.readFileSync(path.join(__dirname, '../../tests/fixtures/route_risk_cases.json'), 'utf8'));
 const manifestWith = (risks, route = '/search') => ({ routes: { [route]: { view: 'search', injection_risks: risks }, '/health': { view: 'health' } } });
 const inspect = (manifest, ...args) => inspectRisks(compileRisks(manifest), ...args);
 const report = (source, file = 'app.js') => ({ files_scanned: 1, findings: analyzeSource(source, file) });
+
+beforeAll(() => require('../lib/wasmChecks').load());
 
 describe('route risks', () => {
   let directory;
@@ -24,18 +26,6 @@ describe('route risks', () => {
 
   test.each(CASES.rules.map(item => [item.sink, item.value, item.rule]))('shared rule %s: %s', (sink, value, rule) => {
     expect(ruleFor(sink, value)).toBe(rule);
-  });
-
-  test.each(CASES.routes.map(item => [item.route, item.path, item.values]))('shared route %s: %s', (route, target, values) => {
-    const { pattern, names } = compileRoute(route);
-    const match = pattern.exec(target);
-    if (values === null) {
-      expect(match).toBeNull();
-    } else {
-      const found = {};
-      names.forEach((name, index) => { if (name) found[name] = match[index + 1]; });
-      expect(found).toEqual(values);
-    }
   });
 
   test('only the named input is checked', () => {
@@ -68,8 +58,8 @@ describe('route risks', () => {
     const manifest = manifestWith([{ sink: 'path', input: '' }]);
     expect(inspect(manifest, '/health', { x: '../y' })).toEqual([]);
     expect(inspect(manifest, '/other', { x: '../y' })).toEqual([]);
-    expect(compileRisks(null)).toEqual([]);
-    expect(compileRisks({ routes: 'bad' })).toEqual([]);
+    expect(compileRisks(null).empty).toBe(true);
+    expect(compileRisks({ routes: 'bad' }).empty).toBe(true);
   });
 
   test('exact routes win and repeated matches report once', () => {
@@ -81,32 +71,39 @@ describe('route risks', () => {
     expect(inspect(manifestWith([{ sink: 'path', input: '' }]), '/search', { a: '../x', b: '../y' })).toHaveLength(1);
   });
 
-  test('request inputs read each format and are bounded', () => {
-    expect(requestInputs(null, Buffer.from('a=b'))).toContainEqual(['a', 'b']);
-    expect(requestInputs(null, 'plain')).toContainEqual(['', 'plain']);
-    expect(requestInputs(null, '{broken')).toContainEqual(['', '{broken']);
-    expect(requestInputs({ a: ['b'] })).toContainEqual(['a', 'b']);
-    expect(requestInputs(null, { pipe() {} })).toEqual([]);
-    expect(requestInputs(null, null)).toEqual([]);
-    expect(requestInputs(Array.from({ length: 5000 }, (_, i) => `k${i}=v`).join('&'), null).length).toBeLessThanOrEqual(512);
-    let deep = { a: 'x' };
-    for (let index = 0; index < 20; index += 1) deep = { a: deep };
-    expect(requestInputs(null, deep)).not.toContainEqual(['a', 'x']);
+  test('request formats are inputs', () => {
+    const manifest = manifestWith([{ sink: 'path', input: 'a' }]);
+    for (const [query, body] of [['a=../x', null], [{ a: '../x' }, null], [{ a: ['../x'] }, null], ['', Buffer.from('a=../x')], ['', '{"a": ["../x"]}'], ['', { a: '../x' }]]) {
+      expect(inspect(manifest, '/search', query, body)[0].rule).toBe('path_traversal');
+    }
+    expect(inspect(manifestWith([{ sink: 'path', input: '' }]), '/search', '', { pipe() {} })).toEqual([]);
   });
 
   test('log mode logs names, never values, and each event once per request', () => {
     const logger = { warn: jest.fn() };
     const observe = createObserver({ AIWAF_INJECTION_RISK_MODE: 'log', AIWAF_PATH_MANIFEST: save(manifestWith([{ sink: 'path', input: '', confidence: 'medium' }])), logger });
     const req = { method: 'GET', url: '/search?evil_name=../topsecret' };
-    expect(observe(req)).toBeUndefined();
+    expect(observe(req)).toBeNull();
     observe(req);
     expect(logger.warn.mock.calls).toEqual([[{
       event: 'aiwaf.injection_risk', mode: 'log', method: 'GET', route: '/search', sink: 'path', input: '', rule: 'path_traversal', confidence: 'medium'
     }]]);
   });
 
-  test.each(['off', '', 'block', 'monitor'])('mode %s stays off', mode => {
-    expect(createObserver({ AIWAF_INJECTION_RISK_MODE: mode, AIWAF_PATH_MANIFEST: save(manifestWith([{ sink: 'path', input: '' }])) })).toBeNull();
+  test('block mode is the default and blocks', () => {
+    const logger = { warn: jest.fn() };
+    const observe = createObserver({ AIWAF_PATH_MANIFEST: save(manifestWith([{ sink: 'path', input: '' }])), logger });
+    expect(observe({ method: 'GET', url: '/search?x=../y' })).toEqual({ rule: 'path_traversal', status: 403, mode: 'block' });
+    expect(logger.warn.mock.calls[0][0].mode).toBe('block');
+    expect(observe({ url: '/search?x=fine' })).toBeNull();
+  });
+
+  test('off turns it off and unknown modes are rejected', () => {
+    const file = save(manifestWith([{ sink: 'path', input: '' }]));
+    expect(createObserver({ AIWAF_INJECTION_RISK_MODE: 'off', AIWAF_PATH_MANIFEST: file })).toBeNull();
+    for (const mode of ['', 'monitor', 'enforce']) {
+      expect(() => createObserver({ AIWAF_INJECTION_RISK_MODE: mode, AIWAF_PATH_MANIFEST: file })).toThrow('AIWAF_INJECTION_RISK_MODE');
+    }
   });
 
   test('a missing or empty manifest turns it off', () => {
@@ -120,11 +117,19 @@ describe('route risks', () => {
       AIWAF_PATH_MANIFEST: save(manifestWith([{ sink: 'path', input: '' }])),
       logger: { warn() { throw new Error('logger failed'); } }
     });
-    expect(() => observe({ url: '/search', query: { a: '../x' } })).not.toThrow();
+    expect(observe({ url: '/search', query: { a: '../x' } })).toBeNull();
     expect(() => observe({ get url() { throw new Error('bad request'); } })).not.toThrow();
   });
 
-  test('the middleware logs without changing the outcome', async () => {
+  test('the middleware blocks by default and only logs in log mode', async () => {
+    const blocking = require('../lib/wafMiddleware')({
+      AIWAF_PATH_MANIFEST: save(manifestWith([{ sink: 'command', input: 'q', confidence: 'high' }])),
+      AIWAF_MIDDLEWARES: ['ip_keyword_block'],
+      logger: { warn() {} }
+    });
+    expect(await blocking.inspectPayload({ method: 'GET', url: '/search', headers: {}, query: { q: '$(id)' } }))
+      .toEqual({ rule: 'command_substitution', status: 403, mode: 'block' });
+
     const logger = { warn: jest.fn() };
     const middleware = require('../lib/wafMiddleware')({
       AIWAF_INJECTION_RISK_MODE: 'log',
@@ -144,6 +149,13 @@ describe('route risks', () => {
     try {
       const native = await require('../lib/nativePipeline')({ dataDir: path.join(directory, 'native') });
       expect(native.inspectPayload({ method: 'GET', url: '/search', headers: {}, query: { q: '$(id)' } })?.status).toBeFalsy();
+      process.env.AIWAF_INJECTION_RISK_MODE = 'block';
+      const blocking = await require('../lib/nativePipeline')({ dataDir: path.join(directory, 'native-block') });
+      expect(blocking.inspectPayload({ method: 'GET', url: '/search', headers: {}, query: { q: '$(id)' } }).rule).toBe('command_substitution');
+      const res = { status: jest.fn(() => res), json: jest.fn(() => res) };
+      blocking({ method: 'GET', url: '/search', headers: {}, query: { q: '$(id)' }, socket: {} }, res, () => {});
+      expect(res.status).toHaveBeenCalledWith(403);
+      blocking.close();
       expect(warn).toHaveBeenCalledWith(expect.objectContaining({ event: 'aiwaf.injection_risk', input: 'q' }));
       warn.mockClear();
       native.inspectPayload({ url: '/search', headers: {}, query: { q: '$(id)' }, aiwafRoute: { fullyExempt: true } });
@@ -246,6 +258,24 @@ describe('route risks', () => {
     expect(() => applyReport({ findings: [] }, { routes: [] })).toThrow('no routes');
   });
 
+  test('manifest generation saves audit findings, and a failed scan saves none', () => {
+    const { generateFrameworkManifest, auditIntoManifest } = require('../lib/pathManifest');
+    fs.writeFileSync(path.join(directory, 'app.js'), "app.get('/x', (req, res) => { db.query('SELECT ' + req.query.id); });");
+    const output = path.join(directory, 'out', 'paths.json');
+    const routes = [{ path: '/x', methods: ['GET'] }, { path: '/y', methods: ['GET'] }];
+    const manifest = generateFrameworkManifest('express', null, output, { routes, auditSource: directory });
+    expect(manifest.routes['/x'].injection_risks).toEqual([{ sink: 'sql', input: 'id', confidence: 'high' }]);
+    expect(loadManifest(output).routes['/y'].injection_risks).toBeUndefined();
+    expect(generateFrameworkManifest('express', null, output, { routes }).injection_audit).toBeUndefined();
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(auditIntoManifest({ routes: {} }, path.join(directory, 'missing'))).toBeNull();
+      expect(warn.mock.calls[0][0]).toContain('Injection audit skipped');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   test('the audit command saves to a manifest', () => {
     const source = path.join(directory, 'app.js');
     fs.writeFileSync(source, "app.get('/x', (req, res) => { exec(req.query.id); });");
@@ -255,5 +285,32 @@ describe('route risks', () => {
     expect(output.join('\n')).toContain('Saved 1 possible injection paths');
     expect(loadManifest(file).routes['/x'].injection_risks).toHaveLength(1);
     expect(runAuditCommand([source, '--manifest', path.join(directory, 'nope.json')], () => {})).toBe(2);
+  });
+});
+
+describe('ordinary text', () => {
+  const values = JSON.parse(fs.readFileSync(path.join(__dirname, '../../tests/fixtures/ordinary_text.json'), 'utf8')).values;
+  const sinks = ['sql', 'nosql', 'command', 'path', 'ssrf', 'code', 'template', 'deserialization'];
+
+  test('no rule blocks ordinary text', () => {
+    const blocked = values.flatMap(value => sinks.filter(sink => ruleFor(sink, value)).map(sink => [sink, value]));
+    expect(blocked).toEqual([]);
+  });
+
+  test('the middleware passes ordinary text on a route checked for every operation', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'aiwaf-ordinary-'));
+    try {
+      const manifest = path.join(directory, 'paths.json');
+      fs.writeFileSync(manifest, JSON.stringify({ routes: { '/login': { injection_risks: sinks.map(sink => ({ sink, input: '', confidence: 'high' })) } } }));
+      const middleware = require('../lib/wafMiddleware')({ AIWAF_PATH_MANIFEST: manifest, AIWAF_MIDDLEWARES: ['ip_keyword_block'], logger: { warn() {} } });
+      const blocked = [];
+      for (const value of values) {
+        const req = { method: 'POST', url: `/login?q=${encodeURIComponent(value)}`, headers: {}, query: { q: value }, body: { email: value } };
+        if (await middleware.inspectPayload(req)) blocked.push(value);
+      }
+      expect(blocked).toEqual([]);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

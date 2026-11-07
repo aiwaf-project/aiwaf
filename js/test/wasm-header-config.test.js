@@ -1,5 +1,17 @@
 process.env.NODE_ENV = 'test';
 
+// Loaded before any mock so the mocked module can still run the SQL and route checks.
+let realChecks;
+beforeAll(async () => {
+  realChecks = await require('../lib/wasmChecks').load();
+  // Each test then loads its own mocked aiwaf-wasm.
+  jest.resetModules();
+});
+const checkFunctions = () => {
+  const { sql_inspect, sql_tokenizer, route_rule, RouteRiskChecker } = realChecks;
+  return { sql_inspect, sql_tokenizer, route_rule, RouteRiskChecker };
+};
+
 describe('WASM header validation config passthrough', () => {
   afterEach(() => {
     jest.resetModules();
@@ -11,6 +23,8 @@ describe('WASM header validation config passthrough', () => {
     const validateHeaders = jest.fn(() => null);
 
     jest.doMock('aiwaf-wasm', () => ({
+      // The request checks need the real aiwaf-wasm functions.
+      ...checkFunctions(),
       default: jest.fn(async () => {}),
       validate_headers: validateHeaders,
       validate_headers_with_config: validateWithConfig,

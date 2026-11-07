@@ -585,7 +585,7 @@ def request_engine(tmp_path, sql=True):
 def test_native_request_engine_detects_sql_in_the_query(tmp_path):
     engine = request_engine(tmp_path)
     decision = engine.evaluate(b"q=1+union+select+2", None, "/a", "", set(), True, "2026", 100.0)
-    assert "sql_union_select" in repr(decision)
+    assert "sql_breakout_numeric" in repr(decision)
     assert engine.processed_requests >= 1
 
 
@@ -687,10 +687,11 @@ def test_policy_keyword_flask_derives_context_from_the_request():
     assert decision[0] == "Keyword block: Learned keyword: shell"
 
 
-def test_policy_sql_signature_functions():
-    assert aiwaf_rust.policy_sql_signature("1 union select 2") == "sql_union_select"
+def test_policy_sql_signature_functions_now_use_the_tokenizer():
+    # Kept so older aiwaf releases keep working with this aiwaf-rust.
+    assert aiwaf_rust.policy_sql_signature("1 union select 2") == "sql_breakout_numeric"
     assert aiwaf_rust.policy_sql_signature("hello") is None
-    assert aiwaf_rust.policy_sql_signatures(["ok", "x'--", "1 union select 2"]) == "sql_quote_comment"
+    assert aiwaf_rust.policy_sql_signatures(["ok", "x'--", "1 union select 2"]) == "sql_breakout_single_quote"
     assert aiwaf_rust.policy_sql_signatures([]) is None
 
 
@@ -716,3 +717,39 @@ def test_wrong_argument_types_raise_python_errors(call):
 def test_exported_callables_have_inspectable_signatures():
     for name in ("policy_rate", "csv_read", "training_parse_lines", "validate_headers"):
         assert inspect.signature(getattr(aiwaf_rust, name)).parameters
+
+
+SQL_CASES = json.loads((Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "sql_injection_cases.json").read_text(encoding="utf-8"))
+
+
+def test_policy_sql_tokenizer_functions():
+    assert aiwaf_rust.policy_sql_tokenizer("1 OR 1=1") == "sql_breakout_numeric"
+    assert aiwaf_rust.policy_sql_tokenizer("o'reilly") is None
+    assert aiwaf_rust.policy_sql_tokenizers(["ok", "x' OR 1=1--", "1 OR 1=1"]) == "sql_breakout_single_quote"
+    assert aiwaf_rust.policy_sql_tokenizers([]) is None
+
+
+def test_policy_sql_tokenizer_matches_the_shared_cases():
+    assert [value for value in SQL_CASES["attacks"] if not aiwaf_rust.policy_sql_tokenizer(value)] == []
+    assert [value for value in SQL_CASES["ordinary"] if aiwaf_rust.policy_sql_tokenizer(value)] == []
+
+
+def test_policy_sql_inspect_checks_whole_requests():
+    assert aiwaf_rust.policy_sql_inspect(b"id=1%20OR%201%3D1", b"", 65536) == ("sql_breakout_numeric", 403)
+    assert aiwaf_rust.policy_sql_inspect(b"", b'{"a":{"b":"x\\u0027 OR 1=1--"}}', 65536) == ("sql_breakout_single_quote", 403)
+    assert aiwaf_rust.policy_sql_inspect(b"q=hello", b'{"name":"O\'Reilly"}', 65536) is None
+    assert aiwaf_rust.policy_sql_inspect(b"", b"a" * 20, 10) == ("payload_inspection_limit", 413)
+    for value in SQL_CASES["attacks"]:
+        assert aiwaf_rust.policy_sql_inspect(b"", json.dumps({"f": value}).encode(), 65536), value
+
+
+def test_route_risk_checker_and_rules():
+    manifest = {"routes": {"/files/<path:name>": {"injection_risks": [{"sink": "path", "input": "name", "confidence": "medium"}]}}}
+    checker = aiwaf_rust.RouteRiskChecker(json.dumps(manifest))
+    assert not checker.empty
+    assert checker.inspect("/files/../secret", "", b"") == [("/files/<path:name>", "path", "name", "path_traversal", "medium")]
+    assert checker.inspect("/files/ok", "other=../x", b"") == []
+    assert aiwaf_rust.RouteRiskChecker("not json").empty
+    assert aiwaf_rust.policy_route_rule("command", "x; ls -la") == "command_chain"
+    assert aiwaf_rust.policy_route_rule("command", "Fish & chips; cat food") is None
+    assert aiwaf_rust.policy_route_rule("sql", "1 OR 1=1") == "sql_breakout_numeric"

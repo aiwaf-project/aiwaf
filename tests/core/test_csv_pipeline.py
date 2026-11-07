@@ -62,7 +62,7 @@ def test_sql_matches_existing_inspector(tmp_path, query, body):
 def test_budget_and_no_keyword_write_on_sql_block(tmp_path):
     e = engine(tmp_path, enabled=["ip_keyword_block"], max_bytes=30)
     assert begin(e, body=b"x" * 31)[1] == 413
-    assert begin(e, path="/../shell/shell.php", query=b"q=union select")[1] == 403
+    assert begin(e, path="/../shell/shell.php", query=b"q=1 union select 1")[1] == 403
     assert rows(tmp_path, "keywords.csv") == []
     assert begin(e, exhausted=True)[1] == 413
 
@@ -147,15 +147,15 @@ def test_rate_flood_and_soft_blocklist(tmp_path):
 
 def test_exemption_and_disabled_stages(tmp_path):
     e = engine(tmp_path, enabled=["ip_keyword_block", "header_validation"], exempt_paths=["/safe"])
-    assert begin(e, path="/safe/child", query=b"q=union select")[1] == 0
-    assert begin(e, query=b"q=union select", disabled=["ip_keyword_block", "header_validation"])[1] == 0
+    assert begin(e, path="/safe/child", query=b"q=1 union select 1")[1] == 0
+    assert begin(e, query=b"q=1 union select 1", disabled=["ip_keyword_block", "header_validation"])[1] == 0
     rust.csv_write(str(tmp_path / "whitelist.csv"), ["ip", "added_date"], [["8.8.8.8", "today"]], False)
-    assert begin(e, query=b"q=union select")[1] == 0
+    assert begin(e, query=b"q=1 union select 1")[1] == 0
 
 
 def test_geo_first_and_header_policy_parity(tmp_path):
     e = engine(tmp_path, enabled=["geo_block", "ip_keyword_block", "header_validation"], geo_block=["cn"])
-    ctx, status, _ = begin(e, country="CN", query=b"q=union select")
+    ctx, status, _ = begin(e, country="CN", query=b"q=1 union select 1")
     assert status == 403
     assert rows(tmp_path, "blacklist.csv")[0]["reason"] == "Geo blocked: CN"
     h = engine(tmp_path / "h", enabled=["header_validation"])

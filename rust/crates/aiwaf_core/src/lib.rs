@@ -2166,4 +2166,7 @@ mod model_contract_tests {
         assert_eq!(predictions[1], -1);
     }
 }
+pub mod payload;
+pub mod route_risks;
+pub mod sql;
 pub mod training_evidence;

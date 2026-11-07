@@ -188,5 +188,16 @@ describe('injection analysis', () => {
       expect(runAuditCommand([directory, '--format', 'xml'], () => {})).toBe(2);
       expect(runAuditCommand([path.join(directory, 'nope')], () => {})).toBe(2);
     });
+
+    test('the command prints to the console by default', () => {
+      write('a.js', FRAMEWORKS.express);
+      const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        expect(runAuditCommand([directory])).toBe(0);
+        expect(log.mock.calls[0][0]).toContain('found 1 possible');
+      } finally {
+        log.mockRestore();
+      }
+    });
   });
 });

@@ -25,7 +25,7 @@ def test_init_and_migrate_commands(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_load_fastapi_app", lambda _path: app)
     monkeypatch.setattr(
         "aiwaf.fast.path_manifest.generate_fastapi_manifest",
-        lambda *_args: {"framework": "fastapi", "routes": {"/": {}}, "context_hash": "abc"},
+        lambda *_args, **_kwargs: {"framework": "fastapi", "routes": {"/": {}}, "context_hash": "abc"},
     )
     cli._init(["--app", "sample:app", "--output", str(tmp_path / "paths.json")])
     assert "Routes: 1" in capsys.readouterr().out

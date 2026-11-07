@@ -50,12 +50,12 @@ public final class RouteRiskCore {
 
     private static Map<String, List<Rule>> sinkRules() {
         Map<String, List<Rule>> rules = new LinkedHashMap<>();
-        List<Rule> sql = new ArrayList<>();
-        SqlInjectionCore.RULES.forEach((name, pattern) -> sql.add(new Rule(name, pattern)));
-        rules.put("sql", sql);
+        rules.put("sql", List.of());
+        // Shell commands are lower-case. A chained command needs an argument that looks like one, so
+        // "cat food" passes, and Markdown's spaced backticks, as in "The `id` field", aren't commands.
         rules.put("command", List.of(
-                rule("command_chain", "[;&|]\\s*(?:cat|curl|wget|nc|ncat|bash|sh|zsh|cmd|powershell|rm|id|whoami|uname|ping)\\b"),
-                rule("command_substitution", "\\$\\([^)]{0,200}\\)|`[^`]{1,200}`")));
+                new Rule("command_chain", Pattern.compile("[;&|]\\s*(?:cat|curl|wget|nc|ncat|bash|sh|zsh|cmd|powershell|rm|id|whoami|uname|ping|ls|echo|sleep|nslookup|python|perl)(?=\\s*$|\\s*[;&|`)]|\\s+\\S*[-/.$~'\\\"0-9:\\\\])")),
+                new Rule("command_substitution", Pattern.compile("\\$\\(\\s*(?:cat|curl|wget|nc|ncat|bash|sh|zsh|cmd|powershell|rm|id|whoami|uname|ping|ls|echo|sleep|nslookup|python|perl)\\b[^)]{0,200}\\)|(?:^|(?<=\\S))`\\s*(?:cat|curl|wget|nc|ncat|bash|sh|zsh|cmd|powershell|rm|id|whoami|uname|ping|ls|echo|sleep|nslookup|python|perl)\\b[^`]{0,200}`"))));
         rules.put("path", List.of(
                 rule("path_traversal", "(?:^|[/\\\\])\\.\\.(?:[/\\\\]|$)"),
                 rule("path_sensitive_location", "^(?:/etc/|/proc/|/root/|/var/log/|[a-z]:[/\\\\]|\\\\\\\\)"),
@@ -90,15 +90,20 @@ public final class RouteRiskCore {
     public static String ruleFor(String sink, String value) {
         String text = value == null ? "" : value.length() > MAX_VALUE_CHARS ? value.substring(0, MAX_VALUE_CHARS) : value;
         List<Rule> rules = SINK_RULES.getOrDefault(sink, List.of());
-        String found = firstRule(rules, text);
+        String found = check(sink, rules, text);
         if (found == null && text.indexOf('%') >= 0) {
             try {
-                found = firstRule(rules, URLDecoder.decode(text, StandardCharsets.UTF_8));
+                found = check(sink, rules, URLDecoder.decode(text, StandardCharsets.UTF_8));
             } catch (IllegalArgumentException ignored) {
                 return null;
             }
         }
         return found;
+    }
+
+    private static String check(String sink, List<Rule> rules, String text) {
+        String found = firstRule(rules, text);
+        return found == null && sink.equals("sql") ? SqlTokenizerCore.classifyFields(text) : found;
     }
 
     private static String firstRule(List<Rule> rules, String text) {
@@ -279,27 +284,33 @@ public final class RouteRiskCore {
         CACHE.clear();
     }
 
-    /** Logs matches for this request when log mode applies. This must never affect the request. */
-    public static void observe(AiwafRequest request, AiwafConfig config) {
+    /**
+     * Checks this request against its route's saved risks and logs matches. Returns the rule to
+     * block with in block mode, and null otherwise. A failing check returns null.
+     */
+    public static String observe(AiwafRequest request, AiwafConfig config) {
         try {
-            if (config == null || !config.pathManifestEnabled
-                    || !"log".equalsIgnoreCase(String.valueOf(config.injectionRiskMode).trim())) {
-                return;
+            String mode = config == null ? "off" : String.valueOf(config.injectionRiskMode).trim().toLowerCase(Locale.ROOT);
+            if (!config.pathManifestEnabled || !(mode.equals("block") || mode.equals("log"))) {
+                return null;
             }
             String location = config.pathManifestPath == null || config.pathManifestPath.isBlank()
                     ? PathManifestCore.DEFAULT_MANIFEST_PATH : config.pathManifestPath;
             Risks risks = CACHE.computeIfAbsent(location, key -> new Risks(PathManifestCore.loadManifest(Path.of(key))));
-            if (risks.isEmpty()) return;
-            for (Map<String, String> event : risks.inspect(request.path(), request.query(), request.bodyPreview())) {
+            if (risks.isEmpty()) return null;
+            List<Map<String, String>> events = risks.inspect(request.path(), request.query(), request.bodyPreview());
+            for (Map<String, String> event : events) {
                 Map<String, String> line = new LinkedHashMap<>();
                 line.put("event", "aiwaf.injection_risk");
-                line.put("mode", "log");
+                line.put("mode", mode);
                 line.put("method", String.valueOf(request.method()));
                 line.putAll(event);
                 LOGGER.warning(JSON.writeValueAsString(line));
             }
+            return mode.equals("block") && !events.isEmpty() ? events.get(0).get("rule") : null;
         } catch (IOException | RuntimeException ignored) {
-            // Nothing to do: this is a diagnostic, not a protection.
+            // A failing check must not break the request. Other protections still apply.
+            return null;
         }
     }
 

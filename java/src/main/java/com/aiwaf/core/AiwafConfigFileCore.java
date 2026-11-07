@@ -74,8 +74,8 @@ public final class AiwafConfigFileCore {
         if (config.sqlInjectionMode == null || !Set.of("block", "monitor", "off").contains(config.sqlInjectionMode)) {
             errors.add("security.sql_injection_mode must be block, monitor, or off");
         }
-        if (config.injectionRiskMode == null || !Set.of("log", "off").contains(config.injectionRiskMode)) {
-            errors.add("security.injection_risk_mode must be log or off");
+        if (config.injectionRiskMode == null || !Set.of("block", "log", "off").contains(config.injectionRiskMode)) {
+            errors.add("security.injection_risk_mode must be block, log, or off");
         }
         if (!Set.of("memory", "file", "csv", "db", "redis").contains(backend)) {
             errors.add("storage.backend must be memory, file, csv, db, or redis");

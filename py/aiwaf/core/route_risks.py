@@ -1,204 +1,52 @@
-"""Use audit findings on live requests, in log-only mode.
+"""Use audit findings to check the inputs of risky routes on live requests.
 
-``aiwaf audit --manifest`` saves which operation each route's input reaches. When
-``AIWAF_INJECTION_RISK_MODE`` is ``log``, requests to those routes are checked for patterns
-that matter to that operation, and matches are logged. This never blocks or changes a
-request, and a route with no saved risks keeps its normal checks. Log events carry names
-from the manifest and rule names only, never request values.
+``init`` and ``audit --manifest`` save which operation each route's input reaches. Requests to
+those routes are then checked for patterns that matter to that operation. Matches are logged
+and, with ``AIWAF_INJECTION_RISK_MODE=block`` (the default), the request is blocked. ``log``
+only logs, and ``off`` turns this off. A route with no saved risks keeps its normal checks.
+Log events carry names from the manifest and rule names only, never request values.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import logging
 import os
 import re
-from typing import Any, Iterable, Mapping, Optional
-from urllib.parse import parse_qsl, unquote_plus
+from typing import Any, Mapping, Optional
 
 from .path_manifest import DEFAULT_MANIFEST_PATH, load_manifest, now_utc_iso, write_manifest
-from .sql_injection import RULES as SQL_RULES
+from .sql_injection import Finding, _as_bytes, rust
 
 LOGGER = logging.getLogger("aiwaf.injection_risk")
 MODE_SETTING = "AIWAF_INJECTION_RISK_MODE"
 
-_MAX_VALUE_CHARS = 4096
-_MAX_ITEMS = 512
-_MAX_DEPTH = 8
-_NOSQL_OPERATORS = "where|ne|eq|gt|gte|lt|lte|in|nin|regex|exists|or|and|nor|not|expr"
-
-# Keep these in step with js/lib/routeRisks.js and RouteRiskCore.java. The shared cases in
-# tests/fixtures/route_risk_cases.json run against all three.
-SINK_RULES: dict[str, tuple] = {
-    "sql": SQL_RULES,
-    "command": tuple((name, re.compile(pattern, re.I)) for name, pattern in (
-        ("command_chain", r"[;&|]\s*(?:cat|curl|wget|nc|ncat|bash|sh|zsh|cmd|powershell|rm|id|whoami|uname|ping)\b"),
-        ("command_substitution", r"\$\([^)]{0,200}\)|`[^`]{1,200}`"),
-    )),
-    "path": tuple((name, re.compile(pattern, re.I)) for name, pattern in (
-        ("path_traversal", r"(?:^|[/\\])\.\.(?:[/\\]|$)"),
-        ("path_sensitive_location", r"^(?:/etc/|/proc/|/root/|/var/log/|[a-z]:[/\\]|\\\\)"),
-        ("path_null_byte", r"\x00"),
-    )),
-    "ssrf": tuple((name, re.compile(pattern, re.I)) for name, pattern in (
-        ("ssrf_scheme", r"^\s*(?:file|gopher|dict|ftp|ldap|tftp|netdoc)://"),
-        ("ssrf_internal_host", r"^\s*(?:https?:)?//(?:[^/@?#\s]{0,128}@)?(?:localhost|127\.\d|0\.0\.0\.0|10\.\d|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.|\[::1\]|metadata\.google\.internal)"),
-    )),
-    "nosql": tuple((name, re.compile(pattern, re.I)) for name, pattern in (
-        ("nosql_operator", rf"^\$(?:{_NOSQL_OPERATORS})$|\[\$(?:{_NOSQL_OPERATORS})\]|\{{\s*\"?\$(?:{_NOSQL_OPERATORS})\b"),
-    )),
-    "code": tuple((name, re.compile(pattern, re.I)) for name, pattern in (
-        ("code_expression", r"__import__|\b(?:eval|exec|compile)\s*\(|\brequire\s*\(|\bprocess\.(?:env|exit|mainModule)|java\.lang\.|Runtime\.getRuntime|\bT\s*\(\s*java"),
-    )),
-    "template": tuple((name, re.compile(pattern, re.I)) for name, pattern in (
-        ("template_expression", r"\{\{.{0,200}\}\}|\{%.{0,200}%\}|\$\{.{0,200}\}|<%.{0,200}%>|#\{.{0,200}\}"),
-    )),
-    "deserialization": tuple((name, re.compile(pattern)) for name, pattern in (
-        ("deserialization_marker", r"^rO0AB|^aced0005|^gASV|!!python/|!!javax\.|^O:\d+:\"|__reduce__|_\$\$ND_FUNC\$\$_"),
-    )),
-}
+# The operations a saved finding can name. The rules for each run in aiwaf-rust.
+SINKS = ("sql", "nosql", "command", "path", "ssrf", "code", "template", "deserialization")
 
 _KEY_IN_SOURCE = re.compile(r"\['(.+?)'\]")
-_ROUTE_SEGMENT = re.compile(r"^(?:<(?:[^:>]+:)?([^>]+)>|\{\*?([^:}]+)(?::[^}]*)?\}|:([^/?*]+)[?*]?)$")
-_WILDCARD_SEGMENT = re.compile(r"^(?:<path:[^>]+>|\{\*?[^:}]+:(?:path|\.\*|\.\+)\}|\{\*[^}]+\}|:[^/?*]+\*|\*\*)$")
-_NAME_SUFFIX = re.compile(r"\[.*$")
 
 
 def rule_for(sink: str, value: str) -> Optional[str]:
     """Return the first rule for this operation that matches the value."""
-    text = str(value)[:_MAX_VALUE_CHARS]
-    forms = (text, unquote_plus(text)) if "%" in text else (text,)
-    for form in forms:
-        for name, pattern in SINK_RULES.get(sink, ()):
-            if pattern.search(form):
-                return name
-    return None
-
-
-def compile_route(path: str) -> tuple[re.Pattern, list[str]]:
-    """Compile a manifest route from any supported framework's syntax."""
-    pattern, names = "", []
-    for segment in str(path).strip("/").split("/"):
-        if not segment:
-            continue
-        if _WILDCARD_SEGMENT.match(segment):
-            match = _ROUTE_SEGMENT.match(segment)
-            names.append(next((item for item in (match.groups() if match else ()) if item), ""))
-            pattern += "/(.*)"
-        elif segment == "*":
-            names.append("")
-            pattern += "/([^/]+)"
-        else:
-            match = _ROUTE_SEGMENT.match(segment)
-            if match:
-                names.append(next(item for item in match.groups() if item))
-                pattern += "/([^/]+)"
-            else:
-                pattern += "/" + re.escape(segment)
-    return re.compile(f"^{pattern}/?$"), names
-
-
-def input_name(name: str) -> str:
-    return _NAME_SUFFIX.sub("", str(name))
-
-
-def _walk_json(value: Any, name: str, root: str, items: list, depth: int = 0) -> None:
-    # Nested values also count as the top-level field that holds them, as in {"user": {"$ne": 1}}.
-    if len(items) >= _MAX_ITEMS or depth > _MAX_DEPTH:
-        return
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            key, top = str(key), root or str(key)
-            items.append((key, key))
-            if top != key:
-                items.append((top, key))
-            _walk_json(item, key, top, items, depth + 1)
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            _walk_json(item, name, root, items, depth + 1)
-    elif value is not None:
-        items.append((name, str(value)))
-        if root and root != name:
-            items.append((root, str(value)))
-
-
-def request_inputs(query: Any, body: Any) -> list[tuple[str, str]]:
-    """Return (name, value) pairs from a query string and a buffered body."""
-    items: list[tuple[str, str]] = []
-    if isinstance(query, bytes):
-        query = query.decode("utf-8", errors="ignore")
-    for key, value in parse_qsl(str(query or ""), keep_blank_values=True, max_num_fields=None)[:_MAX_ITEMS]:
-        items.extend(((input_name(key), key), (input_name(key), value)))
-    if isinstance(body, (bytes, bytearray)):
-        body = bytes(body).decode("utf-8", errors="ignore")
-    if isinstance(body, str) and body:
-        stripped = body.lstrip()
-        if stripped[:1] in {"{", "["}:
-            try:
-                _walk_json(json.loads(stripped), "", "", items)
-                return items[:_MAX_ITEMS]
-            except ValueError:
-                items.append(("", body))
-        elif "=" in body:
-            for key, value in parse_qsl(body, keep_blank_values=True)[:_MAX_ITEMS]:
-                items.extend(((input_name(key), key), (input_name(key), value)))
-        else:
-            items.append(("", body))
-    return items[:_MAX_ITEMS]
-
-
-@dataclass(frozen=True)
-class _Route:
-    path: str
-    pattern: re.Pattern
-    names: tuple
-    risks: tuple
+    return rust().policy_route_rule(str(sink), str(value))
 
 
 class RouteRisks:
-    """Saved risks for one manifest, compiled for lookup by request path."""
+    """Saved risks for one manifest, compiled in aiwaf-rust for lookup by request path."""
 
     def __init__(self, manifest: Optional[Mapping[str, Any]]):
-        routes = manifest.get("routes") if isinstance(manifest, Mapping) else None
-        compiled = []
-        for path, entry in (routes.items() if isinstance(routes, Mapping) else ()):
-            risks = entry.get("injection_risks") if isinstance(entry, Mapping) else None
-            if isinstance(risks, list) and risks:
-                pattern, names = compile_route(path)
-                compiled.append(_Route(str(path), pattern, tuple(names), tuple(item for item in risks if isinstance(item, Mapping))))
-        # Exact routes win over routes with parameters.
-        self.routes = sorted(compiled, key=lambda route: (len(route.names), -len(route.path)))
+        self._checker = rust().RouteRiskChecker(json.dumps(manifest if isinstance(manifest, Mapping) else None))
+
+    @property
+    def empty(self) -> bool:
+        return self._checker.empty
 
     def inspect(self, path: str, query: Any = None, body: Any = None) -> list[dict[str, str]]:
-        for route in self.routes:
-            match = route.pattern.match(str(path or "/"))
-            if match:
-                return self._inspect_route(route, match, query, body)
-        return []
-
-    @staticmethod
-    def _inspect_route(route: _Route, match: re.Match, query: Any, body: Any) -> list[dict[str, str]]:
-        items = request_inputs(query, body)
-        items.extend((name, value) for name, value in zip(route.names, match.groups()) if value)
-        events, seen = [], set()
-        for risk in route.risks:
-            sink, wanted = str(risk.get("sink", "")), str(risk.get("input", ""))
-            for name, value in items:
-                if wanted and name != wanted:
-                    continue
-                rule = rule_for(sink, value)
-                if rule and (sink, wanted, rule) not in seen:
-                    seen.add((sink, wanted, rule))
-                    # The input name comes from the manifest, because request names are untrusted.
-                    events.append({
-                        "route": route.path,
-                        "sink": sink,
-                        "input": wanted,
-                        "rule": rule,
-                        "confidence": str(risk.get("confidence", "")),
-                    })
-        return events
+        if isinstance(query, (bytes, bytearray)):
+            query = bytes(query).decode("utf-8", errors="replace")
+        events = self._checker.inspect(str(path or "/"), str(query or ""), _as_bytes(body))
+        return [dict(zip(("route", "sink", "input", "rule", "confidence"), event)) for event in events]
 
 
 _cache: dict[str, RouteRisks] = {}
@@ -208,28 +56,36 @@ def clear_cache() -> None:
     _cache.clear()
 
 
+MODES = ("block", "log", "off")
+
+
 def observer_for(mode: Any, manifest_path: Any, path: str, method: str = ""):
-    """Return a callable taking (query, body), or None unless log mode applies to this route."""
-    selected = mode if mode is not None else os.getenv(MODE_SETTING, "off")
-    if str(selected).strip().lower() != "log":
+    """Return a callable taking (query, body), or None when there's nothing to check.
+
+    The callable returns a blocking Finding in block mode, and None otherwise.
+    """
+    selected = str(mode if mode is not None else os.getenv(MODE_SETTING, "block")).strip().lower()
+    if selected not in MODES:
+        raise ValueError("AIWAF_INJECTION_RISK_MODE must be block, log, or off")
+    if selected == "off":
         return None
-    try:
-        location = str(manifest_path or DEFAULT_MANIFEST_PATH)
-        risks = _cache.get(location)
-        if risks is None:
-            risks = _cache[location] = RouteRisks(load_manifest(location))
-        if not risks.routes:
-            return None
-    except Exception:
+    location = str(manifest_path or DEFAULT_MANIFEST_PATH)
+    risks = _cache.get(location)
+    if risks is None:
+        risks = _cache[location] = RouteRisks(load_manifest(location))
+    if risks.empty:
         return None
 
-    def observe(query: Any, body: Any) -> None:
-        # Log-only checks must never affect the request, whatever they receive.
+    def observe(query: Any, body: Any) -> Optional[Finding]:
         try:
-            for event in risks.inspect(path, query, body):
-                LOGGER.warning("%s", json.dumps({"event": "aiwaf.injection_risk", "mode": "log", "method": str(method), **event}, sort_keys=True))
+            events = risks.inspect(path, query, body)
+            for event in events:
+                LOGGER.warning("%s", json.dumps({"event": "aiwaf.injection_risk", "mode": selected, "method": str(method), **event}, sort_keys=True))
         except Exception:
+            # A failing check must not break the request. Other protections still apply.
             LOGGER.debug("Injection risk check failed", exc_info=True)
+            return None
+        return Finding(events[0]["rule"]) if events and selected == "block" else None
 
     return observe
 
@@ -293,6 +149,35 @@ def apply_report(report: Mapping[str, Any], manifest: dict) -> dict[str, int]:
         "unlinked_findings": unlinked,
     }
     return {"routes": len(collected), "linked": linked, "unlinked": unlinked}
+
+
+def audit_into_manifest(manifest: dict, source: Optional[str]) -> Optional[dict[str, int]]:
+    """Scan source and save its findings into a manifest that's about to be written.
+
+    Returns the counts, or None when source is None or the scan fails. A failed scan leaves the
+    manifest without saved risks, so routes keep their normal checks.
+    """
+    if source is None:
+        return None
+    try:
+        from .injection_analysis import analyze_path
+
+        return apply_report(analyze_path(str(source)), manifest)
+    except Exception as error:  # noqa: BLE001 - a scan problem must not stop init
+        LOGGER.warning("Injection audit skipped: %s", error)
+        return None
+
+
+def describe_audit(manifest: Mapping[str, Any]) -> str:
+    """Describe a manifest's saved audit for init's summary."""
+    audit = manifest.get("injection_audit")
+    if not isinstance(audit, Mapping):
+        return "Injection checks: not run"
+    routes = sum(1 for entry in manifest.get("routes", {}).values() if isinstance(entry, Mapping) and entry.get("injection_risks"))
+    text = f"Injection checks: {routes} routes from {audit.get('files_scanned', 0)} files"
+    if audit.get("unlinked_findings"):
+        text += f" ({audit['unlinked_findings']} findings couldn't be tied to a route)"
+    return text
 
 
 def update_manifest(report: Mapping[str, Any], manifest_path: str) -> dict[str, int]:

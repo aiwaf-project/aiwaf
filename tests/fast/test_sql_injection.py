@@ -67,8 +67,29 @@ class RouteRiskLogTests(unittest.TestCase):
             status, _ = self.send({'x': 1}, risk_mode='log', mode='off', query='email=$(id)')
         self.assertEqual(status, 401)
 
-    def test_it_is_off_by_default_and_skips_exempt_requests(self):
-        for kwargs in ({'risk_mode': None}, {'risk_mode': 'off'}, {'risk_mode': 'log', 'exempt': True}):
+    def test_block_mode_is_the_default_and_blocks(self):
+        with self.assertLogs('aiwaf.injection_risk', 'WARNING'):
+            status, body = self.send({'email': '$(whoami)', 'password': 'private-secret'})
+        self.assertEqual((status, body['error']), (403, 'command_substitution'))
+        status, _ = self.send({'email': 'ordinary@example.com'})
+        self.assertEqual(status, 401)
+
+    def test_off_and_exempt_requests_are_skipped(self):
+        for kwargs in ({'risk_mode': 'off'}, {'risk_mode': 'block', 'exempt': True}):
             with self.assertNoLogs('aiwaf.injection_risk', 'WARNING'):
                 status, _ = self.send({'email': '$(whoami)'}, **kwargs)
             self.assertEqual(status, 401)
+
+    def test_ordinary_text_is_never_blocked(self):
+        from urllib.parse import urlencode
+        from aiwaf.core.route_risks import clear_cache
+
+        cases = Path(__file__).resolve().parents[1] / 'fixtures' / 'ordinary_text.json'
+        values = json.loads(cases.read_text(encoding='utf-8'))['values']
+        sinks = ['sql', 'nosql', 'command', 'path', 'ssrf', 'code', 'template', 'deserialization']
+        Path(self.manifest).write_text(json.dumps({'routes': {'/login': {'injection_risks': [
+            {'sink': sink, 'input': '', 'confidence': 'high'} for sink in sinks]}}}), encoding='utf-8')
+        clear_cache()
+        blocked = [value for value in values
+                   if self.send({'email': value}, risk_mode='block', query=urlencode({'q': value}))[0] != 401]
+        self.assertEqual(blocked, [])

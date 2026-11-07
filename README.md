@@ -124,42 +124,73 @@ This is how plain Servlet applications get a manifest:
 java -cp <classpath> com.aiwaf.cli.AiwafConsole init --source src --output .aiwaf/paths.json
 ```
 
-### Log-only checks on live requests
+### SQL detection
 
-Audit findings can guide what AIWAF looks for on each route. Save them to your route
-manifest, then turn on log mode:
+AIWAF checks request values for SQL injection with a tokenizer. It tries each value as a
+bare number, inside single quotes, and inside double quotes, and flags it only when the
+value closes that SQL value and what follows reads as SQL. It catches `1 OR 1=1` and
+`1 AND SLEEP(5)`, which have no quote, and MySQL's executed comments such as
+`/*!50000UNION*/`. It passes text like `"Item" #3`, `o'reilly`, `union select committee`
+and `Drop table tennis; update your set list`.
 
-```bash
-aiwaf audit path/to/app --manifest .aiwaf/paths.json
-export AIWAF_INJECTION_RISK_MODE=log
-```
+Text such as `union select password` on its own isn't flagged, because without a value to
+close it can't change a query. `AIWAF_SQL_INJECTION_MODE` still chooses whether a finding
+blocks (the default), is only logged, or is ignored.
 
-Generate the manifest first with `init`, and run the audit again after `init`, because
-`init` replaces the saved results. `AIWAF_INJECTION_RISK_MODE` is `off` by default. Flask,
-Django and the Node.js options accept the same name, and Spring uses
-`aiwaf.injection-risk-mode`. The Node.js native pipeline reads `AIWAF_INJECTION_RISK_MODE`
-and `AIWAF_PATH_MANIFEST` from the environment.
+In Python, the whole request check runs in `aiwaf-rust`, which is required: one call walks
+the query and body, decodes values, reads JSON bodies by their values, applies the size limits
+and runs the tokenizer. It runs whatever `AIWAF_USE_RUST` says, because there's no Python copy.
+Node.js runs the same Rust code through `aiwaf-wasm`, which it requires in the same way, so
+`AIWAF_DISABLE_WASM` doesn't turn these checks off. Java has its own copy.
 
-In log mode, a request to a route with a saved finding is checked for patterns that matter
-to that operation. A route whose input reaches a file path is checked for traversal, for
-example, in the parameter that reaches it. Matches are logged like this:
+The cases in `tests/fixtures/sql_injection_cases.json` run against every copy in CI, and
+`python scripts/sql_accuracy.py` reports the result. They were written alongside the
+tokenizer, so passing them doesn't prove real-world accuracy. Add any miss or false block you
+see there.
+
+### Route-specific checks from init
+
+`init` audits your source as it builds the route manifest, and saves which operation each
+route's input reaches. Requests to those routes are then checked for patterns that matter to
+that operation, in the parameter that reaches it. A route whose input reaches a file path is
+checked for traversal, and a route whose input reaches SQL gets the SQL tokenizer on its route
+values too. A match blocks the request with `403` and logs an event like this:
 
 ```json
-{"event": "aiwaf.injection_risk", "mode": "log", "method": "GET", "route": "/files", "sink": "path", "input": "name", "rule": "path_traversal", "confidence": "medium"}
+{"event": "aiwaf.injection_risk", "mode": "block", "method": "GET", "route": "/files", "sink": "path", "input": "name", "rule": "path_traversal", "confidence": "medium"}
 ```
 
-- **It doesn't block:** log mode never changes a request or a response, and there's no
-  blocking mode yet. Use these logs to see how often it would be wrong on your traffic.
-- **It only adds checks:** a route with no findings keeps its normal protection, and saved
-  findings never turn a protection off.
+```bash
+aiwaf init --framework flask --app app:app                 # audits the current folder
+aiwaf init --framework flask --app app:app --source src    # audits another folder
+aiwaf init --framework flask --app app:app --no-audit      # saves no route checks
+```
+
+Node.js `aiwaf manifest` accepts `--source` and `--no-audit` too. Java `init --source` uses
+the same parse for routes and findings, and `init --app` audits `src/main/java` (or
+`--audit-source`). `aiwaf audit --manifest <file>` refreshes the saved findings without
+rebuilding the manifest.
+
+`AIWAF_INJECTION_RISK_MODE` is `block` by default. Set it to `log` to only log matches, or
+`off` to skip route checks. Flask and Django settings and the Node.js options accept the same
+name, Spring uses `aiwaf.injection-risk-mode`, and the Java config file uses
+`security.injection_risk_mode`. The Node.js native pipeline reads `AIWAF_INJECTION_RISK_MODE`
+and `AIWAF_PATH_MANIFEST` from the environment.
+
+- **Only routes with findings:** a route with no saved findings keeps its normal checks, and
+  saved findings never turn a protection off.
 - **Logs hold no request values:** events contain route, rule and parameter names from the
   manifest only.
 - **What it reads:** query strings, route values, and buffered JSON or form bodies. Headers,
   cookies and multipart uploads aren't checked.
-- **Unlinked findings:** the audit reports any finding it can't tie to a manifest route, and
-  those get no route-specific checks. Handlers are matched by path or function name, so
-  routes missing from the manifest, or reused function names in Node.js, can stay unlinked.
-- **Stale results:** the file isn't updated when code changes, so run the audit in your build.
+- **Unlinked findings:** `init` reports findings it can't tie to a manifest route, and those
+  get no route-specific checks. Handlers are matched by path or function name, so routes
+  missing from the manifest, or reused function names in Node.js, can stay unlinked.
+- **Stale results:** run `init` again when code changes, for example in your build.
+- **Where they run:** route checks run in Rust: through `aiwaf-rust` in Python and
+  `aiwaf-wasm` in Node.js. Java has its own copy.
+- **Accuracy isn't measured on real traffic yet:** if a rule blocks real users on a route,
+  set `AIWAF_INJECTION_RISK_MODE=log` while you report it.
 
 ## Repository layout
 
@@ -646,12 +677,10 @@ Check the installed extension without touching application data:
 python scripts/check_native_csv_runtime.py
 ```
 
-Development request batching adds `policy_sql_signatures` and
-`csv_geo_policy` capabilities. Shared SQL inspection checks the first
-eight ASCII strings immediately for prompt denial, then checks subsequent strings
-in batches of at most 128. Unicode boundaries and inspection-limit exits flush
-pending checks first, preserving first-finding order. Django, Flask, and FastAPI
-use the shared path; older extensions retain single-string checks.
+`policy_sql_inspect` runs the whole SQL request check in one call, and Django, Flask and
+FastAPI use it for every request. `RouteRiskChecker` and `policy_route_rule` run the
+route-specific checks saved by `init`. `policy_sql_tokenizer` checks one value.
+`policy_sql_signatures` and `csv_geo_policy` remain for older releases.
 
 Flask with CSV geo state and an explicit allow/block list can read dynamic countries
 and evaluate the geo policy in one native call. Django CSV and FastAPI CSV use
@@ -877,7 +906,7 @@ npm run aiwaf -- manifest --framework express --routes routes.json --output .aiw
 | Logging | `AIWAF_MIDDLEWARE_LOGGING`, `AIWAF_MIDDLEWARE_LOG_PATH`, DB/CSV options |
 | WASM | `AIWAF_WASM_VALIDATION`, `AIWAF_WASM_VALIDATE_RECENT` |
 
-AIWAF loads `aiwaf-wasm` when available and falls back to the JavaScript implementation when WASM initialization or conversion is not worthwhile. Small, object-heavy operations can be faster in JavaScript because crossing the JS/WASM boundary and serializing objects has a fixed cost. WASM is most useful for sufficiently large feature batches and model scoring workloads.
+AIWAF loads `aiwaf-wasm` when available and falls back to the JavaScript implementation when WASM initialization or conversion is not worthwhile. The SQL check and route checks are the exception: they run only in `aiwaf-wasm`, and a request fails with an install message if it can't load. Small, object-heavy operations can be faster in JavaScript because crossing the JS/WASM boundary and serializing objects has a fixed cost. WASM is most useful for sufficiently large feature batches and model scoring workloads.
 
 The Python filesystem CSV transactions and retained training bindings remain
 PyO3-specific. Node now also has an **explicit stateful WASM request pipeline**;

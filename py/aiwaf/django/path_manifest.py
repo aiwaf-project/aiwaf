@@ -10,6 +10,7 @@ from django.urls.resolvers import URLPattern, URLResolver
 
 from aiwaf.core.api_detection import detect_api_endpoint
 from aiwaf.core.auth_detection import detect_auth_endpoint
+from aiwaf.core.route_risks import audit_into_manifest
 from aiwaf.core.path_manifest import build_manifest, build_route_entry, is_internal_aiwaf_path, write_manifest
 from aiwaf.core.source_methods import (
     infer_methods_from_source,
@@ -190,7 +191,9 @@ def extract_django_routes() -> dict[str, dict[str, Any]]:
     resolver = get_resolver()
     return mask_shadowed_declarations(_collect_routes(resolver.url_patterns))
 
-def generate_django_manifest(output_path: str = ".aiwaf/paths.json") -> dict[str, Any]:
+def generate_django_manifest(output_path: str = ".aiwaf/paths.json", *, audit_source: str | None = None) -> dict[str, Any]:
+    """Write a manifest. With audit_source, also save that source's injection findings."""
     manifest = build_manifest(framework="django", routes=extract_django_routes())
+    audit_into_manifest(manifest, audit_source)
     write_manifest(manifest, output_path)
     return manifest

@@ -27,9 +27,9 @@ def test_fast_engine_sql_and_body_replay(tmp_path, enabled):
         node = node.app
     if enabled:
         assert hasattr(node, '_native_request_engine_profile')
-    assert client.get('/safe?q=1+UNION+SELECT').status_code == 403
+    assert client.get('/safe?q=1+UNION+SELECT+1').status_code == 403
     response = client.post('/safe', json={'field': 'original body'})
     assert response.status_code == 200 and response.json() == {'field': 'original body'}
-    assert client.post('/safe', json={'field': '1 UNION SELECT'}).status_code == 403
+    assert client.post('/safe', json={'field': '1 UNION SELECT 1'}).status_code == 403
     assert client.get('/shell.php').status_code == 403
 

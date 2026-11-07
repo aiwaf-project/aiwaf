@@ -37,7 +37,7 @@ def _init(argv) -> None:
     from aiwaf.fast.path_manifest import generate_fastapi_manifest
 
     app = _load_fastapi_app(args.app)
-    manifest = generate_fastapi_manifest(app, args.output)
+    manifest = generate_fastapi_manifest(app, args.output, audit_source=".")
     print(f"Generated {args.output}")
     print(f"Framework: {manifest['framework']}")
     print(f"Routes: {len(manifest.get('routes', {}))}")

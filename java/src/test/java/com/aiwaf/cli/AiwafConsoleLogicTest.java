@@ -65,6 +65,17 @@ class AiwafConsoleLogicTest {
         String content = java.nio.file.Files.readString(manifest);
         assertTrue(content.contains("/login"));
         assertTrue(content.contains("java-source"));
+        // init saves the audit's findings for the route's checks.
+        assertTrue(content.contains("injection_risks"));
+
+        java.nio.file.Path plain = directory.resolve("plain.json");
+        System.setOut(new PrintStream(new ByteArrayOutputStream()));
+        try {
+            AiwafConsole.main(new String[]{"init", "--source", directory.toString(), "--output", plain.toString(), "--no-audit"});
+        } finally {
+            System.setOut(oldOut);
+        }
+        assertTrue(!java.nio.file.Files.readString(plain).contains("injection_risks"));
     }
 
     @Test

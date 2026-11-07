@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+- Add `audit` to the Python, Node.js and Java command lines. It parses source without
+  running it and reports where request input can reach dangerous operations. It's
+  report-only and doesn't affect request handling.
+- **Security:** SQL injection checks now use a tokenizer instead of four signature rules.
+  It flags a value only when it breaks out of a SQL value and continues as SQL, which
+  catches attacks with no quote such as `1 OR 1=1` and `1 AND SLEEP(5)`, and MySQL's
+  executed `/*!...*/` comments, which bypassed the signature rules. It no longer blocks
+  ordinary text such as `"Item" #3` or `Drop table tennis; update your set list`.
+  **Upgrade check:** rule names change from `sql_union_select`, `sql_boolean_tautology`,
+  `sql_quote_comment` and `sql_stacked_statement` to `sql_breakout_numeric`,
+  `sql_breakout_single_quote` and `sql_breakout_double_quote`. Text such as
+  `union select password` with no value to close is no longer blocked.
+- **Requires `aiwaf-rust` 0.2.8.** Python's SQL check and route checks now run in Rust, with
+  no Python copy: one call per request does the walking, decoding, JSON parsing, size limits
+  and tokenizer. `aiwaf-rust` adds `policy_sql_inspect`, `RouteRiskChecker`,
+  `policy_route_rule` and `policy_sql_tokenizer`. `policy_sql_signature` and
+  `policy_sql_signatures` remain for older releases and return tokenizer results. A JSON body
+  is checked by its values instead of its raw text, and a literal `+` is no longer lost to
+  form decoding. Shared case files run against every copy in CI.
+- **Node.js requires `aiwaf-wasm` 0.2.6 for request checks.** The SQL check and route checks
+  run in `aiwaf-wasm`, from the same Rust code as Python, with no JavaScript copy.
+  `aiwaf-wasm` adds `sql_inspect`, `RouteRiskChecker`, `route_rule` and `sql_tokenizer`.
+  `package.json` keeps `^0.2.5` until 0.2.6 is published; bump it then. Tests and CI build
+  `aiwaf-wasm` from this repository with `scripts/build_wasm_from_source.py`.
+- `init` audits source and saves route-specific checks into the manifest. Requests to those
+  routes are checked for patterns that matter to the operation their input reaches, and
+  matches are blocked. `AIWAF_INJECTION_RISK_MODE` is `block` by default, and `log` or
+  `off` change that. `init --no-audit` and `audit --manifest` are also available.
+- Java can now read source with the JDK Compiler Tree API. `aiwaf-cli init --source`
+  builds a route manifest without starting the application, including for plain Servlet
+  applications, and reads method bodies for API, form and login signals. Source analysis
+  needs a JDK.
+
 ## Python 1.1.8 / Rust-Python 0.2.7 / Node.js 1.1.5 / WASM 0.2.5 / Java 1.3.5 — prepared release
 
 - **Security:** Python and Node.js no longer let a client choose its own address with
@@ -14,16 +49,6 @@
 - Rust and WASM: `validate_headers_with_config` now enforces every required header. It
   previously checked only `User-Agent` and `Accept`, and only `HTTP_`-style names. The
   Django, FastAPI, Flask and Node.js middleware already enforced these headers themselves.
-- Add `audit` to the Python, Node.js and Java command lines. It parses source without
-  running it and reports where request input can reach dangerous operations. It's
-  report-only and doesn't affect request handling.
-- Add `AIWAF_INJECTION_RISK_MODE=log` and `audit --manifest`. Saved findings tell AIWAF
-  which operation each route's input reaches, and matching requests are logged for that
-  operation. It's off by default, never blocks, and logs no request values.
-- Java can now read source with the JDK Compiler Tree API. `aiwaf-cli init --source`
-  builds a route manifest without starting the application, including for plain Servlet
-  applications, and reads method bodies for API, form and login signals. Source analysis
-  needs a JDK.
 - CI builds `aiwaf-rust` from this repository for Python tests instead of installing it from PyPI.
 - Update package versions and matching native dependency requirements for the next release.
 - Remove benchmark/profiling utilities and consolidate release documentation into README/CHANGELOG.

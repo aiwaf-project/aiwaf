@@ -1,216 +1,83 @@
 'use strict';
 
-// Uses audit findings on live requests, in log-only mode. See py/aiwaf/core/route_risks.py.
-// This never blocks or changes a request, and log events never include request values.
-const { RULES: SQL_RULES } = require('./sqlInjection');
+// Uses audit findings to check risky routes' inputs on live requests. The checks run in
+// aiwaf-wasm. Matches are logged and, in block mode (the default), blocked. Log events never
+// include request values.
 const { loadManifest, writeManifest } = require('./pathManifest');
+const { bodyBytes } = require('./sqlInjection');
+const wasmChecks = require('./wasmChecks');
 
-const MAX_VALUE_CHARS = 4096;
-const MAX_ITEMS = 512;
-const MAX_DEPTH = 8;
-const NOSQL = 'where|ne|eq|gt|gte|lt|lte|in|nin|regex|exists|or|and|nor|not|expr';
+// The operations a saved finding can name. The rules for each run in aiwaf-wasm.
+const SINKS = ['sql', 'nosql', 'command', 'path', 'ssrf', 'code', 'template', 'deserialization'];
 
-// Keep these in step with route_risks.py and RouteRiskCore.java. The shared cases in
-// tests/fixtures/route_risk_cases.json run against all three.
-const SINK_RULES = {
-  sql: SQL_RULES,
-  command: [
-    ['command_chain', /[;&|]\s*(?:cat|curl|wget|nc|ncat|bash|sh|zsh|cmd|powershell|rm|id|whoami|uname|ping)\b/i],
-    ['command_substitution', /\$\([^)]{0,200}\)|`[^`]{1,200}`/i]
-  ],
-  path: [
-    ['path_traversal', /(?:^|[/\\])\.\.(?:[/\\]|$)/i],
-    ['path_sensitive_location', /^(?:\/etc\/|\/proc\/|\/root\/|\/var\/log\/|[a-z]:[/\\]|\\\\)/i],
-    ['path_null_byte', /\x00/]
-  ],
-  ssrf: [
-    ['ssrf_scheme', /^\s*(?:file|gopher|dict|ftp|ldap|tftp|netdoc):\/\//i],
-    ['ssrf_internal_host', /^\s*(?:https?:)?\/\/(?:[^/@?#\s]{0,128}@)?(?:localhost|127\.\d|0\.0\.0\.0|10\.\d|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.|\[::1\]|metadata\.google\.internal)/i]
-  ],
-  nosql: [
-    ['nosql_operator', new RegExp(`^\\$(?:${NOSQL})$|\\[\\$(?:${NOSQL})\\]|\\{\\s*"?\\$(?:${NOSQL})\\b`, 'i')]
-  ],
-  code: [
-    ['code_expression', /__import__|\b(?:eval|exec|compile)\s*\(|\brequire\s*\(|\bprocess\.(?:env|exit|mainModule)|java\.lang\.|Runtime\.getRuntime|\bT\s*\(\s*java/i]
-  ],
-  template: [
-    ['template_expression', /\{\{.{0,200}\}\}|\{%.{0,200}%\}|\$\{.{0,200}\}|<%.{0,200}%>|#\{.{0,200}\}/i]
-  ],
-  deserialization: [
-    ['deserialization_marker', /^rO0AB|^aced0005|^gASV|!!python\/|!!javax\.|^O:\d+:"|__reduce__|_\$\$ND_FUNC\$\$_/]
-  ]
-};
-
-const ROUTE_SEGMENT = /^(?:<(?:[^:>]+:)?([^>]+)>|\{\*?([^:}]+)(?::[^}]*)?\}|:([^/?*]+)[?*]?)$/;
-const WILDCARD_SEGMENT = /^(?:<path:[^>]+>|\{\*?[^:}]+:(?:path|\.\*|\.\+)\}|\{\*[^}]+\}|:[^/?*]+\*|\*\*)$/;
-
-function decoded(text) {
-  try {
-    return decodeURIComponent(text.replace(/\+/g, ' '));
-  } catch (_) {
-    return text;
-  }
-}
-
+/** Returns the first rule for this operation that matches the value. Needs aiwaf-wasm loaded. */
 function ruleFor(sink, value) {
-  const text = String(value).slice(0, MAX_VALUE_CHARS);
-  const forms = text.includes('%') ? [text, decoded(text)] : [text];
-  const rules = Object.prototype.hasOwnProperty.call(SINK_RULES, sink) ? SINK_RULES[sink] : [];
-  for (const form of forms) {
-    for (const [name, pattern] of rules) if (pattern.test(form)) return name;
-  }
-  return null;
+  return wasmChecks.get().route_rule(String(sink), String(value)) ?? null;
 }
 
-function escapeRegex(text) {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function compileRoute(path) {
-  let pattern = '';
-  const names = [];
-  for (const segment of String(path).split('/')) {
-    if (!segment) continue;
-    const match = ROUTE_SEGMENT.exec(segment);
-    const name = match ? match.slice(1).find(Boolean) || '' : '';
-    if (WILDCARD_SEGMENT.test(segment)) {
-      names.push(name);
-      pattern += '/(.*)';
-    } else if (segment === '*') {
-      names.push('');
-      pattern += '/([^/]+)';
-    } else if (match) {
-      names.push(name);
-      pattern += '/([^/]+)';
-    } else {
-      pattern += `/${escapeRegex(segment)}`;
-    }
-  }
-  return { pattern: new RegExp(`^${pattern}/?$`), names };
-}
-
-const inputName = name => String(name).replace(/\[.*$/, '');
-
-// Nested values also count as the top-level field that holds them, as in { user: { $ne: 1 } }.
-function walk(value, name, root, items, depth = 0) {
-  if (items.length >= MAX_ITEMS || depth > MAX_DEPTH || value === undefined || value === null) return;
-  if (Array.isArray(value)) {
-    for (const item of value) walk(item, name, root, items, depth + 1);
-  } else if (typeof value === 'object' && !Buffer.isBuffer(value)) {
-    if (typeof value.pipe === 'function') return;
-    for (const [key, item] of Object.entries(value)) {
-      const top = root || key;
-      items.push([key, key]);
-      if (top !== key) items.push([top, key]);
-      walk(item, key, top, items, depth + 1);
-    }
-  } else if (typeof value !== 'function') {
-    const text = Buffer.isBuffer(value) ? value.toString('utf8') : String(value);
-    items.push([name, text]);
-    if (root && root !== name) items.push([root, text]);
-  }
-}
-
-function pairsFrom(text, items) {
-  for (const [key, value] of new URLSearchParams(text)) {
-    if (items.length >= MAX_ITEMS) return;
-    items.push([inputName(key), key], [inputName(key), value]);
-  }
-}
-
-function requestInputs(query, body) {
-  const items = [];
-  if (typeof query === 'string') pairsFrom(query, items);
-  else walk(query, '', '', items);
-  const content = Buffer.isBuffer(body) ? body.toString('utf8') : body;
-  if (typeof content === 'string' && content) {
-    const stripped = content.trimStart();
-    if (stripped[0] === '{' || stripped[0] === '[') {
-      try {
-        walk(JSON.parse(stripped), '', '', items);
-      } catch (_) {
-        items.push(['', content]);
-      }
-    } else if (content.includes('=')) {
-      pairsFrom(content, items);
-    } else {
-      items.push(['', content]);
-    }
-  } else if (content && typeof content === 'object') {
-    walk(content, '', '', items);
-  }
-  return items.slice(0, MAX_ITEMS);
-}
-
+/** Compiles a manifest's saved risks in aiwaf-wasm. Needs aiwaf-wasm loaded. */
 function compileRisks(manifest) {
-  const routes = manifest && typeof manifest.routes === 'object' && manifest.routes ? manifest.routes : {};
-  const compiled = [];
-  for (const [path, entry] of Object.entries(routes)) {
-    const risks = entry && entry.injection_risks;
-    if (Array.isArray(risks) && risks.length) {
-      compiled.push({ path, ...compileRoute(path), risks: risks.filter(item => item && typeof item === 'object') });
-    }
-  }
-  // Exact routes win over routes with parameters.
-  return compiled.sort((a, b) => a.names.length - b.names.length || b.path.length - a.path.length);
+  return new (wasmChecks.get().RouteRiskChecker)(JSON.stringify(manifest ?? null));
 }
 
-function inspectRisks(routes, path, query, body) {
-  for (const route of routes) {
-    const match = route.pattern.exec(String(path || '/'));
-    if (!match) continue;
-    const items = requestInputs(query, body);
-    route.names.forEach((name, index) => {
-      if (match[index + 1]) items.push([name, match[index + 1]]);
-    });
-    const events = [];
-    const seen = new Set();
-    for (const risk of route.risks) {
-      const sink = String(risk.sink || '');
-      const wanted = String(risk.input || '');
-      for (const [name, value] of items) {
-        if (wanted && name !== wanted) continue;
-        const rule = ruleFor(sink, value);
-        const key = `${sink}\0${wanted}\0${rule}`;
-        if (rule && !seen.has(key)) {
-          seen.add(key);
-          // The input name comes from the manifest, because request names are untrusted.
-          events.push({ route: route.path, sink, input: wanted, rule, confidence: String(risk.confidence || '') });
-        }
-      }
-    }
-    return events;
+// Turns a parsed query object back into name=value pairs, as in user[$ne]=1.
+function queryString(query, prefix = '', out = []) {
+  if (query === null || query === undefined) return out;
+  if (typeof query !== 'object') {
+    out.push(`${encodeURIComponent(prefix)}=${encodeURIComponent(String(query))}`);
+    return out;
   }
-  return [];
+  for (const [key, value] of Object.entries(query)) queryString(value, prefix ? `${prefix}[${key}]` : key, out);
+  return out;
 }
 
-/** Returns a function that logs matches for a request, or null unless log mode applies. */
+/** Checks one request against a compiled checker and returns its matches. */
+function inspectRisks(checker, path, query, body) {
+  const text = typeof query === 'string' ? query : queryString(query).join('&');
+  return JSON.parse(checker.inspect(String(path || '/'), text, bodyBytes(body) || Buffer.alloc(0)));
+}
+
+const hasRisks = manifest => Object.values((manifest && manifest.routes) || {})
+  .some(entry => entry && Array.isArray(entry.injection_risks) && entry.injection_risks.length);
+
+/**
+ * Returns a function that checks a request, or null when there's nothing to check. The function
+ * returns a blocking finding in block mode, and null otherwise.
+ */
 function createObserver(options = {}) {
-  const mode = options.AIWAF_INJECTION_RISK_MODE ?? process.env.AIWAF_INJECTION_RISK_MODE ?? 'off';
-  if (String(mode).trim().toLowerCase() !== 'log') return null;
-  const routes = compileRisks(loadManifest(options.AIWAF_PATH_MANIFEST || undefined));
-  if (!routes.length) return null;
+  const mode = String(options.AIWAF_INJECTION_RISK_MODE ?? process.env.AIWAF_INJECTION_RISK_MODE ?? 'block').trim().toLowerCase();
+  if (!['block', 'log', 'off'].includes(mode)) throw new Error('AIWAF_INJECTION_RISK_MODE must be block, log, or off');
+  if (mode === 'off') return null;
+  const manifest = loadManifest(options.AIWAF_PATH_MANIFEST || undefined);
+  if (!hasRisks(manifest)) return null;
+  let checker = null;
   const logger = options.logger || console;
   // Adapters can inspect twice: before and after the body is parsed.
   const logged = new WeakMap();
   return req => {
-    // Log-only checks must never affect the request, whatever they receive.
+    let events;
     try {
       const url = String(req.path || req.url || '/');
       const raw = String(req.originalUrl || req.url || '').split('?').slice(1).join('?');
-      const events = inspectRisks(routes, url.split('?')[0], req.query ?? raw, req.body);
-      if (!events.length) return;
-      const seen = logged.get(req) || new Set();
-      logged.set(req, seen);
-      for (const event of events) {
-        const key = JSON.stringify(event);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        logger.warn?.({ event: 'aiwaf.injection_risk', mode: 'log', method: String(req.method || ''), ...event });
-      }
+      // Compiled on first use, after the middleware has loaded aiwaf-wasm.
+      checker = checker || compileRisks(manifest);
+      events = inspectRisks(checker, url.split('?')[0], raw || req.query, req.body);
     } catch (_) {
-      // Nothing to do: this is a diagnostic, not a protection.
+      // A failing check must not break the request. Other protections still apply.
+      return null;
     }
+    if (!events.length) return null;
+    const seen = logged.get(req) || new Set();
+    logged.set(req, seen);
+    for (const event of events) {
+      const key = JSON.stringify(event);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      try {
+        logger.warn?.({ event: 'aiwaf.injection_risk', mode, method: String(req.method || ''), ...event });
+      } catch (_) { /* Logging must not decide the outcome. */ }
+    }
+    return mode === 'block' ? { rule: events[0].rule, status: 403, mode: 'block' } : null;
   };
 }
 
@@ -302,14 +169,13 @@ function formatCounts(counts, manifestPath) {
 }
 
 module.exports = {
+  SINKS,
   applyReport,
   compileRisks,
-  compileRoute,
   createObserver,
   formatCounts,
   inputFromSource,
   inspectRisks,
-  requestInputs,
   ruleFor,
   updateManifest
 };

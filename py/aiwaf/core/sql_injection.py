@@ -1,21 +1,38 @@
-"""Bounded SQL signatures and body buffering that preserves downstream reads."""
+"""SQL injection checks and body buffering that preserves downstream reads.
+
+The check runs in aiwaf-rust (``policy_sql_inspect``), which is a required dependency: it walks
+the query and body, decodes values, parses nested JSON, applies the size limits and runs the SQL
+tokenizer in one call per request.
+"""
 from collections import deque
 from dataclasses import dataclass
 import io
 import json
 import logging
 import os
-import re
-from urllib.parse import unquote_plus
-from .native_runtime import function as native_function
+from . import rust_backend
 
 LOGGER = logging.getLogger("aiwaf.payload")
-RULES = tuple((name, re.compile(pattern, re.I)) for name, pattern in (
-    ("sql_union_select", r"\bunion\s+(?:all\s+)?select\b"),
-    ("sql_boolean_tautology", r"['\"`]\s*(?:or|and)\s+(?:true\b|\d+\s*=\s*\d+|['\"][^'\"\r\n]{0,80}['\"]\s*=\s*['\"])"),
-    ("sql_quote_comment", r"['\"`]\s*(?:--|#)"),
-    ("sql_stacked_statement", r";\s*(?:drop\s+table|delete\s+from|insert\s+into|update\s+\w+\s+set)\b"),
-))
+_RUST_NEEDED = ("policy_sql_inspect", "policy_sql_tokenizer", "policy_route_rule", "RouteRiskChecker")
+
+
+def rust():
+    """Return aiwaf-rust, which these checks require whatever AIWAF_USE_RUST says."""
+    module = rust_backend.aiwaf_rust
+    if module is None or not all(hasattr(module, name) for name in _RUST_NEEDED):
+        raise RuntimeError("AIWAF's request checks need aiwaf-rust 0.2.8 or newer. Run: pip install -U 'aiwaf-rust>=0.2.8'")
+    return module
+
+
+def _as_bytes(value):
+    """Turn a query or body into bytes. Parsed bodies are serialized as JSON first."""
+    if value is None:
+        return b""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value)
+    if isinstance(value, str):
+        return value.encode("utf-8", "surrogatepass")
+    return json.dumps(value).encode("utf-8")
 
 
 @dataclass(frozen=True)
@@ -33,93 +50,18 @@ class SQLInjectionPolicy:
         if isinstance(value, bool) or str(value) != str(int(value)) or not 1 <= int(value) <= 1048576:
             raise ValueError("AIWAF_PAYLOAD_MAX_BYTES must be 1..1048576")
         self.max_bytes = int(value)
+        self._inspect = rust().policy_sql_inspect
 
     def inspect(self, query=None, body=None):
         if self.mode == "off":
             return None
-        stack, seen, size, nodes = [(query, 0), (body, 0)], set(), 0, 0
-        batch_native = native_function('policy_sql_signatures')
-        single_native = native_function('policy_sql_signature') if batch_native is not None else None
-        immediate_checks = 0
-        pending = []
-
-        def flush():
-            if not pending:
-                return None
-            rule = batch_native(pending)
-            pending.clear()
-            return Finding(rule) if rule else None
-
-        while stack:
-            value, depth = stack.pop()
-            nodes += 1
-            if nodes > 4096 or depth > 16:
-                return flush() or Finding("payload_inspection_limit", 413)
-            if value is None:
-                continue
-            if isinstance(value, bytes):
-                if size + len(value) > self.max_bytes:
-                    return flush() or Finding("payload_inspection_limit", 413)
-                if b'\x00' in value or value.startswith((b'\xef\xbb\xbf', b'\xff\xfe', b'\xfe\xff')):
-                    try:
-                        parsed = json.loads(value)
-                    except (ValueError, UnicodeError, RecursionError):
-                        pass
-                    else:
-                        size += len(value)
-                        stack.append((parsed, depth + 1))
-                        continue
-                stack.append((value.decode("utf-8", errors="replace"), depth + 1))
-            elif isinstance(value, (dict, list, tuple)):
-                if id(value) in seen:
-                    return flush() or Finding("payload_inspection_limit", 413)
-                seen.add(id(value))
-                values = (item for pair in value.items() for item in pair) if isinstance(value, dict) else iter(value)
-                for item in values:
-                    stack.append((item, depth + 1))
-                    if len(stack) > 4096:
-                        return flush() or Finding("payload_inspection_limit", 413)
-            elif isinstance(value, str):
-                size += len(value.encode("utf-8", errors="replace"))
-                if size > self.max_bytes:
-                    return flush() or Finding("payload_inspection_limit", 413)
-                for _ in range(2):
-                    value = unquote_plus(value)
-                if value.lstrip().startswith(("{", "[")):
-                    try:
-                        stack.append((json.loads(value), depth + 1))
-                    except (ValueError, RecursionError):
-                        pass
-                if batch_native is not None and value.isascii():
-                    # Reject attacks near the start immediately rather than
-                    # preparing a complete batch before checking them.
-                    if immediate_checks < 8:
-                        immediate_checks += 1
-                        rule = single_native(value) if single_native is not None else batch_native([value])
-                        if rule:
-                            return Finding(rule)
-                        continue
-                    pending.append(value)
-                    if len(pending) >= 128:
-                        finding = flush()
-                        if finding:
-                            return finding
-                    continue
-                # Earlier ASCII findings retain precedence over Unicode checks.
-                finding = flush()
-                if finding:
-                    return finding
-                native = native_function('policy_sql_signature')
-                if native is not None and value.isascii():
-                    rule = native(value)
-                    if rule:
-                        return Finding(rule)
-                    continue
-                value = re.sub(r"/\*[\s\S]*?\*/", " ", value)
-                for name, pattern in RULES:
-                    if pattern.search(value):
-                        return Finding(name)
-        return flush()
+        try:
+            query, body = _as_bytes(query), _as_bytes(body)
+        except (ValueError, RecursionError):
+            # A body that can't be serialized, such as one that contains itself.
+            return Finding("payload_inspection_limit", 413)
+        found = self._inspect(query, body, self.max_bytes)
+        return Finding(*found) if found else None
 
     def enforce(self, finding):
         if finding and self.mode == "monitor":
@@ -150,10 +92,15 @@ class _PrefixStream(io.RawIOBase):
 
 
 def inspect_wsgi_request(request, policy, *, django=False, evaluator=None, observer=None):
-    """Read at most budget+1 bytes and prepend them for the application's parser."""
+    """Read at most budget+1 bytes and prepend them for the application's parser.
+
+    The observer runs route-specific checks and may return its own blocking finding.
+    """
     if policy.mode == "off":
         if observer is not None:
-            observer(request.META.get("QUERY_STRING", "") if django else request.query_string, None)
+            finding = observer(request.META.get("QUERY_STRING", "") if django else request.query_string, None)
+            if finding:
+                return finding
         if evaluator is not None:
             query = request.META.get("QUERY_STRING", "") if django else request.query_string
             return evaluator(query, None)
@@ -178,7 +125,9 @@ def inspect_wsgi_request(request, policy, *, django=False, evaluator=None, obser
             body = stream.read(policy.max_bytes + 1)
             request.stream = io.BufferedReader(_PrefixStream(body, stream))
     if observer is not None:
-        observer(query, body)
+        finding = observer(query, body)
+        if finding:
+            return finding
     return policy.enforce((evaluator or policy.inspect)(query, body))
 
 
@@ -186,7 +135,9 @@ async def inspect_asgi_request(request, policy, *, evaluator=None, observer=None
     """Replay exact ASGI messages, including an over-budget monitor-mode prefix."""
     if policy.mode == "off":
         if observer is not None:
-            observer(request.scope.get("query_string", b""), None)
+            finding = observer(request.scope.get("query_string", b""), None)
+            if finding:
+                return finding
         if evaluator is not None:
             return evaluator(request.scope.get("query_string", b""), None)
         return None
@@ -222,5 +173,7 @@ async def inspect_asgi_request(request, policy, *, evaluator=None, observer=None
                 return policy.enforce(Finding("payload_inspection_limit", 413))
     query = request.scope.get("query_string", b"")
     if observer is not None:
-        observer(query, body)
+        finding = observer(query, body)
+        if finding:
+            return finding
     return policy.enforce((evaluator or policy.inspect)(query, body))

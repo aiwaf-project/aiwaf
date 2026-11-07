@@ -155,7 +155,9 @@ function parseManifestArgs(args = []) {
   const options = {
     framework: 'express',
     output: process.env.AIWAF_PATH_MANIFEST || '.aiwaf/paths.json',
-    routes: []
+    routes: [],
+    source: '.',
+    audit: true
   };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -163,6 +165,10 @@ function parseManifestArgs(args = []) {
       options.framework = args[++index] || options.framework;
     } else if (arg === '--output' || arg === '-o') {
       options.output = args[++index] || options.output;
+    } else if (arg === '--source') {
+      options.source = args[++index] || options.source;
+    } else if (arg === '--no-audit') {
+      options.audit = false;
     } else if (arg === '--routes' || arg === '-r') {
       const routeFile = args[++index];
       options.routes = routeFile ? readJsonFile(routeFile) : [];
@@ -366,9 +372,17 @@ async function main() {
       options.framework,
       null,
       options.output,
-      { routes: options.routes }
+      { routes: options.routes, auditSource: options.audit ? options.source : null }
     );
-    return print({ ok: true, output: options.output, framework: options.framework, routes: Object.keys(manifest.routes || {}).length });
+    const audit = manifest.injection_audit;
+    return print({
+      ok: true,
+      output: options.output,
+      framework: options.framework,
+      routes: Object.keys(manifest.routes || {}).length,
+      injection_check_routes: Object.values(manifest.routes || {}).filter(entry => entry && entry.injection_risks).length,
+      unlinked_findings: audit ? audit.unlinked_findings : null
+    });
   }
 
   if (cmd === 'list' && subcmd === 'blocklist') {

@@ -8,13 +8,12 @@ from aiwaf.core import route_risks
 from aiwaf.core.injection_analysis import analyze_path, analyze_source
 from aiwaf.core.path_manifest import compile_manifest_to_path_rules, load_manifest
 from aiwaf.core.route_risks import (
+    SINKS,
     RouteRisks,
     apply_report,
-    compile_route,
     format_counts,
     input_from_source,
     observer_for,
-    request_inputs,
     rule_for,
     update_manifest,
 )
@@ -42,17 +41,6 @@ def write(tmp_path, manifest):
 @pytest.mark.parametrize("case", CASES["rules"], ids=lambda case: f"{case['sink']}:{case['value']}")
 def test_shared_rule_cases(case):
     assert rule_for(case["sink"], case["value"]) == case["rule"]
-
-
-@pytest.mark.parametrize("case", CASES["routes"], ids=lambda case: f"{case['route']}:{case['path']}")
-def test_shared_route_cases(case):
-    pattern, names = compile_route(case["route"])
-    match = pattern.match(case["path"])
-    if case["values"] is None:
-        assert match is None
-    else:
-        assert match is not None
-        assert {name: value for name, value in zip(names, match.groups()) if name} == case["values"]
 
 
 def test_only_the_named_input_is_checked():
@@ -89,8 +77,8 @@ def test_routes_without_saved_risks_get_nothing():
     risks = RouteRisks(manifest_with([{"sink": "path", "input": ""}]))
     assert risks.inspect("/health", "x=../y") == []
     assert risks.inspect("/other", "x=../y") == []
-    assert RouteRisks(None).routes == []
-    assert RouteRisks({"routes": "bad"}).routes == []
+    assert RouteRisks(None).empty
+    assert RouteRisks({"routes": "bad"}).empty
 
 
 def test_exact_routes_win_over_parameter_routes():
@@ -104,24 +92,6 @@ def test_exact_routes_win_over_parameter_routes():
 def test_repeated_matches_log_once():
     risks = RouteRisks(manifest_with([{"sink": "path", "input": ""}]))
     assert len(risks.inspect("/search", "a=../x&b=../y")) == 1
-
-
-def test_request_inputs_read_each_format():
-    assert ("q", "1") in request_inputs("q=1", None)
-    assert ("user", "user[$ne]") in request_inputs(b"user[$ne]=1", None)
-    assert ("a", "b") in request_inputs(None, b"a=b")
-    assert ("a", "b") in request_inputs(None, '{"a": ["b"]}')
-    assert ("", "plain") in request_inputs(None, b"plain")
-    assert ("", "{broken") in request_inputs(None, b"{broken")
-    assert request_inputs(None, None) == []
-
-
-def test_request_inputs_are_bounded():
-    deep = {"a": "x"}
-    for _ in range(20):
-        deep = {"a": deep}
-    assert ("a", "x") not in request_inputs(None, json.dumps(deep))
-    assert len(request_inputs("&".join(f"k{i}=v" for i in range(5000)), None)) <= 512
 
 
 def test_log_mode_logs_names_and_never_values(tmp_path, caplog):
@@ -138,11 +108,22 @@ def test_log_mode_logs_names_and_never_values(tmp_path, caplog):
     assert "evil_param_name" not in caplog.text
 
 
-@pytest.mark.parametrize("mode", ["off", "", "block", "monitor", None])
-def test_only_log_mode_turns_this_on(tmp_path, monkeypatch, mode):
+def test_block_mode_is_the_default_and_blocks(tmp_path, monkeypatch, caplog):
     monkeypatch.delenv(route_risks.MODE_SETTING, raising=False)
     path = write(tmp_path, manifest_with([{"sink": "path", "input": ""}]))
-    assert observer_for(mode, path, "/search") is None
+    with caplog.at_level(logging.WARNING, logger="aiwaf.injection_risk"):
+        finding = observer_for(None, path, "/search", "GET")("x=../y", None)
+    assert (finding.rule, finding.status) == ("path_traversal", 403)
+    assert json.loads(caplog.records[0].getMessage())["mode"] == "block"
+    assert observer_for("block", path, "/search")("x=fine", None) is None
+
+
+def test_off_turns_it_off_and_unknown_modes_are_rejected(tmp_path):
+    path = write(tmp_path, manifest_with([{"sink": "path", "input": ""}]))
+    assert observer_for("off", path, "/search") is None
+    for mode in ("", "monitor", "enforce"):
+        with pytest.raises(ValueError):
+            observer_for(mode, path, "/search")
 
 
 def test_the_environment_can_turn_on_log_mode(tmp_path, monkeypatch):
@@ -157,7 +138,7 @@ def test_a_missing_or_empty_manifest_turns_it_off(tmp_path):
 
 def test_a_failing_check_never_reaches_the_request(tmp_path, monkeypatch):
     observe = observer_for("log", write(tmp_path, manifest_with([{"sink": "path", "input": ""}])), "/search")
-    monkeypatch.setattr(route_risks, "request_inputs", lambda *_: 1 / 0)
+    monkeypatch.setattr(route_risks.RouteRisks, "inspect", lambda *_: 1 / 0)
     assert observe("a=../x", None) is None
 
 
@@ -278,3 +259,39 @@ def test_update_manifest_needs_an_existing_manifest(tmp_path):
         update_manifest({"findings": []}, str(tmp_path / "missing.json"))
     with pytest.raises(ValueError):
         apply_report({"findings": []}, {"routes": []})
+
+
+def test_audit_into_manifest_saves_findings_and_survives_failures(tmp_path, caplog):
+    from aiwaf.core.route_risks import audit_into_manifest, describe_audit
+
+    (tmp_path / "views.py").write_text("import os\ndef search(request):\n    os.system(request.GET['q'])\n", encoding="utf-8")
+    manifest = {"routes": {"/search": {"view": "views.search"}, "/x": {"view": "views.x"}}}
+    assert audit_into_manifest(manifest, None) is None
+    assert describe_audit(manifest) == "Injection checks: not run"
+    assert audit_into_manifest(manifest, str(tmp_path)) == {"routes": 1, "linked": 1, "unlinked": 0}
+    assert describe_audit(manifest) == "Injection checks: 1 routes from 1 files"
+    manifest["injection_audit"]["unlinked_findings"] = 2
+    assert "2 findings couldn't be tied" in describe_audit(manifest)
+    with caplog.at_level(logging.WARNING, logger="aiwaf.injection_risk"):
+        assert audit_into_manifest({"routes": {}}, str(tmp_path / "missing")) is None
+    assert "Injection audit skipped" in caplog.text
+
+
+ORDINARY = json.loads((Path(__file__).parents[1] / "fixtures" / "ordinary_text.json").read_text(encoding="utf-8"))["values"]
+
+
+@pytest.mark.parametrize("use_rust", [True, False])
+def test_no_rule_blocks_ordinary_text(use_rust):
+    from aiwaf.core.native_runtime import native_override
+
+    # The checks run in aiwaf-rust even when AIWAF_USE_RUST turns off the optional Rust paths.
+    with native_override(use_rust):
+        blocked = [(sink, value) for value in ORDINARY for sink in SINKS if rule_for(sink, value)]
+    assert blocked == []
+
+
+def test_request_formats_are_inputs():
+    risks = RouteRisks(manifest_with([{"sink": "path", "input": "a"}]))
+    for query, body in (("a=../x", None), (b"a=../x", None), (None, b"a=../x"), (None, '{"a": ["../x"]}'), (None, {"a": "../x"})):
+        assert risks.inspect("/search", query, body)[0]["rule"] == "path_traversal", (query, body)
+    assert RouteRisks(manifest_with([{"sink": "path", "input": ""}])).inspect("/search", None, b"../x")[0]["input"] == ""

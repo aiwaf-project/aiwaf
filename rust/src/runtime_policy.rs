@@ -334,18 +334,73 @@ pub fn policy_sql_signature(py: Python<'_>, text: String) -> Option<String> {
     py.allow_threads(|| sql_signature(&text))
 }
 
+/// Returns the SQL tokenizer's rule for a value. The name is kept from the signature rules it
+/// replaced, so callers and older Python releases keep working.
 pub(crate) fn sql_signature(text: &str) -> Option<String> {
-    static COMMENTS: OnceLock<Regex> = OnceLock::new();
-    static RULES: OnceLock<Vec<(&str, Regex)>> = OnceLock::new();
-    let text = COMMENTS
-        .get_or_init(|| Regex::new(r"/\*[\s\S]*?\*/").unwrap())
-        .replace_all(text, " ");
-    RULES.get_or_init(|| vec![
-            ("sql_union_select", Regex::new(r"(?i)\bunion\s+(?:all\s+)?select\b").unwrap()),
-            ("sql_boolean_tautology", Regex::new(r#"(?i)['"`]\s*(?:or|and)\s*(?:true\b|\d+\s*=\s*\d+|['"][^'"\r\n]{0,80}['"]\s*=\s*['"])"#).unwrap()),
-            ("sql_quote_comment", Regex::new(r#"(?i)['"`]\s*(?:--|#)"#).unwrap()),
-            ("sql_stacked_statement", Regex::new(r"(?i);\s*(?:drop\s+table|delete\s+from|insert\s+into|update\s+\w+\s+set)\b").unwrap()),
-        ]).iter().find(|(_, rule)| rule.is_match(&text)).map(|(name, _)| (*name).to_owned())
+    aiwaf_core::sql::classify_fields(text).map(str::to_owned)
+}
+
+/// Checks a request's query and buffered body for SQL injection. Returns (rule, status):
+/// 403 for an attack and 413 when the request is too large to inspect, or None.
+#[pyfunction]
+pub fn policy_sql_inspect(py: Python<'_>, query: Vec<u8>, body: Vec<u8>, max_bytes: usize) -> Option<(String, i32)> {
+    py.allow_threads(|| aiwaf_core::payload::inspect_sql(&query, &body, max_bytes, false))
+}
+
+/// Returns the first route-check rule for this operation that matches the value.
+#[pyfunction]
+pub fn policy_route_rule(py: Python<'_>, sink: String, value: String) -> Option<String> {
+    py.allow_threads(|| aiwaf_core::route_risks::rule_for(&sink, &value))
+}
+
+/// Route-specific checks compiled from a manifest's saved audit findings.
+#[pyclass(name = "RouteRiskChecker")]
+pub struct RouteRiskChecker {
+    risks: aiwaf_core::route_risks::RouteRisks,
+}
+
+#[pymethods]
+impl RouteRiskChecker {
+    /// Compiles a manifest given as JSON text. Text that isn't a manifest gives no checks.
+    #[new]
+    fn new(manifest_json: &str) -> Self {
+        let manifest = serde_json::from_str(manifest_json).unwrap_or(serde_json::Value::Null);
+        Self { risks: aiwaf_core::route_risks::RouteRisks::new(&manifest) }
+    }
+
+    #[getter]
+    fn empty(&self) -> bool {
+        self.risks.is_empty()
+    }
+
+    /// Returns (route, sink, input, rule, confidence) for each match.
+    fn inspect(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        query: &str,
+        body: Vec<u8>,
+    ) -> Vec<(String, String, String, String, String)> {
+        py.allow_threads(|| {
+            self.risks
+                .inspect(path, query, &body)
+                .into_iter()
+                .map(|e| (e.route, e.sink, e.input, e.rule, e.confidence))
+                .collect()
+        })
+    }
+}
+
+/// Returns the tokenizer's rule when a value breaks out of a SQL value.
+#[pyfunction]
+pub fn policy_sql_tokenizer(py: Python<'_>, text: String) -> Option<String> {
+    py.allow_threads(|| aiwaf_core::sql::classify(&text).map(str::to_owned))
+}
+
+/// Returns the first tokenizer rule across values, crossing the binding once.
+#[pyfunction]
+pub fn policy_sql_tokenizers(py: Python<'_>, texts: Vec<String>) -> Option<String> {
+    py.allow_threads(|| texts.iter().find_map(|text| aiwaf_core::sql::classify(text)).map(str::to_owned))
 }
 
 /// Preserve first-value/first-rule order while crossing the binding once.
@@ -357,6 +412,11 @@ pub fn policy_sql_signatures(py: Python<'_>, texts: Vec<String>) -> Option<Strin
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(policy_sql_signature, m)?)?;
     m.add_function(wrap_pyfunction!(policy_sql_signatures, m)?)?;
+    m.add_function(wrap_pyfunction!(policy_sql_tokenizer, m)?)?;
+    m.add_function(wrap_pyfunction!(policy_sql_inspect, m)?)?;
+    m.add_function(wrap_pyfunction!(policy_route_rule, m)?)?;
+    m.add_class::<RouteRiskChecker>()?;
+    m.add_function(wrap_pyfunction!(policy_sql_tokenizers, m)?)?;
     m.add_function(wrap_pyfunction!(policy_keyword_flask, m)?)?;
     m.add_function(wrap_pyfunction!(policy_rate, m)?)?;
     m.add_function(wrap_pyfunction!(policy_geo, m)?)?;
@@ -588,25 +648,22 @@ mod tests {
     }
 
     #[test]
-    fn sql_signatures_detect_common_attacks() {
+    fn sql_checks_use_the_tokenizer() {
         for (text, rule) in [
-            ("1 UNION ALL SELECT password", "sql_union_select"),
-            ("x' OR 1=1", "sql_boolean_tautology"),
-            ("x'--", "sql_quote_comment"),
-            ("1; DROP TABLE users", "sql_stacked_statement"),
+            ("1 UNION ALL SELECT password", "sql_breakout_numeric"),
+            ("x' OR 1=1--", "sql_breakout_single_quote"),
+            ("x'--", "sql_breakout_single_quote"),
+            ("1; DROP TABLE users", "sql_breakout_numeric"),
+            ("id=1 OR 1=1&page=2", "sql_breakout_numeric"),
+            ("1 /*!50000UNION*/ SELECT 1", "sql_breakout_numeric"),
         ] {
             assert_eq!(sql_signature(text).as_deref(), Some(rule), "{text}");
         }
     }
 
     #[test]
-    fn sql_signatures_see_through_inline_comments() {
-        assert_eq!(sql_signature("1 union/**/select 2").as_deref(), Some("sql_union_select"));
-    }
-
-    #[test]
     fn sql_signatures_ignore_normal_text() {
-        for text in ["", "credit union selection", "it's a nice day", "select a seat"] {
+        for text in ["", "credit union selection", "it's a nice day", "select a seat", "\"Item\" #3"] {
             assert_eq!(sql_signature(text), None, "{text}");
         }
     }

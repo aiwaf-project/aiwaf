@@ -143,6 +143,15 @@ def _needs_rust_build(args: argparse.Namespace) -> bool:
     return not (args.js_only or args.wasm_only or args.no_rust_build)
 
 
+def _needs_wasm_build(args: argparse.Namespace) -> bool:
+    return not (args.python_only or args.rust_only or args.no_rust_build)
+
+
+def _wasm_build_task() -> TestTask:
+    """Node.js needs aiwaf-wasm, so its tests use the WASM built from this checkout."""
+    return TestTask("WASM / build aiwaf-wasm from source", (sys.executable, "scripts/build_wasm_from_source.py"))
+
+
 def _rust_build_problem() -> str | None:
     if shutil.which("cargo") is None:
         return "Rust is required to build aiwaf-rust, but cargo wasn't found. Install it from https://rustup.rs."
@@ -274,7 +283,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-rust-build",
         action="store_true",
-        help="Test the installed aiwaf-rust instead of building it from this repository first.",
+        help="Test the installed aiwaf-rust and aiwaf-wasm instead of building them from this repository first.",
     )
     return parser.parse_args(argv)
 
@@ -332,6 +341,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     results: list[tuple[str, bool, float]] = []
     if _needs_rust_build(args) and not _build_rust(results):
         return _print_summary(results)
+    if _needs_wasm_build(args):
+        passed, duration = _run_task(_wasm_build_task())
+        results.append(("WASM / build aiwaf-wasm from source", passed, duration))
+        if not passed:
+            return _print_summary(results)
 
     for task in tasks:
         passed, duration = _run_task(task)

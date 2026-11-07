@@ -312,21 +312,6 @@ def test_native_presence_updates_preserve_other_workers(native, tmp_path):
     assert len(native.csv_read_set(path, 'keyword', True)) == 29
 
 
-def test_sql_native_signature_parity(native, monkeypatch):
-    from aiwaf.core.sql_injection import SQLInjectionPolicy
-    samples = ['normal search', "x UNION SELECT password", "x union/**/select y",
-        "x' or 1=1", "x' AND true", "' OR 'a'='a'", "x'--", 'x;drop table users',
-        'x; update users set name=1', 'union%2520select', '{"key":"union select"}',
-        'UNION ALL SELECT', 'unionselector', 'éunion select']
-    rng = random.Random(42)
-    samples += [''.join(rng.choice('union SELECT0123;\'/*- _') for _ in range(80)) for _ in range(100)]
-    for sample in samples:
-        monkeypatch.setattr(rust_backend, 'aiwaf_rust', None)
-        expected = SQLInjectionPolicy().inspect(body=sample)
-        monkeypatch.setattr(rust_backend, 'aiwaf_rust', native)
-        assert SQLInjectionPolicy().inspect(body=sample) == expected
-
-
 def test_flask_csv_rate_backend_selection(native, tmp_path):
     from flask import Flask
     from aiwaf.flask.rate_limit_middleware import _resolve_rate_cache_backend

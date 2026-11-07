@@ -19,6 +19,7 @@ on:
       - ".github/actions/setup-python-from-source/**"
       - "scripts/check_rust_source_build.py"
       - "scripts/stage_rust_package_files.py"
+      - "scripts/build_wasm_from_source.py"
   pull_request:
     branches: [main]
     paths:
@@ -37,6 +38,7 @@ on:
       - ".github/actions/setup-python-from-source/**"
       - "scripts/check_rust_source_build.py"
       - "scripts/stage_rust_package_files.py"
+      - "scripts/build_wasm_from_source.py"
 
 permissions:
   contents: read
@@ -68,6 +70,17 @@ jobs:
 
       - name: Install JavaScript dependencies
         run: npm ci --prefix js
+
+      - name: Install wasm-pack
+        run: |
+          rustup target add wasm32-unknown-unknown
+          command -v wasm-pack || cargo install wasm-pack --locked
+
+      - name: Build aiwaf-wasm from source for Node.js
+        run: python scripts/build_wasm_from_source.py
+
+      - name: Report SQL detector accuracy
+        run: python scripts/sql_accuracy.py
 
       - name: Run monorepo test suite
         run: python aiwaf_test.py --coverage --no-rust-build

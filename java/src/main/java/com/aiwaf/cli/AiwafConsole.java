@@ -147,8 +147,8 @@ public final class AiwafConsole {
                 "  aiwaf-cli replay --cases <cases.json>",
                 "  aiwaf-cli model status [--path <model.json>]",
                 "  aiwaf-cli logs [--dir aiwaf_logs]",
-                "  aiwaf-cli init --app <SpringApplicationClass> [--output .aiwaf/paths.json]",
-                "  aiwaf-cli init --source <folder> [--output .aiwaf/paths.json]",
+                "  aiwaf-cli init --app <SpringApplicationClass> [--output .aiwaf/paths.json] [--audit-source <folder>] [--no-audit]",
+                "  aiwaf-cli init --source <folder> [--output .aiwaf/paths.json] [--no-audit]",
                 "  aiwaf-cli audit [path] [--format text|json] [--output file] [--include-tests] [--fail-on-findings] [--manifest file]",
                 "  aiwaf-cli generate-manifest [output.json] --class <ControllerClassName>"
         );
@@ -275,8 +275,12 @@ public final class AiwafConsole {
             try {
                 com.aiwaf.core.JavaSourceAnalysisCore.Report report =
                         com.aiwaf.core.JavaSourceAnalysisCore.analyze(java.nio.file.Path.of(sourceRoot), false);
-                Map<String, Object> manifest =
-                        com.aiwaf.core.PathManifestCore.buildManifestFromSource("java-source", report.routes());
+                Map<String, Object> manifest = new java.util.LinkedHashMap<>(
+                        com.aiwaf.core.PathManifestCore.buildManifestFromSource("java-source", report.routes()));
+                if (!hasFlag(args, "--no-audit")) {
+                    // The same parse found the routes and the injection findings.
+                    com.aiwaf.core.RouteRiskCore.applyReport(report, manifest);
+                }
                 com.aiwaf.core.PathManifestCore.writeManifest(manifest, java.nio.file.Path.of(output));
                 printManifestSummary(output, manifest);
                 report.errors().forEach(error -> System.err.println(error.get("file") + ": not analyzed: " + error.get("error")));
@@ -291,6 +295,7 @@ public final class AiwafConsole {
         if (appName != null) {
             Map<String, Object> manifest = com.aiwaf.spring.SpringPathManifest.launchAndGenerate(appName, output);
             printManifestSummary(output, manifest);
+            auditIntoManifest(args, output);
             return;
         }
         String clsName = parseOption(args, "--class");
@@ -305,8 +310,34 @@ public final class AiwafConsole {
                     com.aiwaf.core.PathManifestCore.discoverControllerRoutes(cls);
             com.aiwaf.core.PathManifestCore.generateManifest(routes, output);
             printManifestSummary(output, com.aiwaf.core.PathManifestCore.buildManifest("spring", routes));
+            auditIntoManifest(args, output);
         } catch (Exception e) {
             System.err.println("Error generating manifest: " + e.getMessage());
+        }
+    }
+
+    private static boolean hasFlag(String[] args, String flag) {
+        return java.util.Arrays.asList(args).contains(flag);
+    }
+
+    /** Saves injection findings from source into a written manifest. A failed scan leaves it unchanged. */
+    static void auditIntoManifest(String[] args, String output) {
+        if (hasFlag(args, "--no-audit")) {
+            return;
+        }
+        String source = parseOption(args, "--audit-source");
+        if (source == null) {
+            source = java.nio.file.Files.isDirectory(java.nio.file.Path.of("src", "main", "java")) ? "src/main/java" : ".";
+        }
+        try {
+            com.aiwaf.core.JavaSourceAnalysisCore.Report report =
+                    com.aiwaf.core.JavaSourceAnalysisCore.analyze(java.nio.file.Path.of(source), false);
+            System.out.println("Injection checks: " + com.aiwaf.core.RouteRiskCore.formatCounts(
+                    com.aiwaf.core.RouteRiskCore.updateManifest(report, java.nio.file.Path.of(output)), output));
+        } catch (IOException | RuntimeException ex) {
+            System.err.println("Injection audit skipped: " + ex.getMessage());
+        } catch (LinkageError ex) {
+            System.err.println("Injection audit skipped: source analysis needs a JDK, and this Java runtime has no compiler.");
         }
     }
 

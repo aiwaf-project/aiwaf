@@ -1,5 +1,7 @@
 const rateLimiter = require('./rateLimiter');
 const { createInspector } = require('./sqlInjection');
+const wasmChecks = require('./wasmChecks');
+const routeRisks = require('./routeRisks');
 const blocklistManager = require('./blocklistManager');
 const keywordDetector = require('./keywordDetector');
 const dynamicKeyword = require('./dynamicKeyword');
@@ -146,7 +148,10 @@ module.exports = function aiwaf(rawOpts = {}) {
   opts.AIWAF_MIDDLEWARES = normalizedMiddlewareList(opts.AIWAF_MIDDLEWARES);
   opts.AIWAF_DISABLE_MIDDLEWARES = normalizedMiddlewareList(opts.AIWAF_DISABLE_MIDDLEWARES) || [];
   const pathRules = getEffectivePathRules(opts.AIWAF_PATH_RULES, { manifestPath: opts.AIWAF_PATH_MANIFEST });
-  const observeRisks = require('./routeRisks').createObserver(opts);
+  const observeRisks = routeRisks.createObserver(opts);
+  // The SQL check and route checks run in aiwaf-wasm. Requests wait for it, and fail if it's missing.
+  const checksReady = wasmChecks.load();
+  checksReady.catch(() => {});
 
   let enabledMiddlewares = planEnabledMiddlewares({
     orderedAvailable: [
@@ -195,7 +200,9 @@ module.exports = function aiwaf(rawOpts = {}) {
     const plan = createRoutePlan(path, pathRules, req.aiwafRoute || {});
     if (!enabledMiddlewares.has('ip_keyword_block') || !plan.shouldApply('ip_keyword_block')
         || await exemptions.isExemptRequest(ip, path)) return null;
-    if (observeRisks) observeRisks(req);
+    await checksReady;
+    const riskFinding = observeRisks ? observeRisks(req) : null;
+    if (riskFinding) return riskFinding;
     const finding = inspectSql(req);
     if (finding?.mode === 'monitor') {
       (opts.logger || console).warn?.({ event: 'aiwaf.payload', rule: finding.rule, mode: finding.mode });

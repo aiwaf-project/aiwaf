@@ -803,20 +803,12 @@ fn decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 fn inspect(value: &Value, max_bytes: usize) -> Option<(u16, &'static str)> {
-    static RULES: OnceLock<Vec<(&str, Regex)>> = OnceLock::new();
-    static COMMENTS: OnceLock<Regex> = OnceLock::new();
-    let rules=RULES.get_or_init(||vec![
-        ("sql_union_select",Regex::new(r"(?i)\bunion\s+(?:all\s+)?select\b").unwrap()),
-        ("sql_boolean_tautology",Regex::new(r#"(?i)['"`]\s*(?:or|and)\s+(?:true\b|\d+\s*=\s*\d+|['"][^'"\r\n]{0,80}['"]\s*=\s*['"])"#).unwrap()),
-        ("sql_quote_comment",Regex::new(r#"['"`]\s*(?:--|#)"#).unwrap()),
-        ("sql_stacked_statement",Regex::new(r"(?i);\s*(?:drop\s+table|delete\s+from|insert\s+into|update\s+\w+\s+set)\b").unwrap())]);
     fn visit(
         v: &Value,
         depth: usize,
         nodes: &mut usize,
         bytes: &mut usize,
         max: usize,
-        rules: &[(&str, Regex)],
     ) -> Option<(u16, &'static str)> {
         *nodes += 1;
         if *nodes > 4096 || depth > 16 {
@@ -834,31 +826,18 @@ fn inspect(value: &Value, max_bytes: usize) -> Option<(u16, &'static str)> {
                 let normalized = decode(&decode(s));
                 if normalized.trim_start().starts_with(['{', '[']) {
                     if let Ok(parsed) = serde_json::from_str::<Value>(&normalized) {
-                        if let Some(k) = visit(&parsed, depth + 1, nodes, bytes, max, rules) {
+                        if let Some(k) = visit(&parsed, depth + 1, nodes, bytes, max) {
                             return Some(k);
                         }
                     }
                 }
-                let clean = COMMENTS
-                    .get_or_init(|| Regex::new(r"(?s)/\*.*?\*/").unwrap())
-                    .replace_all(&normalized, " ");
-                for (k, re) in rules {
-                    if re.is_match(&clean) {
-                        return Some((
-                            403,
-                            match *k {
-                                "sql_union_select" => "sql_union_select",
-                                "sql_boolean_tautology" => "sql_boolean_tautology",
-                                "sql_quote_comment" => "sql_quote_comment",
-                                _ => "sql_stacked_statement",
-                            },
-                        ));
-                    }
+                if let Some(rule) = aiwaf_core::sql::classify_fields(&normalized) {
+                    return Some((403, rule));
                 }
             }
             Value::Array(items) => {
                 for v in items {
-                    if let Some(k) = visit(v, depth + 1, nodes, bytes, max, rules) {
+                    if let Some(k) = visit(v, depth + 1, nodes, bytes, max) {
                         return Some(k);
                     }
                 }
@@ -871,9 +850,8 @@ fn inspect(value: &Value, max_bytes: usize) -> Option<(u16, &'static str)> {
                         nodes,
                         bytes,
                         max,
-                        rules,
                     )
-                    .or_else(|| visit(v, depth + 1, nodes, bytes, max, rules))
+                    .or_else(|| visit(v, depth + 1, nodes, bytes, max))
                     {
                         return Some(k);
                     }
@@ -883,7 +861,7 @@ fn inspect(value: &Value, max_bytes: usize) -> Option<(u16, &'static str)> {
         }
         None
     }
-    visit(value, 0, &mut 0, &mut 0, max_bytes, rules)
+    visit(value, 0, &mut 0, &mut 0, max_bytes)
 }
 
 #[cfg(test)]
@@ -1042,7 +1020,7 @@ mod tests {
             effects["log_csv"]
                 .as_str()
                 .unwrap()
-                .contains(",true,sql_boolean_tautology,")
+                .contains(",true,sql_breakout_single_quote,")
         );
         r["ip"] = json!("b");
         r["path"] = json!("/health");

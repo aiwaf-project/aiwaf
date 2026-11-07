@@ -47,7 +47,11 @@ async function loadWasmFromDisk() {
     python_feature_from_record: bg.python_feature_from_record,
     python_features_batched: bg.python_features_batched,
     NativeRequestPipeline: bg.NativeRequestPipeline,
-    NativeTrainingEvidence: bg.NativeTrainingEvidence
+    NativeTrainingEvidence: bg.NativeTrainingEvidence,
+    RouteRiskChecker: bg.RouteRiskChecker,
+    route_rule: bg.route_rule,
+    sql_inspect: bg.sql_inspect,
+    sql_tokenizer: bg.sql_tokenizer
   };
 }
 
@@ -560,6 +564,7 @@ async function createTrainingEvidence(state) {
 }
 
 module.exports = {
+  loadWasm,
   createTrainingEvidence,
   createRequestPipeline,
   createIsolationForest,

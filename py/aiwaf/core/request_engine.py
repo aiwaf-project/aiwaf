@@ -6,7 +6,6 @@ import time
 
 _DEFAULT_INSPECT = sql_injection.SQLInjectionPolicy.inspect
 _DEFAULT_ENFORCE = sql_injection.SQLInjectionPolicy.enforce
-_DEFAULT_RULES = sql_injection.RULES
 _DEFAULT_KEYWORD = ip_keyword.evaluate_keyword_policy
 _DEFAULT_KEYWORD_RULES = (ip_keyword.PROBE_PATH_PATTERNS, ip_keyword.INHERENTLY_MALICIOUS_PATTERNS, ip_keyword.VERY_STRONG_ATTACK_PATTERNS)
 
@@ -14,11 +13,11 @@ _DEFAULT_KEYWORD_RULES = (ip_keyword.PROBE_PATH_PATTERNS, ip_keyword.INHERENTLY_
 def prepare_request_engine(owner, *, enabled, policy, path, query_context, query_keys,
         exists, learning, top_n, file, counts, static, legitimate, exempt, prefixes, malicious, sql_prechecked=False):
     factory = function('NativeRequestEngine') if enabled else None
-    if (factory is None or policy.mode not in {'block', 'off'} or top_n < 0
+    # Older aiwaf-rust builds check SQL with signature rules, so only a build with the tokenizer qualifies.
+    if (factory is None or function('policy_sql_tokenizer') is None or policy.mode not in {'block', 'off'} or top_n < 0
             or type(policy) is not sql_injection.SQLInjectionPolicy
             or getattr(policy.inspect, '__func__', None) is not _DEFAULT_INSPECT
             or getattr(policy.enforce, '__func__', None) is not _DEFAULT_ENFORCE
-            or sql_injection.RULES is not _DEFAULT_RULES
             or ip_keyword.evaluate_keyword_policy is not _DEFAULT_KEYWORD
             or any(current is not original for current, original in zip(
                 (ip_keyword.PROBE_PATH_PATTERNS, ip_keyword.INHERENTLY_MALICIOUS_PATTERNS, ip_keyword.VERY_STRONG_ATTACK_PATTERNS), _DEFAULT_KEYWORD_RULES))

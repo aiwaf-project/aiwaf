@@ -139,3 +139,35 @@ def test_main_dispatches_audit(monkeypatch, tmp_path, capsys):
 
     assert stopped.value.code == 1
     assert "os.system" in capsys.readouterr().out
+
+
+FLASK_APP_WITH_SQL = (
+    "from flask import Flask, request\n"
+    "app = Flask(__name__)\n"
+    "@app.get('/search')\n"
+    "def search():\n"
+    "    return db.execute('SELECT * FROM t WHERE q = ' + request.args['q'])\n"
+    "@app.get('/health')\n"
+    "def health():\n"
+    "    return 'ok'\n"
+)
+
+
+@pytest.mark.parametrize("no_audit", [False, True])
+def test_init_saves_injection_checks_unless_asked_not_to(monkeypatch, tmp_path, capsys, no_audit):
+    pytest.importorskip("flask")
+    _drop_app_module()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "app.py").write_text(FLASK_APP_WITH_SQL, encoding="utf-8")
+
+    _handle_init(["--framework", "flask", "--app", "app:app"] + (["--no-audit"] if no_audit else []))
+
+    routes = json.loads((tmp_path / ".aiwaf" / "paths.json").read_text(encoding="utf-8"))["routes"]
+    output = capsys.readouterr().out
+    if no_audit:
+        assert "injection_risks" not in routes["/search"]
+        assert "Injection checks: not run" in output
+    else:
+        assert routes["/search"]["injection_risks"] == [{"confidence": "high", "input": "q", "sink": "sql"}]
+        assert "injection_risks" not in routes["/health"]
+        assert "Injection checks: 1 routes from 1 files" in output

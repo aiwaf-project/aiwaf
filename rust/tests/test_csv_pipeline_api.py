@@ -8,10 +8,10 @@ import aiwaf_rust
 def test_wheel_exposes_complete_csv_pipeline(tmp_path):
     engine = aiwaf_rust.NativeCSVPipeline(json.dumps({
         'data_dir':str(tmp_path), 'enabled':['ip_keyword_block', 'logging'], 'exempt_paths':[]}))
-    context, status, payload = engine.begin('8.8.8.8', '/docs', 'GET', {}, b'q=union+select', b'',
+    context, status, payload = engine.begin('8.8.8.8', '/docs', 'GET', {}, b'q=1+union+select+2', b'',
         True, True, True, True, False, set(), False, 100., '2026-10-12T00:00:00+00:00')
     assert status == 403
-    assert json.loads(payload)['error'] == 'sql_union_select'
+    assert json.loads(payload)['error'] == 'sql_breakout_numeric'
     assert engine.finish(context, status, 100.1, str(len(payload)))[0] == 403
     assert engine.processed_requests == 1
     with (tmp_path / 'requests.csv').open(newline='') as file:
