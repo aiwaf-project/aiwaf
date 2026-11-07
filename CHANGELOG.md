@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Java: read the first client field in access logs, retaining IPv6, IPv4-mapped
+  IPv6, and hostname fields verbatim, matching the Python parser. Later IPv4
+  fields no longer replace the client address during ingestion.
+
 ## Python 1.1.8 / Rust-Python 0.2.7 / Node.js 1.1.5 / WASM 0.2.5 / Java 1.3.5 — prepared release
 
 - **Security:** Python and Node.js no longer let a client choose its own address with
