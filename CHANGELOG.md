@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Java: read the first client field in access logs, retaining IPv6, IPv4-mapped
+  IPv6, and hostname fields verbatim, matching the Python parser. Later IPv4
+  fields no longer replace the client address during ingestion.
+
 - Add `audit` to the Python, Node.js and Java command lines. It parses source without
   running it and reports where request input can reach dangerous operations. It's
   report-only and doesn't affect request handling.
