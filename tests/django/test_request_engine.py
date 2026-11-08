@@ -28,4 +28,4 @@ class RequestEngineTests(TestCase):
             assert middleware(factory.get('/safe', REMOTE_ADDR='203.0.113.97')).status_code == 200
             assert hasattr(middleware, '_native_request_engine_profile')
             with patch('aiwaf.django.middleware.path_exists_in_django', side_effect=AssertionError('SQL must run first')):
-                assert middleware(factory.get('/safe?q=1+UNION+SELECT', REMOTE_ADDR='203.0.113.97')).status_code == 403
+                assert middleware(factory.get('/safe?q=1+UNION+SELECT+1', REMOTE_ADDR='203.0.113.97')).status_code == 403

@@ -1,5 +1,7 @@
 const rateLimiter = require('./rateLimiter');
 const { createInspector } = require('./sqlInjection');
+const wasmChecks = require('./wasmChecks');
+const routeRisks = require('./routeRisks');
 const blocklistManager = require('./blocklistManager');
 const keywordDetector = require('./keywordDetector');
 const dynamicKeyword = require('./dynamicKeyword');
@@ -12,7 +14,7 @@ const geoBlocker = require('./geoBlocker');
 const middlewareLogger = require('./middlewareLogger');
 const exemptions = require('./exemptions');
 const requestLogStore = require('./requestLogStore');
-const { extractExtendedRequestInfo } = require('./runtimeUtils');
+const { extractExtendedRequestInfo, getRequestIp } = require('./runtimeUtils');
 const { extractFeatures, init: initFeatureUtils, markRequestStart, STATIC_KW } = require('./featureUtils');
 const { normalizeSettings } = require('./settingsCompat');
 const {
@@ -146,6 +148,10 @@ module.exports = function aiwaf(rawOpts = {}) {
   opts.AIWAF_MIDDLEWARES = normalizedMiddlewareList(opts.AIWAF_MIDDLEWARES);
   opts.AIWAF_DISABLE_MIDDLEWARES = normalizedMiddlewareList(opts.AIWAF_DISABLE_MIDDLEWARES) || [];
   const pathRules = getEffectivePathRules(opts.AIWAF_PATH_RULES, { manifestPath: opts.AIWAF_PATH_MANIFEST });
+  const observeRisks = routeRisks.createObserver(opts);
+  // The SQL check and route checks run in aiwaf-wasm. Requests wait for it, and fail if it's missing.
+  const checksReady = wasmChecks.load();
+  checksReady.catch(() => {});
 
   let enabledMiddlewares = planEnabledMiddlewares({
     orderedAvailable: [
@@ -190,10 +196,13 @@ module.exports = function aiwaf(rawOpts = {}) {
 
   const inspectPayload = async req => {
     const path = String(req.path || req.url || '/').split('?')[0].toLowerCase();
-    const ip = req.headers?.['x-forwarded-for']?.split(',')[0].trim() || req.ip;
+    const ip = getRequestIp(req, opts.AIWAF_TRUSTED_PROXIES);
     const plan = createRoutePlan(path, pathRules, req.aiwafRoute || {});
     if (!enabledMiddlewares.has('ip_keyword_block') || !plan.shouldApply('ip_keyword_block')
         || await exemptions.isExemptRequest(ip, path)) return null;
+    await checksReady;
+    const riskFinding = observeRisks ? observeRisks(req) : null;
+    if (riskFinding) return riskFinding;
     const finding = inspectSql(req);
     if (finding?.mode === 'monitor') {
       (opts.logger || console).warn?.({ event: 'aiwaf.payload', rule: finding.rule, mode: finding.mode });
@@ -202,8 +211,9 @@ module.exports = function aiwaf(rawOpts = {}) {
     return finding;
   };
   const middleware = async (req, res, next) => {
-    const ipHdr = req.headers['x-forwarded-for'];
-    const ip = ipHdr ? ipHdr.split(',')[0].trim() : req.ip;
+    const ip = getRequestIp(req, opts.AIWAF_TRUSTED_PROXIES);
+    // Geo checks and logging must judge the same address as this middleware.
+    req.aiwafClientIp = ip;
     const path = String(req.path || req.url || '/').toLowerCase();
     const method = String(req.method || 'GET').toUpperCase();
     if (isAutoSelection(opts.AIWAF_MIDDLEWARES)) {

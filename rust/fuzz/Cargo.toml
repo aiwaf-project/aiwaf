@@ -1,0 +1,39 @@
+[package]
+name = "aiwaf-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Elastic-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+aiwaf_core = { path = "../crates/aiwaf_core" }
+serde_json = "1"
+
+# Kept out of the main workspace: it needs nightly and cargo-fuzz.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "sql_tokenizer"
+path = "fuzz_targets/sql_tokenizer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "request_walker"
+path = "fuzz_targets/request_walker.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "route_checks"
+path = "fuzz_targets/route_checks.rs"
+test = false
+doc = false
+bench = false

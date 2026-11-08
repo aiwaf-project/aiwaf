@@ -212,6 +212,84 @@ pub fn validate_headers_with_config(
     .map_err(|e| e.into())
 }
 
+/// Checks a request's raw query string and buffered body for SQL injection. Returns
+/// `{"rule": ..., "status": 403 | 413}` as JSON, or `null`.
+#[wasm_bindgen]
+pub fn sql_inspect(query: &[u8], body: &[u8], max_bytes: usize) -> String {
+    match aiwaf_core::payload::inspect_sql(query, body, max_bytes, false) {
+        Some((rule, status)) => serde_json::json!({"rule": rule, "status": status}).to_string(),
+        None => "null".into(),
+    }
+}
+
+/// Checks request headers for SQL injection: cookie names and values, the Referer's query
+/// string and path, and any other header except those holding credentials, framing or
+/// browser-set values. Takes a
+/// JSON array of [name, value] pairs and returns JSON like `sql_inspect`.
+#[wasm_bindgen]
+pub fn sql_inspect_headers(headers_json: &str, max_bytes: usize) -> String {
+    let headers: Vec<(String, String)> = serde_json::from_str(headers_json).unwrap_or_default();
+    match aiwaf_core::payload::inspect_sql_headers(headers.iter().map(|(n, v)| (n.as_str(), v.as_str())), max_bytes) {
+        Some((rule, status)) => serde_json::json!({"rule": rule, "status": status}).to_string(),
+        None => "null".into(),
+    }
+}
+
+/// Checks a URL path for SQL injection, one segment at a time. Returns JSON {rule, status} or null.
+#[wasm_bindgen]
+pub fn sql_inspect_path(path: &str, max_bytes: usize) -> String {
+    match aiwaf_core::payload::inspect_sql_path(path, max_bytes) {
+        Some((rule, status)) => serde_json::json!({"rule": rule, "status": status}).to_string(),
+        None => "null".into(),
+    }
+}
+
+/// Returns the SQL tokenizer's rule for one value, or undefined.
+#[wasm_bindgen]
+pub fn sql_tokenizer(value: &str) -> Option<String> {
+    aiwaf_core::sql::classify(value).map(str::to_owned)
+}
+
+/// Returns the first route-check rule for this operation that matches the value, or undefined.
+#[wasm_bindgen]
+pub fn route_rule(sink: &str, value: &str) -> Option<String> {
+    aiwaf_core::route_risks::rule_for(sink, value)
+}
+
+/// Route-specific checks compiled from a manifest's saved audit findings.
+#[wasm_bindgen]
+pub struct RouteRiskChecker {
+    risks: aiwaf_core::route_risks::RouteRisks,
+}
+
+#[wasm_bindgen]
+impl RouteRiskChecker {
+    /// Compiles a manifest given as JSON text. Text that isn't a manifest gives no checks.
+    #[wasm_bindgen(constructor)]
+    pub fn new(manifest_json: &str) -> RouteRiskChecker {
+        let manifest = serde_json::from_str(manifest_json).unwrap_or(serde_json::Value::Null);
+        RouteRiskChecker { risks: aiwaf_core::route_risks::RouteRisks::new(&manifest) }
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn empty(&self) -> bool {
+        self.risks.is_empty()
+    }
+
+    /// Returns the matches as a JSON array of {route, sink, input, rule, confidence}.
+    pub fn inspect(&self, path: &str, query: &str, body: &[u8]) -> String {
+        let events: Vec<serde_json::Value> = self
+            .risks
+            .inspect(path, query, body)
+            .into_iter()
+            .map(|e| serde_json::json!({
+                "route": e.route, "sink": e.sink, "input": e.input, "rule": e.rule, "confidence": e.confidence
+            }))
+            .collect();
+        serde_json::Value::Array(events).to_string()
+    }
+}
+
 #[wasm_bindgen]
 pub fn validate_url(url: &str) -> Result<JsValue, JsValue> {
     to_value(&core_validate_url(url)).map_err(|error| error.into())
@@ -847,4 +925,35 @@ fn timestamp_epoch(value: JsValue) -> Result<f64, JsValue> {
     Err(JsValue::from_str(
         "timestamp must be an epoch number or Date",
     ))
+}
+
+#[cfg(test)]
+mod request_check_tests {
+    use super::*;
+
+    #[test]
+    fn sql_inspect_returns_json() {
+        assert_eq!(sql_inspect(b"id=1%20OR%201%3D1", b"", 65536), r#"{"rule":"sql_breakout_numeric","status":403}"#);
+        assert_eq!(sql_inspect(b"q=hello", br#"{"name":"O'Reilly"}"#, 65536), "null");
+        assert_eq!(sql_inspect(b"", b"aaaaaaaaaaaa", 10), r#"{"rule":"payload_inspection_limit","status":413}"#);
+        assert_eq!(sql_tokenizer("1 OR 1=1").as_deref(), Some("sql_breakout_numeric"));
+        assert_eq!(sql_tokenizer("o'reilly"), None);
+        assert_eq!(sql_inspect_headers(r#"[["Cookie","a=' OR 1=1--"]]"#, 65536), r#"{"rule":"sql_breakout_single_quote","status":403}"#);
+        assert_eq!(sql_inspect_headers(r#"[["User-Agent","Mozilla/5.0 (X11; Linux x86_64)"]]"#, 65536), "null");
+        assert_eq!(sql_inspect_headers("not json", 65536), "null");
+    }
+
+    #[test]
+    fn route_checks_return_json() {
+        let checker = RouteRiskChecker::new(r#"{"routes":{"/f/:n":{"injection_risks":[{"sink":"path","input":"n","confidence":"medium"}]}}}"#);
+        assert!(!checker.empty());
+        assert_eq!(
+            checker.inspect("/f/x", "n=../y", b""),
+            r#"[{"confidence":"medium","input":"n","route":"/f/:n","rule":"path_traversal","sink":"path"}]"#
+        );
+        assert_eq!(checker.inspect("/f/x", "n=fine", b""), "[]");
+        assert!(RouteRiskChecker::new("not json").empty());
+        assert_eq!(route_rule("command", "x; ls -la").as_deref(), Some("command_chain"));
+        assert_eq!(route_rule("command", "cat food"), None);
+    }
 }

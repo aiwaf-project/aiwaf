@@ -36,7 +36,7 @@ describe('AIWAF Fastify plugin', () => {
     const result = await fastify.inject({ method: 'POST', url: '/safe',
       headers: { 'x-forwarded-for': '93.184.217.10' }, payload: { email: "admin'--", password: 'x' } });
     expect(result.statusCode).toBe(403);
-    expect(result.json().error).toBe('sql_quote_comment');
+    expect(result.json().error).toBe('sql_breakout_single_quote');
     await fastify.close();
   });
   it('implements the response send contract', async () => {

@@ -32,9 +32,9 @@ def test_native_fastapi_body_replay_stream_and_exemptions(tmp_path, monkeypatch)
     monkeypatch.setattr(ip_keyword, 'evaluate_keyword_policy', lambda *a, **k: pytest.fail('Python keyword fallback'))
     with TestClient(app_for(tmp_path)) as client:
         assert client.post('/echo', json={'field':'value'}).json()['body'] == '{"field":"value"}'
-        assert client.get('/echo?q=union+select').status_code == 403
-        assert client.post('/echo', content=b'{"input":"uni\\u006fn select"}', headers={'content-type':'application/json'}).status_code == 403
-        assert client.get('/exempt?q=union+select').status_code == 200
+        assert client.get('/echo?q=1+union+select+1').status_code == 403
+        assert client.post('/echo', content=b'{"input":"1 uni\\u006fn select 1"}', headers={'content-type':'application/json'}).status_code == 403
+        assert client.get('/exempt?q=1+union+select+1').status_code == 200
         assert client.get('/stream').content == b'firstsecond'
         assert client.get('/wp-content/plugins/pods/init.php').status_code == 403
 

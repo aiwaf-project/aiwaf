@@ -6,8 +6,99 @@
   IPv6, and hostname fields verbatim, matching the Python parser. Later IPv4
   fields no longer replace the client address during ingestion.
 
+- Add `audit` to the Python, Node.js and Java command lines. It parses source without
+  running it and reports where request input can reach dangerous operations. It's
+  report-only and doesn't affect request handling.
+- **Security:** SQL injection checks now use a tokenizer instead of four signature rules.
+  It flags a value only when it breaks out of a SQL value and continues as SQL, which
+  catches attacks with no quote such as `1 OR 1=1` and `1 AND SLEEP(5)`, and MySQL's
+  executed `/*!...*/` comments, which bypassed the signature rules. It no longer blocks
+  ordinary text such as `"Item" #3` or `Drop table tennis; update your set list`.
+  **Upgrade check:** rule names change from `sql_union_select`, `sql_boolean_tautology`,
+  `sql_quote_comment` and `sql_stacked_statement` to `sql_breakout_numeric`,
+  `sql_breakout_single_quote` and `sql_breakout_double_quote`. Text such as
+  `union select password` with no value to close is no longer blocked.
+- **Requires `aiwaf-rust` 0.2.8.** Python's SQL check and route checks now run in Rust, with
+  no Python copy: one call per request does the walking, decoding, JSON parsing, size limits
+  and tokenizer. `aiwaf-rust` adds `policy_sql_inspect`, `RouteRiskChecker`,
+  `policy_route_rule` and `policy_sql_tokenizer`. `policy_sql_signature` and
+  `policy_sql_signatures` remain for older releases and return tokenizer results. A JSON body
+  is checked by its values instead of its raw text, and a literal `+` is no longer lost to
+  form decoding. Shared case files run against every copy in CI.
+- **Node.js requires `aiwaf-wasm` 0.2.6 for request checks.** The SQL check and route checks
+  run in `aiwaf-wasm`, from the same Rust code as Python, with no JavaScript copy.
+  `aiwaf-wasm` adds `sql_inspect`, `RouteRiskChecker`, `route_rule` and `sql_tokenizer`.
+  `package.json` keeps `^0.2.5` until 0.2.6 is published; bump it then. Tests and CI build
+  `aiwaf-wasm` from this repository with `scripts/build_wasm_from_source.py`.
+- **Security:** SQL detection was measured against the OWASP Core Rule Set and libinjection
+  test data, and the gaps found were closed. libinjection detection rose from 69.8% to
+  94.9%, and its false-positive list from 9 to 1 flagged value. Payloads now caught include
+  `WHERE` straight after the quote, `foo) UNION ALL SELECT`, `-6863 union select`,
+  `; DROP TABLE`, `-1 + (SELECT ...)`, MSSQL `WAITFOR` and `EXEC` without a semicolon,
+  blind payloads such as `' and 526=527`, names found only in SQL such as `pg_sleep(` and
+  `information_schema`, `%u` escapes and typographic quotes, and values in XML bodies.
+  Text such as `7" #2 CIRCULAR NEEDLE`, `"IS" STAMP` and `BASE; SET SWAROVSKI` passes.
+  `scripts/sql_benchmark.py` runs both test sets in CI with minimum results.
+- **Security:** detection of OWASP CRS paranoia level 1 and 2 SQL injection tests rose from
+  35% to 71% and from 17% to 42%, and libinjection detection to 98.9%, with no more benign
+  values flagged. Newly caught: a value that starts with `AND 2771=1709)`, whole statements
+  such as `SELECT * FROM users` and `DROP TABLE users;--`, `NOT LIKE` after the quote,
+  `x'|email--`, `a'or'1'='1` without spaces, comments glued to keywords such as
+  `SELECT/**/password` and `/*!50000`, PostgreSQL casts such as `::int`, calls such as
+  `group_concat(`, `char(113)` and `select(user())`, MSSQL names such as `xp_dirtree`,
+  `tempdb` and `declare @x`, Oracle packages such as `utl_http`, and MongoDB operators such
+  as `[$ne]`. Code such as `await version()` and `delete Math.pow;` passes. Rust and Java
+  have the same rules. Also caught: payloads ending in a null byte, as sqlmap sends,
+  `ORDER BY 3631` after a breakout, column aliases such as `) AS t FROM`, `admin';`, `'x'!='y`,
+  `in (select * from`, `union select col from`, `@x:=(select`, `ALTER TABLE t ADD`, MySQL's
+  `1.e(` number trick, `IF((1=2),...)`, `IIF(`, `ELT(`, `CASE WHEN 1=2 THEN`, SQLite's
+  `randomblob(`, PostgreSQL's `lo_import(` and `pg_sleep`, and `foo + (SELECT ... WHERE 1=1)`.
+  Sizes such as `18';` and phrases such as `5 as a gift from` pass.
+  Code such as `await sleep(10)`, `time.sleep(1)` and `sleep(1000)`, Markdown such as
+  `` `'limit'` ``, and prose mentioning `sys.tables` now pass, while Oracle's
+  `USER_LOCK.SLEEP(5)` is caught.
+- **Security:** the SQL check now also reads the URL path, one segment at a time, as in
+  `/post/1 OR 1=1`, and the headers: cookie names and values, the path and query string of
+  `Referer`, `X-Original-URL` and `X-Rewrite-URL`, and every other header as one value, such as
+  `User-Agent`, `X-Forwarded-For`, `Accept-Language` and apps' own `X-` headers. Headers holding
+  credentials, framing or browser-set values (`Authorization`, `Accept`, `Content-*`, `Sec-*`,
+  `If-*`, `Host`, CSRF tokens, tracing IDs) aren't checked. This applies in Python, Node.js,
+  Java and both native pipelines. `aiwaf-rust` adds `policy_sql_inspect_headers` and
+  `policy_sql_inspect_path`, and `aiwaf-wasm` adds `sql_inspect_headers` and
+  `sql_inspect_path`. Node.js and Python now pass every header and Rust chooses which to
+  check. Shared cases are in `tests/fixtures/sql_header_cases.json` and
+  `tests/fixtures/sql_path_cases.json`. Python now also
+  inspects XML bodies (`application/xml`, `text/xml`, `+xml`). Java's request walker now
+  matches the Rust one: it decodes `%uXXXX` escapes, reads XML bodies by their values, and
+  checks the same headers.
+- Fuzzing for the SQL tokenizer, request walker and route checks, with cargo-fuzz targets
+  in `rust/fuzz` run in CI, and random-input tests in `cargo test`. They found that `` in
+  the Rust regexes was slow on long non-ASCII input; it's now ASCII-only, up to eight times
+  faster on those inputs.
+- `init` audits source and saves route-specific checks into the manifest. Requests to those
+  routes are checked for patterns that matter to the operation their input reaches, and
+  matches are blocked. `AIWAF_INJECTION_RISK_MODE` is `block` by default, and `log` or
+  `off` change that. `init --no-audit` and `audit --manifest` are also available.
+- Java can now read source with the JDK Compiler Tree API. `aiwaf-cli init --source`
+  builds a route manifest without starting the application, including for plain Servlet
+  applications, and reads method bodies for API, form and login signals. Source analysis
+  needs a JDK.
+
 ## Python 1.1.8 / Rust-Python 0.2.7 / Node.js 1.1.5 / WASM 0.2.5 / Java 1.3.5 — prepared release
 
+- **Security:** Python and Node.js no longer let a client choose its own address with
+  `X-Forwarded-For`, which could evade blocks and rate limits or match `AIWAF_EXEMPT_IPS`.
+  Forwarded headers now count only from a trusted peer and are walked from the right.
+  **Upgrade check:** proxies connecting from public addresses must be added to the new
+  `AIWAF_TRUSTED_PROXIES` setting, or all visitors will appear as the proxy.
+  `CF-Connecting-IP` and `Forwarded`-style fallbacks are no longer read for the client IP.
+- **Security:** Java stops reading `X-Forwarded-For` at a malformed entry instead of
+  skipping it, so entries left of it can't be taken as the client address. It then
+  falls back to `X-Real-IP` or the peer address.
+- Rust and WASM: `validate_headers_with_config` now enforces every required header. It
+  previously checked only `User-Agent` and `Accept`, and only `HTTP_`-style names. The
+  Django, FastAPI, Flask and Node.js middleware already enforced these headers themselves.
+- CI builds `aiwaf-rust` from this repository for Python tests instead of installing it from PyPI.
 - Update package versions and matching native dependency requirements for the next release.
 - Remove benchmark/profiling utilities and consolidate release documentation into README/CHANGELOG.
 - Remove the deprecated Rust floating-point module import.

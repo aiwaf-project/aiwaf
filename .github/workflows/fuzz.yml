@@ -1,0 +1,51 @@
+name: Fuzz request parsers
+
+# Fuzzes the SQL tokenizer, the request walker and the route checks for crashes and stalls.
+# Pull requests get a short run; the weekly run goes longer.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "rust/crates/aiwaf_core/**"
+      - "rust/fuzz/**"
+      - ".github/workflows/fuzz.yml"
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [sql_tokenizer, request_walker, route_checks]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install nightly Rust and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo +nightly install cargo-fuzz --locked
+
+      - name: Seed the corpus from the shared case files
+        run: python3 rust/fuzz/seed_corpus.py
+
+      - name: Fuzz ${{ matrix.target }}
+        working-directory: rust/fuzz
+        run: |
+          seconds=${{ github.event_name == 'pull_request' && 120 || 1800 }}
+          # Inputs up to 64 KB, and any input slower than 2 seconds fails, as a stall.
+          cargo +nightly fuzz run ${{ matrix.target }} corpus/${{ matrix.target }} -- \
+            -max_total_time=$seconds -max_len=65536 -timeout=2 -rss_limit_mb=2048
+
+      - name: Keep any crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: rust/fuzz/artifacts

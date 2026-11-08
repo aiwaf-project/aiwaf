@@ -22,9 +22,9 @@
     "scripts": {
         "retrain": "AIWAF_LOG_PATH=/var/log/nginx/access.log npm run train",
         "train": "node train.js",
-        "test": "jest --runInBand",
-        "test:coverage": "jest --runInBand --coverage",
-        "test:wasm": "jest --runInBand --runTestsByPath test/wasmAdapter.test.js test/wasm-header-config.test.js test/wasm-header-input.test.js test/wasm-retrain-behavior.test.js test/wasm-waf-integration.test.js && node test/wasm-real.js",
+        "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand",
+        "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --coverage",
+        "test:wasm": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --runTestsByPath test/wasmAdapter.test.js test/wasm-header-config.test.js test/wasm-header-input.test.js test/wasm-retrain-behavior.test.js test/wasm-waf-integration.test.js && node test/wasm-real.js",
         "aiwaf": "node bin/aiwaf.js",
         "test:wasm-real": "node test/wasm-real.js",
         "test:native": "node test/native-pipeline-real.js && node test/native-frameworks-real.js"

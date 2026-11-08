@@ -32,8 +32,8 @@ class NativePipelineTests(SimpleTestCase):
                 response = middleware(factory.post('/echo', data='{"hello":"world"}', content_type='application/json'))
                 assert response.status_code == 200
                 assert b'hello' in response.content
-                assert middleware(factory.get('/echo?q=union+select')).status_code == 403
-                assert middleware(factory.get('/exempt?q=union+select')).status_code == 200
+                assert middleware(factory.get('/echo?q=1+union+select+1')).status_code == 403
+                assert middleware(factory.get('/exempt?q=1+union+select+1')).status_code == 200
                 assert middleware(factory.get('/wp-content/plugins/pods/init.php')).status_code == 403
 
     def test_native_django_bounded_body(self):

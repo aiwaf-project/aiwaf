@@ -39,7 +39,7 @@ describe('AIWAF Hapi plugin', () => {
     const result = await server.inject({ method: 'POST', url: '/safe',
       headers: { 'x-forwarded-for': '93.184.217.11' }, payload: { email: "admin'--", password: 'x' } });
     expect(result.statusCode).toBe(403);
-    expect(result.result.error).toBe('sql_quote_comment');
+    expect(result.result.error).toBe('sql_breakout_single_quote');
     await server.stop();
   });
   it('implements the response send contract', async () => {

@@ -4,7 +4,7 @@ from flask import request, jsonify, current_app
 from .utils import get_blocklist_extended_info, get_ip
 from .blocklist_manager import BlocklistManager
 from .exemption_decorators import should_apply_middleware
-from aiwaf.core.runtime_storage import get_storage
+from aiwaf.core.runtime_storage import HoneypotStateCache
 from aiwaf.core.honeypot import (
     store_honeypot_get_timestamp,
     load_honeypot_get_timestamp,
@@ -16,26 +16,7 @@ from aiwaf.core.honeypot import (
 from aiwaf.core.method_validation import evaluate_method_policy, ACTION_BLOCK as METHOD_BLOCK
 from aiwaf.core.method_validation import flask_route_accepts_method
 
-class _HoneypotStateCache:
-    def __setitem__(self, key, value):
-        get_storage().set(key, value, ttl=300)
-
-    def get(self, key, default=None):
-        value = get_storage().get(key)
-        return default if value is None else value
-
-    def pop(self, key, default=None):
-        value = get_storage().get(key)
-        get_storage().delete(key)
-        return default if value is None else value
-
-    def clear(self):
-        storage = get_storage()
-        for key in storage.get_all_keys("honeypot_get:*"):
-            storage.delete(key)
-
-
-_aiwaf_cache = _HoneypotStateCache()
+_aiwaf_cache = HoneypotStateCache()
 
 
 def _is_authenticated_request() -> bool:

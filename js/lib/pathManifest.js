@@ -477,8 +477,22 @@ function extractNestRoutes(app, routesInput = null) {
   }
 }
 
-function generateExpressManifest(app, outputPath = DEFAULT_MANIFEST_PATH) {
+// Saves the source's injection findings into a manifest that's about to be written. A failed scan
+// leaves the manifest without saved risks, so routes keep their normal checks.
+function auditIntoManifest(manifest, source) {
+  if (!source) return null;
+  try {
+    const { analyzePath } = require('./injectionAnalysis');
+    return require('./routeRisks').applyReport(analyzePath(source), manifest);
+  } catch (error) {
+    console.warn(`Injection audit skipped: ${error.message || error}`);
+    return null;
+  }
+}
+
+function generateExpressManifest(app, outputPath = DEFAULT_MANIFEST_PATH, options = {}) {
   const manifest = buildManifest({ framework: 'express', routes: extractExpressRoutes(app) });
+  auditIntoManifest(manifest, options.auditSource);
   writeManifest(manifest, outputPath);
   return manifest;
 }
@@ -504,12 +518,14 @@ function generateFrameworkManifest(framework, app, outputPath = DEFAULT_MANIFEST
     routes: extractor(),
     appContext: options.appContext || {}
   });
+  auditIntoManifest(manifest, options.auditSource);
   writeManifest(manifest, outputPath);
   return manifest;
 }
 
 module.exports = {
   DEFAULT_MANIFEST_PATH,
+  auditIntoManifest,
   SCHEMA_VERSION,
   computeContextHash,
   classifyRoute,

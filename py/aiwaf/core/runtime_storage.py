@@ -840,6 +840,27 @@ def get_storage() -> StorageBackend:
     return _storage_backend
 
 
+class HoneypotStateCache:
+    """Dict-like honeypot timing state over the current storage backend."""
+
+    def __setitem__(self, key, value):
+        get_storage().set(key, value, ttl=300)
+
+    def get(self, key, default=None):
+        value = get_storage().get(key)
+        return default if value is None else value
+
+    def pop(self, key, default=None):
+        value = get_storage().get(key)
+        get_storage().delete(key)
+        return default if value is None else value
+
+    def clear(self):
+        storage = get_storage()
+        for key in storage.get_all_keys("honeypot_get:*"):
+            storage.delete(key)
+
+
 def get_exemption_store() -> ExemptionStore:
     """Get the exemption store."""
     global _exemption_store

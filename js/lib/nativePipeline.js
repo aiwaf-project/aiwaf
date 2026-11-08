@@ -3,6 +3,8 @@ const fs = require('fs');
 const path = require('path');
 const { performance } = require('perf_hooks');
 const { createRequestPipeline } = require('./wasmAdapter');
+const wasmChecks = require('./wasmChecks');
+const routeRisks = require('./routeRisks');
 const { ALL_MIDDLEWARES, normalizeMiddlewareName } = require('./pathRules');
 
 const LOG_HEADER = 'timestamp,ip,method,path,status,response_time_ms,blocked,reason,country,user_agent\n';
@@ -121,6 +123,10 @@ module.exports = async function createNativeMiddleware(options = {}) {
   const contextKey = Symbol('aiwaf.native.context');
   const pending = new Set();
   const report = error => { if (options.onError) options.onError(error); else console.error('AIWAF native finalization failed:', error.message); };
+  // This pipeline takes no general settings, so these two come from the environment. Route
+  // checks run in aiwaf-wasm, loaded here so requests can use them straight away.
+  const observeRisks = routeRisks.createObserver({ AIWAF_PATH_MANIFEST: process.env.AIWAF_PATH_MANIFEST });
+  if (observeRisks) await wasmChecks.load();
   function payload(req) {
     const b = safeBody(req, maxBytes);
     const query = String(req.originalUrl || req.url || '').split('?').slice(1).join('?');
@@ -133,6 +139,11 @@ module.exports = async function createNativeMiddleware(options = {}) {
     const start = performance.now();
     try {
       const meta = req.aiwafRoute || {};
+      if (observeRisks && !meta.fullyExempt && !(meta.exemptMiddlewares || []).includes('ip_keyword_block')
+          && (!profile.enabled || profile.enabled.includes('ip_keyword_block'))) {
+        const riskFinding = observeRisks(req);
+        if (riskFinding) return res.status(riskFinding.status).json({ error: riskFinding.rule });
+      }
       const required = new Set((meta.requiredMiddlewares || []).map(normalizeMiddlewareName));
       const disabled = new Set((meta.fullyExempt ? ALL_MIDDLEWARES : meta.exemptMiddlewares || []).map(normalizeMiddlewareName));
       for (const key of required) disabled.delete(key);
@@ -172,6 +183,8 @@ module.exports = async function createNativeMiddleware(options = {}) {
     const disabled = req.aiwafRoute?.exemptMiddlewares || [];
     if (profile.enabled && !profile.enabled.includes('ip_keyword_block')) return null;
     if (req.aiwafRoute?.fullyExempt || disabled.includes('ip_keyword_block')) return null;
+    const riskFinding = observeRisks ? observeRisks(req) : null;
+    if (riskFinding) return riskFinding;
     return payload(req);
   };
   middleware.diagnostics = () => JSON.parse(native.diagnostics());

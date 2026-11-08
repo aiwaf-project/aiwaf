@@ -70,6 +70,165 @@ Supported framework integrations include Django, Flask, FastAPI, Express, Fastif
 
 The runtimes share policy intent and training feature names, but their framework adapters and model implementations remain language-native. Model artifacts are not generally interchangeable across languages.
 
+## Client IP addresses and proxies
+
+Blocks, exemptions, rate limits, and geo policies all depend on the client address. Python and Node.js read `X-Forwarded-For` and `X-Real-IP` only when the connecting peer is a trusted proxy. They walk `X-Forwarded-For` from the right and stop at the first untrusted address, because anything further left is client-supplied. `CF-Connecting-IP` and other vendor headers are not read for this purpose.
+
+By default, loopback, RFC 1918, link-local, and IPv6 unique-local peers are trusted, so a proxy on a private network needs no configuration. Set `AIWAF_TRUSTED_PROXIES` to a list or comma-separated string of addresses and CIDR ranges to replace those defaults. An empty value trusts no proxy.
+
+| Runtime | Where to set it |
+| --- | --- |
+| Django | `AIWAF_TRUSTED_PROXIES` in settings, or the environment variable |
+| Flask | `app.config["AIWAF_TRUSTED_PROXIES"]`, or the environment variable |
+| FastAPI | The environment variable |
+| Node.js | The `AIWAF_TRUSTED_PROXIES` or `trustedProxies` option, or the environment variable |
+| Java | `trustedProxyCidrs` (defaults to loopback only) |
+
+> [!IMPORTANT]
+> If your proxy or CDN connects from a public address (Cloudflare or Google Cloud load balancers, for example), add its ranges to `AIWAF_TRUSTED_PROXIES`. Otherwise every visitor appears to come from the proxy, and rate limiting or a block can then affect all of them.
+
+If untrusted hosts can reach the application directly from your private network, narrow the list to your proxy's addresses. Addresses already resolved by Flask's `ProxyFix`, Uvicorn's `--proxy-headers`, or Express `trust proxy` are respected, except that AIWAF still walks the headers when the resolved address is itself in a trusted range. The Rust-owned Node pipeline uses `req.ip` only, so configure `trust proxy` there.
+
+## Injection audit
+
+`audit` reads your source code and reports where request input can reach SQL, NoSQL,
+shell commands, file paths, outbound requests, code evaluation, templates or
+deserialization. It parses files without running them, and it doesn't change how
+requests are handled.
+
+```bash
+aiwaf audit path/to/app                                    # Python
+npx aiwaf audit path/to/app                                # Node.js
+java -cp <classpath> com.aiwaf.cli.AiwafConsole audit src  # Java, needs a JDK
+```
+
+| Language | Frameworks | Parser |
+| --- | --- | --- |
+| Python | Django, Flask, FastAPI | `ast` |
+| Node.js | Express, Fastify, Hapi, Koa, NestJS, Next.js, AdonisJS, Sails | `@babel/parser` |
+| Java | Spring, Jakarta Servlet, JAX-RS parameters | JDK Compiler Tree API |
+
+All three accept `--format text|json`, `--output <file>`, `--include-tests` and
+`--fail-on-findings` and `--manifest <file>`. The exit status is 0 when the scan completes, 1 with
+`--fail-on-findings` when something is found, and 2 for a bad path or argument.
+
+A finding is a path worth reading, not a confirmed vulnerability. A reverse proxy, for
+example, will report its upstream request because forwarding input is its job. A clean
+report doesn't prove the code is safe: input that crosses files, classes or dynamic
+calls can be missed, because helpers are only followed within one file or class.
+
+Java can also build a route manifest from source, without starting the application.
+This is how plain Servlet applications get a manifest:
+
+```bash
+java -cp <classpath> com.aiwaf.cli.AiwafConsole init --source src --output .aiwaf/paths.json
+```
+
+### SQL detection
+
+AIWAF checks request values for SQL injection with a tokenizer. It tries each value as a
+bare number, inside single quotes, and inside double quotes, and flags it only when the
+value closes that SQL value and what follows reads as SQL. It catches `1 OR 1=1` and
+`1 AND SLEEP(5)`, which have no quote, and MySQL's executed comments such as
+`/*!50000UNION*/`. It passes text like `"Item" #3`, `o'reilly`, `union select committee`
+and `Drop table tennis; update your set list`.
+
+Text such as `union select password` on its own isn't flagged, because without a value to
+close it can't change a query.
+
+Besides the query string and body, the check reads the URL path and the headers, where SQL
+injection also reaches applications. The path is checked one segment at a time, as in
+`/post/1 OR 1=1`. Cookies are checked by their names and values, and the `Referer`,
+`X-Original-URL` and `X-Rewrite-URL` by their path and query string. Every other header is
+checked as one value, such as `User-Agent`, `X-Forwarded-For`, `Accept-Language` or an app's own
+`X-` headers. Headers that hold credentials, framing or browser-set values aren't checked:
+`Authorization`, `Accept`, `Content-*`, `Sec-*`, `If-*`, `Host`, CSRF tokens and tracing IDs.
+Values are decoded the same way, including IIS `%uXXXX` escapes and null bytes, and JSON and XML
+documents are checked by their values. Real browser, app, crawler, client and proxy headers,
+analytics and session cookies, and search referers are in `tests/fixtures/sql_header_cases.json`,
+and ordinary and attack paths in `tests/fixtures/sql_path_cases.json`. Every implementation runs
+both. None of the 11,743 URL paths found in the documentation of this project's dependencies is
+flagged. `AIWAF_SQL_INJECTION_MODE` still chooses whether a finding
+blocks (the default), is only logged, or is ignored.
+
+In Python, the whole request check runs in `aiwaf-rust`, which is required: one call walks
+the query and body, decodes values, reads JSON bodies by their values, applies the size limits
+and runs the tokenizer. It runs whatever `AIWAF_USE_RUST` says, because there's no Python copy.
+Node.js runs the same Rust code through `aiwaf-wasm`, which it requires in the same way, so
+`AIWAF_DISABLE_WASM` doesn't turn these checks off. Java has its own copy.
+
+The cases in `tests/fixtures/sql_injection_cases.json` run against every copy in CI, and
+`python scripts/sql_accuracy.py` reports the result. They were written alongside the
+tokenizer, so passing them doesn't prove real-world accuracy. Add any miss or false block you
+see there.
+
+Outside test data is measured too. `python scripts/sql_benchmark.py` runs the whole SQL check
+against the OWASP Core Rule Set's SQL injection tests and libinjection's test data, and CI
+fails if the results get worse:
+
+| Test set | Attacks caught | Ordinary values flagged |
+| --- | --- | --- |
+| libinjection `sqli-*.txt` | 84,830 of 85,791 (98.9%) | 1 of 421 in `false_positives.txt` |
+| CRS 942, paranoia level 1 | 230 of 324 (71%) | 0 of 49 |
+| CRS 942, paranoia level 2 | 209 of 498 (42%) | 2 of 90 |
+
+CRS also matches SQL keywords and function names on their own, such as `concat(` or
+`cast(`, especially at higher paranoia levels. AIWAF flags values that break out of a
+SQL value, plus names that only appear in SQL such as `pg_sleep(` and `information_schema`, so
+it misses many of those CRS fragments by design: matching them would block code snippets and
+ordinary text. Each CRS test's whole request is checked, including its path and headers. Three
+CRS tests marked benign carry SQL injection, such as `/post/foo/24 union all select 1,2,3 from aa`,
+because CRS only means that one rule shouldn't match them. AIWAF flags them, and the benchmark
+lists them apart from false positives.
+
+The SQL tokenizer, request walker and route checks are fuzzed: for two minutes per target on
+each pull request, and for 30 minutes each week (`rust/fuzz`). Short random-input tests also
+run with every `cargo test`.
+
+### Route-specific checks from init
+
+`init` audits your source as it builds the route manifest, and saves which operation each
+route's input reaches. Requests to those routes are then checked for patterns that matter to
+that operation, in the parameter that reaches it. A route whose input reaches a file path is
+checked for traversal, and a route whose input reaches SQL gets the SQL tokenizer on its route
+values too. A match blocks the request with `403` and logs an event like this:
+
+```json
+{"event": "aiwaf.injection_risk", "mode": "block", "method": "GET", "route": "/files", "sink": "path", "input": "name", "rule": "path_traversal", "confidence": "medium"}
+```
+
+```bash
+aiwaf init --framework flask --app app:app                 # audits the current folder
+aiwaf init --framework flask --app app:app --source src    # audits another folder
+aiwaf init --framework flask --app app:app --no-audit      # saves no route checks
+```
+
+Node.js `aiwaf manifest` accepts `--source` and `--no-audit` too. Java `init --source` uses
+the same parse for routes and findings, and `init --app` audits `src/main/java` (or
+`--audit-source`). `aiwaf audit --manifest <file>` refreshes the saved findings without
+rebuilding the manifest.
+
+`AIWAF_INJECTION_RISK_MODE` is `block` by default. Set it to `log` to only log matches, or
+`off` to skip route checks. Flask and Django settings and the Node.js options accept the same
+name, Spring uses `aiwaf.injection-risk-mode`, and the Java config file uses
+`security.injection_risk_mode`. The Node.js native pipeline reads `AIWAF_INJECTION_RISK_MODE`
+and `AIWAF_PATH_MANIFEST` from the environment.
+
+- **Only routes with findings:** a route with no saved findings keeps its normal checks, and
+  saved findings never turn a protection off.
+- **Logs hold no request values:** events contain route, rule and parameter names from the
+  manifest only.
+- **What it reads:** query strings, route values, and buffered JSON or form bodies. Headers,
+  cookies and multipart uploads aren't checked.
+- **Unlinked findings:** `init` reports findings it can't tie to a manifest route, and those
+  get no route-specific checks. Handlers are matched by path or function name, so routes
+  missing from the manifest, or reused function names in Node.js, can stay unlinked.
+- **Stale results:** run `init` again when code changes, for example in your build.
+- **Where they run:** route checks run in Rust: through `aiwaf-rust` in Python and
+  `aiwaf-wasm` in Node.js. Java has its own copy.
+- **Accuracy isn't measured on real traffic yet:** if a rule blocks real users on a route,
+  set `AIWAF_INJECTION_RISK_MODE=log` while you report it.
+
 ## Repository layout
 
 ```text
@@ -555,12 +714,10 @@ Check the installed extension without touching application data:
 python scripts/check_native_csv_runtime.py
 ```
 
-Development request batching adds `policy_sql_signatures` and
-`csv_geo_policy` capabilities. Shared SQL inspection checks the first
-eight ASCII strings immediately for prompt denial, then checks subsequent strings
-in batches of at most 128. Unicode boundaries and inspection-limit exits flush
-pending checks first, preserving first-finding order. Django, Flask, and FastAPI
-use the shared path; older extensions retain single-string checks.
+`policy_sql_inspect` runs the whole SQL request check in one call, and Django, Flask and
+FastAPI use it for every request. `RouteRiskChecker` and `policy_route_rule` run the
+route-specific checks saved by `init`. `policy_sql_tokenizer` checks one value.
+`policy_sql_signatures` and `csv_geo_policy` remain for older releases.
 
 Flask with CSV geo state and an explicit allow/block list can read dynamic countries
 and evaluate the geo policy in one native call. Django CSV and FastAPI CSV use
@@ -786,7 +943,7 @@ npm run aiwaf -- manifest --framework express --routes routes.json --output .aiw
 | Logging | `AIWAF_MIDDLEWARE_LOGGING`, `AIWAF_MIDDLEWARE_LOG_PATH`, DB/CSV options |
 | WASM | `AIWAF_WASM_VALIDATION`, `AIWAF_WASM_VALIDATE_RECENT` |
 
-AIWAF loads `aiwaf-wasm` when available and falls back to the JavaScript implementation when WASM initialization or conversion is not worthwhile. Small, object-heavy operations can be faster in JavaScript because crossing the JS/WASM boundary and serializing objects has a fixed cost. WASM is most useful for sufficiently large feature batches and model scoring workloads.
+AIWAF loads `aiwaf-wasm` when available and falls back to the JavaScript implementation when WASM initialization or conversion is not worthwhile. The SQL check and route checks are the exception: they run only in `aiwaf-wasm`, and a request fails with an install message if it can't load. Small, object-heavy operations can be faster in JavaScript because crossing the JS/WASM boundary and serializing objects has a fixed cost. WASM is most useful for sufficiently large feature batches and model scoring workloads.
 
 The Python filesystem CSV transactions and retained training bindings remain
 PyO3-specific. Node now also has an **explicit stateful WASM request pipeline**;
@@ -1289,7 +1446,7 @@ Do not train directly on unreviewed sensitive request bodies or authentication h
 - Configure the outermost proxy to overwrite client-supplied forwarding headers.
 - Use Redis, a database, or another shared backend when multiple workers must share rate-limit, blocklist, or exemption state.
 - Keep health checks, static assets, and trusted webhook routes explicitly scoped instead of disabling protection globally.
-- Start anomaly detection in observe-only or conservative mode and tune it with representative normal traffic.
+- Tune anomaly detection with representative normal traffic before relying on it in production.
 - Rotate logs and exclude secrets, authorization headers, cookies, and personal data.
 - Sign model/configuration artifacts where the runtime supports HMAC verification.
 - Run AIWAF alongside normal secure-development controls and an edge/reverse-proxy layer.

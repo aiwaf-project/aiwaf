@@ -46,6 +46,7 @@ public final class AiwafConsole {
                 case "exempt-path", "path-exemptions" -> handleExemptPath(manager(), args);
                 case "whois" -> handleWhois(args);
                 case "generate-manifest", "init" -> handleGenerateManifest(args);
+                case "audit" -> System.exit(handleAudit(args));
                 case "train", "train-model" -> handleCoreCommand("train-model", args);
                 case "replay" -> handleCoreCommand("replay", args);
                 case "model" -> handleModel(args);
@@ -146,7 +147,9 @@ public final class AiwafConsole {
                 "  aiwaf-cli replay --cases <cases.json>",
                 "  aiwaf-cli model status [--path <model.json>]",
                 "  aiwaf-cli logs [--dir aiwaf_logs]",
-                "  aiwaf-cli init --app <SpringApplicationClass> [--output .aiwaf/paths.json]",
+                "  aiwaf-cli init --app <SpringApplicationClass> [--output .aiwaf/paths.json] [--audit-source <folder>] [--no-audit]",
+                "  aiwaf-cli init --source <folder> [--output .aiwaf/paths.json] [--no-audit]",
+                "  aiwaf-cli audit [path] [--format text|json] [--output file] [--include-tests] [--fail-on-findings] [--manifest file]",
                 "  aiwaf-cli generate-manifest [output.json] --class <ControllerClassName>"
         );
         for (String line : lines) {
@@ -267,15 +270,38 @@ public final class AiwafConsole {
                 ? outputOption
                 : (args.length > 1 && !args[1].startsWith("--")
                         ? args[1] : com.aiwaf.core.PathManifestCore.DEFAULT_MANIFEST_PATH);
+        String sourceRoot = parseOption(args, "--source");
+        if (sourceRoot != null) {
+            try {
+                com.aiwaf.core.JavaSourceAnalysisCore.Report report =
+                        com.aiwaf.core.JavaSourceAnalysisCore.analyze(java.nio.file.Path.of(sourceRoot), false);
+                Map<String, Object> manifest = new java.util.LinkedHashMap<>(
+                        com.aiwaf.core.PathManifestCore.buildManifestFromSource("java-source", report.routes()));
+                if (!hasFlag(args, "--no-audit")) {
+                    // The same parse found the routes and the injection findings.
+                    com.aiwaf.core.RouteRiskCore.applyReport(report, manifest);
+                }
+                com.aiwaf.core.PathManifestCore.writeManifest(manifest, java.nio.file.Path.of(output));
+                printManifestSummary(output, manifest);
+                report.errors().forEach(error -> System.err.println(error.get("file") + ": not analyzed: " + error.get("error")));
+            } catch (IOException | IllegalStateException ex) {
+                System.err.println("Error generating manifest: " + ex.getMessage());
+            } catch (LinkageError ex) {
+                System.err.println("Error generating manifest: source analysis needs a JDK, and this Java runtime has no compiler.");
+            }
+            return;
+        }
         String appName = parseOption(args, "--app");
         if (appName != null) {
             Map<String, Object> manifest = com.aiwaf.spring.SpringPathManifest.launchAndGenerate(appName, output);
             printManifestSummary(output, manifest);
+            auditIntoManifest(args, output);
             return;
         }
         String clsName = parseOption(args, "--class");
         if (clsName == null) {
             System.out.println("Usage: aiwaf-cli init --app <SpringApplicationClass> [--output .aiwaf/paths.json]");
+            System.out.println("   or: aiwaf-cli init --source <folder> [--output .aiwaf/paths.json]");
             return;
         }
         try {
@@ -284,8 +310,81 @@ public final class AiwafConsole {
                     com.aiwaf.core.PathManifestCore.discoverControllerRoutes(cls);
             com.aiwaf.core.PathManifestCore.generateManifest(routes, output);
             printManifestSummary(output, com.aiwaf.core.PathManifestCore.buildManifest("spring", routes));
+            auditIntoManifest(args, output);
         } catch (Exception e) {
             System.err.println("Error generating manifest: " + e.getMessage());
+        }
+    }
+
+    private static boolean hasFlag(String[] args, String flag) {
+        return java.util.Arrays.asList(args).contains(flag);
+    }
+
+    /** Saves injection findings from source into a written manifest. A failed scan leaves it unchanged. */
+    static void auditIntoManifest(String[] args, String output) {
+        if (hasFlag(args, "--no-audit")) {
+            return;
+        }
+        String source = parseOption(args, "--audit-source");
+        if (source == null) {
+            source = java.nio.file.Files.isDirectory(java.nio.file.Path.of("src", "main", "java")) ? "src/main/java" : ".";
+        }
+        try {
+            com.aiwaf.core.JavaSourceAnalysisCore.Report report =
+                    com.aiwaf.core.JavaSourceAnalysisCore.analyze(java.nio.file.Path.of(source), false);
+            System.out.println("Injection checks: " + com.aiwaf.core.RouteRiskCore.formatCounts(
+                    com.aiwaf.core.RouteRiskCore.updateManifest(report, java.nio.file.Path.of(output)), output));
+        } catch (IOException | RuntimeException ex) {
+            System.err.println("Injection audit skipped: " + ex.getMessage());
+        } catch (LinkageError ex) {
+            System.err.println("Injection audit skipped: source analysis needs a JDK, and this Java runtime has no compiler.");
+        }
+    }
+
+    /** Reports possible injection paths. Returns the exit status. */
+    static int handleAudit(String[] args) {
+        String format = "text";
+        String output = null;
+        String path = ".";
+        boolean includeTests = false;
+        boolean failOnFindings = false;
+        String manifest = null;
+        for (int index = 1; index < args.length; index++) {
+            switch (args[index]) {
+                case "--format" -> format = index + 1 < args.length ? args[++index] : "";
+                case "--output" -> output = index + 1 < args.length ? args[++index] : "";
+                case "--include-tests" -> includeTests = true;
+                case "--fail-on-findings" -> failOnFindings = true;
+                case "--manifest" -> manifest = index + 1 < args.length ? args[++index] : "";
+                default -> path = args[index];
+            }
+        }
+        if ((!format.equals("text") && !format.equals("json")) || "".equals(output) || "".equals(manifest)) {
+            System.err.println("Usage: aiwaf-cli audit [path] [--format text|json] [--output file] [--include-tests] [--fail-on-findings] [--manifest file]");
+            return 2;
+        }
+        try {
+            com.aiwaf.core.JavaSourceAnalysisCore.Report report =
+                    com.aiwaf.core.JavaSourceAnalysisCore.analyze(java.nio.file.Path.of(path), includeTests);
+            String content = format.equals("json")
+                    ? new com.fasterxml.jackson.databind.ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(report.toMap())
+                    : report.toText();
+            if (output != null) {
+                java.nio.file.Files.writeString(java.nio.file.Path.of(output), content + System.lineSeparator());
+            } else {
+                System.out.println(content);
+            }
+            if (manifest != null) {
+                System.out.println(com.aiwaf.core.RouteRiskCore.formatCounts(
+                        com.aiwaf.core.RouteRiskCore.updateManifest(report, java.nio.file.Path.of(manifest)), manifest));
+            }
+            return failOnFindings && !report.findings().isEmpty() ? 1 : 0;
+        } catch (IOException | IllegalStateException | IllegalArgumentException ex) {
+            System.err.println("Error: " + ex.getMessage());
+            return 2;
+        } catch (LinkageError ex) {
+            System.err.println("Error: source analysis needs a JDK, and this Java runtime has no compiler.");
+            return 2;
         }
     }
 

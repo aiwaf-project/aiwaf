@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from aiwaf.cli import _handle_init
+from aiwaf.cli import _handle_audit, _handle_init, main
 
 
 def _drop_app_module():
@@ -102,3 +102,72 @@ def test_detect_calls_django_trainer(monkeypatch):
     monkeypatch.setattr("aiwaf.django.trainer.train", lambda: calls.append(True))
     cli.aiwaf_detect()
     assert calls == [True]
+
+
+VULNERABLE_VIEW = (
+    "import os\n"
+    "def view(request):\n"
+    "    os.system(request.GET['cmd'])\n"
+)
+
+
+def test_audit_exit_codes_and_reports(tmp_path, capsys):
+    (tmp_path / "views.py").write_text(VULNERABLE_VIEW, encoding="utf-8")
+
+    assert _handle_audit([str(tmp_path)]) == 0
+    assert "found 1 possible" in capsys.readouterr().out
+    assert _handle_audit([str(tmp_path), "--fail-on-findings"]) == 1
+    capsys.readouterr()
+
+    report = tmp_path / "report.json"
+    assert _handle_audit([str(tmp_path), "--format", "json", "--output", str(report)]) == 0
+    assert json.loads(report.read_text(encoding="utf-8"))["language"] == "python"
+    assert capsys.readouterr().out == ""
+
+
+def test_audit_reports_a_missing_path(tmp_path, capsys):
+    assert _handle_audit([str(tmp_path / "missing")]) == 2
+    assert "missing" in capsys.readouterr().err
+
+
+def test_main_dispatches_audit(monkeypatch, tmp_path, capsys):
+    (tmp_path / "views.py").write_text(VULNERABLE_VIEW, encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["aiwaf", "audit", str(tmp_path), "--fail-on-findings"])
+
+    with pytest.raises(SystemExit) as stopped:
+        main()
+
+    assert stopped.value.code == 1
+    assert "os.system" in capsys.readouterr().out
+
+
+FLASK_APP_WITH_SQL = (
+    "from flask import Flask, request\n"
+    "app = Flask(__name__)\n"
+    "@app.get('/search')\n"
+    "def search():\n"
+    "    return db.execute('SELECT * FROM t WHERE q = ' + request.args['q'])\n"
+    "@app.get('/health')\n"
+    "def health():\n"
+    "    return 'ok'\n"
+)
+
+
+@pytest.mark.parametrize("no_audit", [False, True])
+def test_init_saves_injection_checks_unless_asked_not_to(monkeypatch, tmp_path, capsys, no_audit):
+    pytest.importorskip("flask")
+    _drop_app_module()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "app.py").write_text(FLASK_APP_WITH_SQL, encoding="utf-8")
+
+    _handle_init(["--framework", "flask", "--app", "app:app"] + (["--no-audit"] if no_audit else []))
+
+    routes = json.loads((tmp_path / ".aiwaf" / "paths.json").read_text(encoding="utf-8"))["routes"]
+    output = capsys.readouterr().out
+    if no_audit:
+        assert "injection_risks" not in routes["/search"]
+        assert "Injection checks: not run" in output
+    else:
+        assert routes["/search"]["injection_risks"] == [{"confidence": "high", "input": "q", "sink": "sql"}]
+        assert "injection_risks" not in routes["/health"]
+        assert "Injection checks: 1 routes from 1 files" in output

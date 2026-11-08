@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import os
 import shutil
 import subprocess
 import sys
@@ -15,6 +17,7 @@ from typing import Sequence
 
 ROOT = Path(__file__).resolve().parent
 TESTS = ROOT / "tests"
+MATURIN_REQUIREMENT = "maturin==1.11.5"
 
 
 @dataclass(frozen=True)
@@ -136,6 +139,96 @@ def _layout_task() -> TestTask:
     )
 
 
+def _needs_rust_build(args: argparse.Namespace) -> bool:
+    return not (args.js_only or args.wasm_only or args.no_rust_build)
+
+
+def _needs_wasm_build(args: argparse.Namespace) -> bool:
+    return not (args.python_only or args.rust_only or args.no_rust_build)
+
+
+def _wasm_build_task() -> TestTask:
+    """Node.js needs aiwaf-wasm, so its tests use the WASM built from this checkout."""
+    return TestTask("WASM / build aiwaf-wasm from source", (sys.executable, "scripts/build_wasm_from_source.py"))
+
+
+def _rust_build_problem() -> str | None:
+    if shutil.which("cargo") is None:
+        return "Rust is required to build aiwaf-rust, but cargo wasn't found. Install it from https://rustup.rs."
+    if sys.prefix == sys.base_prefix and not os.environ.get("CONDA_PREFIX"):
+        return "Building aiwaf-rust requires a virtual environment. Create and activate one, then run this again."
+    return None
+
+
+def _rust_build_tasks() -> list[TestTask]:
+    tasks = []
+    if importlib.util.find_spec("maturin") is None:
+        tasks.append(
+            TestTask(
+                "Rust / install maturin",
+                (sys.executable, "-m", "pip", "install", MATURIN_REQUIREMENT),
+            )
+        )
+    tasks.append(
+        TestTask(
+            "Rust / stage package files",
+            (sys.executable, "scripts/stage_rust_package_files.py"),
+        )
+    )
+    tasks.append(
+        TestTask(
+            "Rust / build aiwaf-rust from source",
+            (
+                sys.executable,
+                "-m",
+                "maturin",
+                "develop",
+                "--release",
+                "--locked",
+                "--manifest-path",
+                "rust/Cargo.toml",
+            ),
+        )
+    )
+    tasks.append(
+        TestTask(
+            "Rust / check aiwaf-rust came from this repository",
+            (sys.executable, "scripts/check_rust_source_build.py"),
+        )
+    )
+    return tasks
+
+
+def _build_rust(results: list[tuple[str, bool, float]]) -> bool:
+    """Build the extension so tests never run against a stale or published copy."""
+    problem = _rust_build_problem()
+    if problem:
+        print(f"{problem}\nUse --no-rust-build to test the installed aiwaf-rust instead.", file=sys.stderr)
+        results.append(("Rust / build aiwaf-rust from source", False, 0.0))
+        return False
+    if sys.prefix != sys.base_prefix:
+        os.environ["VIRTUAL_ENV"] = sys.prefix
+    for task in _rust_build_tasks():
+        passed, duration = _run_task(task)
+        results.append((task.name, passed, duration))
+        if not passed:
+            return False
+    return True
+
+
+def _print_summary(results: list[tuple[str, bool, float]]) -> int:
+    print(f"\n{'=' * 72}")
+    print("AIWAF monorepo test summary")
+    print("=" * 72)
+    for name, passed, duration in results:
+        status = "PASS" if passed else "FAIL"
+        print(f"{status:4}  {duration:7.2f}s  {name}")
+
+    passed_count = sum(passed for _, passed, _ in results)
+    print(f"\n{passed_count}/{len(results)} test groups passed")
+    return 0 if passed_count == len(results) else 1
+
+
 def _run_task(task: TestTask) -> tuple[bool, float]:
     print(f"\n{'=' * 72}", flush=True)
     print(f"Running {task.name}", flush=True)
@@ -186,6 +279,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--strict-function-coverage",
         action="store_true",
         help="Fail if any production Python callable is not entered; implies --coverage.",
+    )
+    parser.add_argument(
+        "--no-rust-build",
+        action="store_true",
+        help="Test the installed aiwaf-rust and aiwaf-wasm instead of building them from this repository first.",
     )
     return parser.parse_args(argv)
 
@@ -241,6 +339,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         tasks = [_with_python_coverage(task) for task in tasks]
 
     results: list[tuple[str, bool, float]] = []
+    if _needs_rust_build(args) and not _build_rust(results):
+        return _print_summary(results)
+    if _needs_wasm_build(args):
+        passed, duration = _run_task(_wasm_build_task())
+        results.append(("WASM / build aiwaf-wasm from source", passed, duration))
+        if not passed:
+            return _print_summary(results)
+
     for task in tasks:
         passed, duration = _run_task(task)
         results.append((task.name, passed, duration))
@@ -273,16 +379,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         passed, duration = _run_task(function_audit)
         results.append((function_audit.name, passed, duration))
 
-    print(f"\n{'=' * 72}")
-    print("AIWAF monorepo test summary")
-    print("=" * 72)
-    for name, passed, duration in results:
-        status = "PASS" if passed else "FAIL"
-        print(f"{status:4}  {duration:7.2f}s  {name}")
-
-    passed_count = sum(passed for _, passed, _ in results)
-    print(f"\n{passed_count}/{len(results)} test groups passed")
-    return 0 if passed_count == len(results) else 1
+    return _print_summary(results)
 
 
 if __name__ == "__main__":

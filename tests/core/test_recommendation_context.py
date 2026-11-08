@@ -1,7 +1,11 @@
 """Real framework objects; no application names or request values leave adapters."""
 import json
 import pytest
-from bloud.context import application_context
+
+# The optional Bouvane package is distributed separately from AIWAF.
+pytest.importorskip("bloud")
+
+from bloud.context import application_context  # noqa: E402
 
 
 def test_flask_blueprints_methods_and_private_literals():
