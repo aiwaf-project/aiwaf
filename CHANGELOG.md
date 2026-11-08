@@ -103,6 +103,12 @@
 - Preserve existing CSV filenames, Django database/model identity, stored legacy
   reason tags and native wire compatibility. Accept older configuration exports
   without discarding blocks or exemptions.
+- Fix the middleware CSV log path so only a trailing `.log` becomes `.csv`
+  (Django and Flask middleware plus the `aiwaf_logging` and `debug_csv`
+  commands). A `.log` elsewhere in the path, such as in a folder name, and a
+  non-`.log` extension now keep the configured path; anyone who relied on the
+  old rewrite will see CSV logs move to the configured folder and may need to
+  move existing files.
 
 ## Python 1.1.7 / aiwaf-rust 0.2.6 — native honeypot cache
 

@@ -1,4 +1,5 @@
 from django.core.management.base import BaseCommand
+from aiwaf.core.logs import csv_log_path
 import os
 import csv
 
@@ -126,7 +127,7 @@ class Command(BaseCommand):
         self.stdout.write("")
         
         # Check middleware logger file
-        csv_log_file = middleware_log.replace('.log', '.csv')
+        csv_log_file = csv_log_path(middleware_log)
         if os.path.exists(csv_log_file):
             try:
                 with open(csv_log_file, 'r', newline='', encoding='utf-8') as f:
