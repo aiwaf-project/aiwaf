@@ -20,6 +20,16 @@ fn decode_with(bytes: &[u8], plus_is_space: bool) -> String {
     let mut output = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
+        // IIS-style %uXXXX escapes, as in %u2019 OR 1=1.
+        if bytes[i] == b'%' && (bytes.get(i + 1) == Some(&b'u') || bytes.get(i + 1) == Some(&b'U')) && i + 5 < bytes.len() {
+            let unit = std::str::from_utf8(&bytes[i + 2..i + 6]).ok().and_then(|s| u32::from_str_radix(s, 16).ok());
+            if let Some(c) = unit.and_then(char::from_u32) {
+                let mut buffer = [0u8; 4];
+                output.extend_from_slice(c.encode_utf8(&mut buffer).as_bytes());
+                i += 6;
+                continue;
+            }
+        }
         if bytes[i] == b'%' && i + 2 < bytes.len() {
             if let (Some(a), Some(b)) = (
                 (bytes[i + 1] as char).to_digit(16),
@@ -260,11 +270,123 @@ pub fn parse_json(text: &str) -> Result<Option<JsonTree>, ()> {
     }
 }
 
+/// Headers that hold credentials, framing or browser-set values, which aren't checked. Any
+/// other header is: apps store and query headers such as X-Forwarded-For, Accept-Language or
+/// their own X- headers.
+const UNCHECKED_HEADERS: &[&str] = &[
+    "accept", "accept-encoding", "authorization", "proxy-authorization", "cache-control", "connection",
+    "content-encoding", "content-length", "content-md5", "content-type", "host", "keep-alive", "pragma",
+    "te", "trailer", "transfer-encoding", "upgrade", "upgrade-insecure-requests", "dnt", "priority",
+    "x-csrf-token", "x-csrftoken", "x-xsrf-token", "x-api-key", "x-amz-security-token", "x-amz-date",
+    "x-amz-content-sha256", "x-hub-signature", "x-hub-signature-256", "x-request-id", "x-correlation-id",
+    "traceparent", "tracestate", "baggage",
+];
+
+fn header_checked(name: &str) -> bool {
+    !(UNCHECKED_HEADERS.contains(&name)
+        || name.starts_with("sec-")
+        || name.starts_with("if-")
+        || name.starts_with("content-")
+        || name.starts_with("access-control-")
+        || name.starts_with(':'))
+}
+
+/// Checks a URL path for SQL injection, one segment at a time, as in /post/1 OR 1=1. A query
+/// string is ignored: it's checked on its own. The whole path is also checked when a comment
+/// spans segments, as in /get/sleep(/*x*/12).
+pub fn inspect_sql_path(path: &str, budget: usize) -> Option<(String, i32)> {
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+    if path.len() > budget {
+        return Some(("payload_inspection_limit".into(), 413));
+    }
+    let check = |segment: &str| inspect_sql_value(segment, budget);
+    let found = path.split('/').filter(|segment| !segment.is_empty()).take(256).find_map(|segment| {
+        // A matrix parameter, as in /cart;jsessionid=1, is checked by its value.
+        check(segment).or_else(|| segment.split_once('=').and_then(|(_, value)| check(value)))
+    });
+    if found.is_some() {
+        return found;
+    }
+    let decoded = decode(decode(path.as_bytes()).as_bytes());
+    if decoded.contains("/*") || decoded.contains("*/") {
+        return crate::sql::classify(decoded.trim_start_matches('/')).map(|rule| (rule.to_owned(), 403));
+    }
+    None
+}
+
+/// Checks the headers SQL injection reaches through. Cookie names and values, the Referer's
+/// query string and path, and the path and query of X-Original-URL and X-Rewrite-URL are read
+/// by their parts. Any other header is checked as one value, except those that hold
+/// credentials, framing or browser-set values. Header names are matched without regard to case.
+pub fn inspect_sql_headers<'a>(headers: impl IntoIterator<Item = (&'a str, &'a str)>, budget: usize) -> Option<(String, i32)> {
+    let mut checked = 0;
+    for (name, value) in headers.into_iter().take(256) {
+        // Names can also be WSGI keys, as in HTTP_USER_AGENT.
+        let name = name.trim().to_ascii_lowercase();
+        let name = name.strip_prefix("http_").unwrap_or(&name).replace('_', "-");
+        if value.trim().is_empty() || !header_checked(&name) {
+            continue;
+        }
+        let found = match name.as_str() {
+            "cookie" => value.split(';').take(256).find_map(|pair| {
+                let (key, item) = pair.trim().split_once('=').unwrap_or(("", pair.trim()));
+                crate::sql::classify(key.trim())
+                    .map(|rule| (rule.to_owned(), 403))
+                    .or_else(|| inspect_sql(b"", item.trim().as_bytes(), budget, false))
+            }),
+            "referer" | "x-original-url" | "x-rewrite-url" => {
+                let (address, query) = value.split_once('?').unwrap_or((value, ""));
+                let query = query.split('#').next().unwrap_or_default();
+                // The path after the host, as in https://example.com/post/1 OR 1=1.
+                let path = match address.split_once("://") {
+                    Some((_, rest)) => rest.find('/').map_or("", |at| &rest[at..]),
+                    None => address,
+                };
+                inspect_sql(query.as_bytes(), b"", budget, false).or_else(|| inspect_sql_path(path, budget))
+            }
+            _ => inspect_sql_value(value, budget),
+        };
+        if found.is_some() {
+            return found;
+        }
+        checked += 1;
+        if checked >= 64 {
+            break;
+        }
+    }
+    None
+}
+
+/// Returns the attribute values and text of an XML document, bounded to 512 values.
+fn xml_values(text: &str) -> Vec<String> {
+    static VALUES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = VALUES.get_or_init(|| {
+        regex::Regex::new(r#"=\s*"([^"]*)"|=\s*'([^']*)'|>([^<]+)<"#).unwrap()
+    });
+    pattern
+        .captures_iter(text)
+        .filter_map(|c| c.get(1).or_else(|| c.get(2)).or_else(|| c.get(3)))
+        .map(|m| m.as_str().trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .take(512)
+        .collect()
+}
+
 /// Checks a request's query and body for SQL injection with the tokenizer.
 ///
 /// Bounded traversal, including JSON keys, escaped strings and repeated URL decoding. Returns
 /// the rule and status: 403 for an attack, 413 when the request is too large to inspect.
 pub fn inspect_sql(query: &[u8], body: &[u8], budget: usize, exhausted: bool) -> Option<(String, i32)> {
+    walk_sql(query, body, budget, exhausted, true)
+}
+
+/// Checks one value, such as a header or a path segment, without splitting it into form
+/// fields: in 0 <= a and a <= b, the = isn't a field separator.
+fn inspect_sql_value(value: &str, budget: usize) -> Option<(String, i32)> {
+    walk_sql(b"", value.as_bytes(), budget, false, false)
+}
+
+fn walk_sql(query: &[u8], body: &[u8], budget: usize, exhausted: bool, fields: bool) -> Option<(String, i32)> {
     if exhausted {
         return Some(("payload_inspection_limit".into(), 413));
     }
@@ -330,13 +452,24 @@ pub fn inspect_sql(query: &[u8], body: &[u8], budget: usize, exhausted: bool) ->
                         Ok(None) => (),
                     }
                 }
+                if !parsed && decoded.trim_start().starts_with('<') {
+                    // An XML body is checked by its attribute values and text, as in
+                    // <a probe="1234 OR 1=1">, so its own quotes aren't read as a breakout.
+                    let values = xml_values(&decoded);
+                    if !values.is_empty() {
+                        for value in values {
+                            stack.push((Node::Json(JsonTree::Text(value)), depth + 1));
+                        }
+                        parsed = true;
+                    }
+                }
                 if !parsed {
                     // Form decoding turns a literal + into a space, as in '+(SELECT 1)+', so also
                     // check the value with only its %XX escapes decoded.
                     let kept = decode_percent(decode_percent(text.as_bytes()).as_bytes());
                     // Only a raw query string or body is split into form fields. A JSON value,
                     // as in "--warp=e=mc^2", is one value.
-                    let check = if depth <= 1 { crate::sql::classify_fields } else { crate::sql::classify };
+                    let check = if fields && depth <= 1 { crate::sql::classify_fields } else { crate::sql::classify };
                     let rule = check(&decoded).or_else(|| if kept != decoded { check(&kept) } else { None });
                     if let Some(rule) = rule {
                         return Some((rule.to_owned(), 403));
@@ -406,5 +539,118 @@ mod field_tests {
         assert_eq!(inspect_sql(b"", body, 65536, false), None);
         assert_eq!(inspect_sql(b"q=Use+%27in%27+or+%27between%27+here", b"", 65536, false), None);
         assert!(inspect_sql(b"", b"a=1&b=1 OR 1=1", 65536, false).is_some());
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::inspect_sql_headers;
+
+    fn rule(name: &str, value: &str) -> Option<String> {
+        inspect_sql_headers([(name, value)], 65536).map(|(rule, _)| rule)
+    }
+
+    #[test]
+    fn cookies_referers_and_user_agents_are_checked() {
+        assert_eq!(rule("Cookie", "theme=dark; session=' OR '1'='x'--").as_deref(), Some("sql_breakout_single_quote"));
+        assert_eq!(rule("cookie", "id=1%20OR%201%3D1").as_deref(), Some("sql_breakout_numeric"));
+        assert_eq!(rule("Referer", "https://example.com/search?q=1 waitfor delay '0:0:15' --").as_deref(), Some("sql_function"));
+        assert_eq!(rule("User-Agent", "1' and lo_get(16400)::text::bool and 'true").as_deref(), Some("sql_breakout_single_quote"));
+        assert_eq!(rule("User-Agent", "1%27%20OR%201%3D1--").as_deref(), Some("sql_breakout_single_quote"));
+        assert_eq!(rule("HTTP_COOKIE", "a=' OR 1=1--").as_deref(), Some("sql_breakout_single_quote"));
+        assert_eq!(rule("HTTP_USER_AGENT", "Mozilla/5.0 (X11; Linux x86_64)"), None);
+    }
+
+    #[test]
+    fn shared_header_cases() {
+        let cases: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../tests/fixtures/sql_header_cases.json")).unwrap();
+        let pair = |item: &serde_json::Value| (item[0].as_str().unwrap().to_owned(), item[1].as_str().unwrap().to_owned());
+        for item in cases["attacks"].as_array().unwrap() {
+            let (name, value) = pair(item);
+            assert!(rule(&name, &value).is_some(), "missed {name}: {value}");
+        }
+        for item in cases["ordinary"].as_array().unwrap() {
+            let (name, value) = pair(item);
+            assert_eq!(rule(&name, &value), None, "flagged {name}: {value}");
+        }
+    }
+
+    #[test]
+    fn ordinary_headers_pass_and_other_headers_are_ignored() {
+        for (name, value) in [
+            ("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"),
+            ("User-Agent", "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"),
+            ("Cookie", "_ga=GA1.2.1234567890.1700000000; csrftoken=abc123; prefs=%7B%22theme%22%3A%22dark%22%7D"),
+            ("Referer", "https://www.example.fr/327-peintures?categories=a,b&page=2"),
+            ("Authorization", "Bearer ' OR 1=1--"),
+            ("Content-Type", "text/plain; charset=' OR 1=1--"),
+            ("Sec-Ch-Ua", "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\""),
+            ("If-None-Match", "W/\"' OR 1=1--\""),
+            ("X-Forwarded-For", "203.0.113.7, 198.51.100.2"),
+            ("Forwarded", "for=192.0.2.60;proto=http;by=203.0.113.43"),
+            ("Accept-Language", "en-US,en;q=0.9,fr;q=0.8"),
+            ("X-Requested-With", "XMLHttpRequest"),
+        ] {
+            assert_eq!(rule(name, value), None, "{name}: {value}");
+        }
+    }
+
+    #[test]
+    fn other_headers_are_checked() {
+        assert_eq!(rule("X-Anything", "' OR 1=1--").as_deref(), Some("sql_breakout_single_quote"));
+        assert_eq!(rule("SomeHeader", "DELETE FROM users;--").as_deref(), Some("sql_breakout_numeric"));
+        assert_eq!(rule("X-Forwarded-For", "127.0.0.1' AND SLEEP(5)--").as_deref(), Some("sql_breakout_single_quote"));
+        assert_eq!(rule("HTTP_X_REAL_IP", "1' or '1'='1").as_deref(), Some("sql_breakout_single_quote"));
+        assert_eq!(rule("X-Original-URL", "/post/1%20OR%201=1").as_deref(), Some("sql_breakout_numeric"));
+        assert_eq!(rule("Referer", "https://example.com/post/1%20UNION%20SELECT%20password%20FROM%20users").as_deref(), Some("sql_breakout_numeric"));
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::inspect_sql_path;
+
+    fn rule(path: &str) -> Option<String> {
+        inspect_sql_path(path, 65536).map(|(rule, _)| rule)
+    }
+
+    #[test]
+    fn payloads_in_the_path_are_found() {
+        for path in [
+            "/post/1234%20OR%201=1",
+            "/post/EmptyValue'%20and%20526=527",
+            "/post/foo')waitfor%20delay'5%3a0%3a20'--",
+            "/post/sleep(20)",
+            "/post/foo/24'union+all+select+1,2,3+from+aa/bar",
+            "/get/if(now()=sysdate(),sleep(/*comment*/12),0)/",
+            "/items;id=1%20OR%201=1",
+        ] {
+            assert!(rule(path).is_some(), "missed {path}");
+        }
+    }
+
+    #[test]
+    fn shared_path_cases() {
+        let cases: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../tests/fixtures/sql_path_cases.json")).unwrap();
+        for path in cases["attacks"].as_array().unwrap() {
+            assert!(rule(path.as_str().unwrap()).is_some(), "missed {path}");
+        }
+        for path in cases["ordinary"].as_array().unwrap() {
+            assert_eq!(rule(path.as_str().unwrap()), None, "flagged {path}");
+        }
+    }
+
+    #[test]
+    fn ordinary_paths_pass() {
+        for path in [
+            "/", "/api/v1/orders/123/items", "/users/o'reilly", "/wiki/Don't_Stop_Me_Now", "/blog/2024/01/union-select-committee",
+            "/search/rock%20'n'%20roll", "/files/report%20(1).pdf", "/product/12\"-ruler", "/drop/table-of-contents",
+            "/cart;jsessionid=8F1A2B3C", "/static/js/app.min.js", "/@user/posts", "/~home/index.html", "/c++/tutorial",
+            "/select-a-colour", "/orders?id=1 OR 1=1",
+        ] {
+            assert_eq!(rule(path), None, "flagged {path}");
+        }
     }
 }

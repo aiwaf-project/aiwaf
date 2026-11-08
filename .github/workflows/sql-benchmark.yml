@@ -1,0 +1,51 @@
+name: SQL detection benchmark
+
+# Runs the SQL check against the OWASP Core Rule Set and libinjection test data, and fails if
+# detection or false positives get worse than the floors in scripts/sql_benchmark.py.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "rust/crates/aiwaf_core/**"
+      - "rust/src/**"
+      - "scripts/sql_benchmark.py"
+      - "tests/fixtures/sql_injection_cases.json"
+      - ".github/workflows/sql-benchmark.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "rust/crates/aiwaf_core/**"
+      - "rust/src/**"
+      - "scripts/sql_benchmark.py"
+      - "tests/fixtures/sql_injection_cases.json"
+      - ".github/workflows/sql-benchmark.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install aiwaf-rust from source
+        uses: ./.github/actions/setup-python-from-source
+        with:
+          packages: pyyaml
+
+      - name: Cache the test data
+        uses: actions/cache@v4
+        with:
+          path: .cache/sql-benchmark
+          key: sql-benchmark-${{ hashFiles('scripts/sql_benchmark.py') }}
+
+      - name: Measure SQL detection
+        run: python scripts/sql_benchmark.py --require --misses 10

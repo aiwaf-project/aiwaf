@@ -392,9 +392,15 @@ impl NativeCSVPipeline {
                 ));
             }
             if p.sql_mode != "off" {
-                if let Some((rule, status)) =
-                    py.allow_threads(|| aiwaf_core::payload::inspect_sql(&query, &body, p.max_bytes, exhausted))
-                {
+                if let Some((rule, status)) = py.allow_threads(|| {
+                    aiwaf_core::payload::inspect_sql(&query, &body, p.max_bytes, exhausted).or_else(|| {
+                        aiwaf_core::payload::inspect_sql_headers(
+                            f.headers.iter().map(|(name, value)| (name.as_str(), value.as_str())),
+                            p.max_bytes,
+                        )
+                        .or_else(|| aiwaf_core::payload::inspect_sql_path(&f.path, p.max_bytes))
+                    })
+                }) {
                     return Ok((status, json!({"error":rule}), rule));
                 }
             }

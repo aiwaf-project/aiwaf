@@ -79,3 +79,44 @@ describe('the SQL check in aiwaf-wasm', () => {
     expect(CASES.attacks.length).toBeGreaterThan(50);
   });
 });
+
+describe('headers', () => {
+  const HEADERS = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'sql_header_cases.json'), 'utf8'));
+  const inspect = headers => createInspector({})({ headers });
+
+  test('shared header cases', () => {
+    expect(HEADERS.attacks.filter(([name, value]) => !inspect({ [name.toLowerCase()]: value }))).toEqual([]);
+    expect(HEADERS.ordinary.filter(([name, value]) => inspect({ [name.toLowerCase()]: value }))).toEqual([]);
+  });
+
+  test('repeated and missing headers', () => {
+    expect(inspect({ cookie: ['a=1', "b=' OR 1=1--"] }).rule).toBe('sql_breakout_single_quote');
+    expect(inspect({ authorization: "Bearer ' OR 1=1--", cookie: undefined })).toBeNull();
+    expect(inspect(undefined)).toBeNull();
+  });
+
+  test('other headers are checked, except credentials and framing', () => {
+    expect(inspect({ 'x-other': "' OR 1=1--" }).rule).toBe('sql_breakout_single_quote');
+    expect(inspect({ 'x-forwarded-for': "127.0.0.1' AND SLEEP(5)--" })).not.toBeNull();
+    expect(inspect({ 'x-forwarded-for': '203.0.113.7, 198.51.100.2', 'content-type': "text/plain; x=' OR 1=1--" })).toBeNull();
+  });
+});
+
+describe('URL path', () => {
+  const inspect = url => createInspector({})({ url, headers: {} });
+
+  test('payloads in the path are caught and ordinary paths pass', () => {
+    expect(inspect('/post/1234%20OR%201=1').rule).toBe('sql_breakout_numeric');
+    expect(inspect("/post/EmptyValue'%20and%20526=527?page=2")).not.toBeNull();
+    for (const url of ['/', '/api/v1/orders/123?sort=desc', "/users/o'reilly", '/blog/union-select-committee', '/c++/tutorial']) {
+      expect(inspect(url)).toBeNull();
+    }
+  });
+
+  test('shared path cases', () => {
+    const cases = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'sql_path_cases.json'), 'utf8'));
+    expect(cases.attacks.filter(url => !inspect(url))).toEqual([]);
+    // A query string is checked on its own, as a query.
+    expect(cases.ordinary.filter(url => inspect(url.split('?')[0]))).toEqual([]);
+  });
+});

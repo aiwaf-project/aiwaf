@@ -347,6 +347,23 @@ pub fn policy_sql_inspect(py: Python<'_>, query: Vec<u8>, body: Vec<u8>, max_byt
     py.allow_threads(|| aiwaf_core::payload::inspect_sql(&query, &body, max_bytes, false))
 }
 
+/// Checks request headers for SQL injection: cookie names and values, the Referer's query
+/// string and path, and any other header except those holding credentials, framing or
+/// browser-set values. Takes
+/// (name, value) pairs and returns (rule, status) or None, like `policy_sql_inspect`.
+#[pyfunction]
+pub fn policy_sql_inspect_headers(py: Python<'_>, headers: Vec<(String, String)>, max_bytes: usize) -> Option<(String, i32)> {
+    py.allow_threads(|| {
+        aiwaf_core::payload::inspect_sql_headers(headers.iter().map(|(n, v)| (n.as_str(), v.as_str())), max_bytes)
+    })
+}
+
+/// Checks a URL path for SQL injection, one segment at a time.
+#[pyfunction]
+pub fn policy_sql_inspect_path(py: Python<'_>, path: String, max_bytes: usize) -> Option<(String, i32)> {
+    py.allow_threads(|| aiwaf_core::payload::inspect_sql_path(&path, max_bytes))
+}
+
 /// Returns the first route-check rule for this operation that matches the value.
 #[pyfunction]
 pub fn policy_route_rule(py: Python<'_>, sink: String, value: String) -> Option<String> {
@@ -414,6 +431,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(policy_sql_signatures, m)?)?;
     m.add_function(wrap_pyfunction!(policy_sql_tokenizer, m)?)?;
     m.add_function(wrap_pyfunction!(policy_sql_inspect, m)?)?;
+    m.add_function(wrap_pyfunction!(policy_sql_inspect_headers, m)?)?;
+    m.add_function(wrap_pyfunction!(policy_sql_inspect_path, m)?)?;
     m.add_function(wrap_pyfunction!(policy_route_rule, m)?)?;
     m.add_class::<RouteRiskChecker>()?;
     m.add_function(wrap_pyfunction!(policy_sql_tokenizers, m)?)?;

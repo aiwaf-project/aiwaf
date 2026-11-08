@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CRATE = ROOT / "rust" / "crates" / "aiwaf_wasm"
 PACKAGE = CRATE / "pkg"
 INSTALLED = ROOT / "js" / "node_modules" / "aiwaf-wasm"
-NEEDED = ("sql_inspect", "route_rule", "sql_tokenizer", "RouteRiskChecker")
+NEEDED = ("sql_inspect", "sql_inspect_headers", "sql_inspect_path", "route_rule", "sql_tokenizer", "RouteRiskChecker")
 
 
 def main() -> int:

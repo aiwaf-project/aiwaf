@@ -8,8 +8,8 @@ beforeAll(async () => {
   jest.resetModules();
 });
 const checkFunctions = () => {
-  const { sql_inspect, sql_tokenizer, route_rule, RouteRiskChecker } = realChecks;
-  return { sql_inspect, sql_tokenizer, route_rule, RouteRiskChecker };
+  const { sql_inspect, sql_inspect_headers, sql_inspect_path, sql_tokenizer, route_rule, RouteRiskChecker } = realChecks;
+  return { sql_inspect, sql_inspect_headers, sql_inspect_path, sql_tokenizer, route_rule, RouteRiskChecker };
 };
 
 describe('WASM header validation config passthrough', () => {

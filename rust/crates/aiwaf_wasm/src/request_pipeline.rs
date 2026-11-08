@@ -376,6 +376,16 @@ impl Engine {
                 {
                     status = s;
                     reason = k.into();
+                } else if let Some((k, s)) = aiwaf_core::payload::inspect_sql_headers(
+                    r.headers.iter().map(|(name, value)| (name.as_str(), value.as_str())),
+                    p.max_bytes,
+                ) {
+                    // Cookies, the Referer and other headers, as in Python and Node.js.
+                    status = s as _;
+                    reason = k;
+                } else if let Some((k, s)) = aiwaf_core::payload::inspect_sql_path(&r.path, p.max_bytes) {
+                    status = s as _;
+                    reason = k;
                 }
             }
             if status == 0
@@ -901,6 +911,33 @@ mod tests {
             let decision = begin(&mut engine, request("8.8.8.8", "/api", "GET", 100.0, json!(null)));
             assert_eq!(decision["status"], 403);
         }
+    }
+    #[test]
+    fn sql_in_checked_headers_is_blocked() {
+        let profile = json!({"enabled":["ip_keyword_block"], "exempt_paths":[]}).to_string();
+        let mut engine = Engine::new(&profile).unwrap();
+        let mut r: Value = serde_json::from_str(&request("8.8.4.4", "/api", "GET", 100.0, json!(null))).unwrap();
+        r["headers"]["HTTP_COOKIE"] = json!("theme=dark; session=' OR '1'='x'--");
+        let decision = begin(&mut engine, r.to_string());
+        assert_eq!(decision["status"], 403);
+        let mut ok: Value = serde_json::from_str(&request("8.8.4.5", "/api", "GET", 100.0, json!(null))).unwrap();
+        ok["headers"]["HTTP_COOKIE"] = json!("_ga=GA1.2.1.1; csrftoken=abc123");
+        ok["headers"]["HTTP_AUTHORIZATION"] = json!("Bearer ' OR 1=1--");
+        let decision = begin(&mut engine, ok.to_string());
+        assert_ne!(decision["status"], 403);
+        let mut other: Value = serde_json::from_str(&request("8.8.4.6", "/api", "GET", 100.0, json!(null))).unwrap();
+        other["headers"]["HTTP_X_FORWARDED_FOR"] = json!("127.0.0.1' AND SLEEP(5)--");
+        assert_eq!(begin(&mut engine, other.to_string())["status"], 403);
+    }
+
+    #[test]
+    fn sql_in_the_path_is_blocked() {
+        let profile = json!({"enabled":["ip_keyword_block"], "exempt_paths":[]}).to_string();
+        let mut engine = Engine::new(&profile).unwrap();
+        let r = request("8.8.4.7", "/post/1234%20OR%201=1", "GET", 100.0, json!(null));
+        assert_eq!(begin(&mut engine, r)["status"], 403);
+        let ok = request("8.8.4.8", "/users/o'reilly", "GET", 100.0, json!(null));
+        assert_ne!(begin(&mut engine, ok)["status"], 403);
     }
     #[test]
     fn structured_sql_and_limits() {

@@ -21,6 +21,21 @@ function bodyBytes(body) {
   }
 }
 
+// Every header is passed on. aiwaf-wasm decides which to check: cookies, the Referer and any
+// other header except those holding credentials, framing or browser-set values.
+function headerPairs(headers) {
+  if (!headers || typeof headers !== 'object') return [];
+  const found = [];
+  for (const [name, value] of Object.entries(headers)) {
+    if (value === undefined || value === null) continue;
+    for (const item of Array.isArray(value) ? value : [value]) {
+      found.push([String(name), String(item)]);
+      if (found.length >= 256) return found;
+    }
+  }
+  return found;
+}
+
 function createInspector(options = {}) {
   const mode = String(options.AIWAF_SQL_INJECTION_MODE ?? process.env.AIWAF_SQL_INJECTION_MODE ?? 'block').toLowerCase();
   if (!['block', 'monitor', 'off'].includes(mode)) throw new Error('Invalid AIWAF_SQL_INJECTION_MODE');
@@ -41,6 +56,10 @@ function createInspector(options = {}) {
         ? { rule: 'payload_inspection_limit', status: 413 }
         : JSON.parse(wasm.sql_inspect(EMPTY, query, maxBytes));
     }
+    if (!found) found = JSON.parse(wasm.sql_inspect_headers(JSON.stringify(headerPairs(req.headers)), maxBytes));
+    // The URL path, one segment at a time, as in /post/1 OR 1=1.
+    const path = String(req.originalUrl || req.url || '').split('?')[0];
+    if (!found && path) found = JSON.parse(wasm.sql_inspect_path(path, maxBytes));
     return found ? { rule: found.rule, status: found.status, mode } : null;
   };
 }

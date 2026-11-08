@@ -13,7 +13,7 @@ import os
 from . import rust_backend
 
 LOGGER = logging.getLogger("aiwaf.payload")
-_RUST_NEEDED = ("policy_sql_inspect", "policy_sql_tokenizer", "policy_route_rule", "RouteRiskChecker")
+_RUST_NEEDED = ("policy_sql_inspect", "policy_sql_inspect_headers", "policy_sql_inspect_path", "policy_sql_tokenizer", "policy_route_rule", "RouteRiskChecker")
 
 
 def rust():
@@ -63,6 +63,24 @@ class SQLInjectionPolicy:
         found = self._inspect(query, body, self.max_bytes)
         return Finding(*found) if found else None
 
+    def inspect_headers(self, headers):
+        """Check request headers. aiwaf-rust chooses which: cookies, the Referer and any other
+        header except those holding credentials, framing or browser-set values."""
+        if self.mode == "off":
+            return None
+        pairs = [(str(name), str(value)) for name, value in list(headers)[:256] if value]
+        found = rust().policy_sql_inspect_headers(pairs, self.max_bytes) if pairs else None
+        return Finding(*found) if found else None
+
+    def inspect_path(self, path):
+        """Check the URL path one segment at a time, as in /post/1 OR 1=1."""
+        if self.mode == "off" or not path:
+            return None
+        if isinstance(path, (bytes, bytearray)):
+            path = bytes(path).decode("utf-8", errors="replace")
+        found = rust().policy_sql_inspect_path(str(path), self.max_bytes)
+        return Finding(*found) if found else None
+
     def enforce(self, finding):
         if finding and self.mode == "monitor":
             LOGGER.warning("aiwaf.payload rule=%s mode=monitor", finding.rule)
@@ -72,7 +90,28 @@ class SQLInjectionPolicy:
 
 def inspectable_content_type(content_type):
     media = (content_type or "").split(";", 1)[0].strip().lower()
-    return media == "application/json" or media.endswith("+json") or media == "application/x-www-form-urlencoded"
+    return (media in ("application/json", "application/x-www-form-urlencoded", "application/xml", "text/xml")
+            or media.endswith(("+json", "+xml")))
+
+
+def _wsgi_headers(request, django):
+    """Every request header. aiwaf-rust decides which ones to check."""
+    if django:
+        meta = getattr(request, "META", None) or {}
+        return [(name[5:], value) for name, value in meta.items() if name.startswith("HTTP_") and isinstance(value, str)]
+    headers = getattr(request, "headers", None)
+    try:
+        return list(headers.items()) if headers is not None else []
+    except Exception:  # A header object that can't be listed, as in some test doubles.
+        return []
+
+
+def _check_headers_and_path(policy, headers, path):
+    # Pipelines that only buffer here run their own header and path checks.
+    finding = policy.inspect_headers(headers) if hasattr(policy, "inspect_headers") else None
+    if not finding and hasattr(policy, "inspect_path"):
+        finding = policy.inspect_path(path)
+    return finding
 
 
 class _PrefixStream(io.RawIOBase):
@@ -128,7 +167,11 @@ def inspect_wsgi_request(request, policy, *, django=False, evaluator=None, obser
         finding = observer(query, body)
         if finding:
             return finding
-    return policy.enforce((evaluator or policy.inspect)(query, body))
+    finding = (evaluator or policy.inspect)(query, body)
+    if not finding:
+        path = (getattr(request, "path_info", None) or getattr(request, "path", "")) if django else getattr(request, "path", "")
+        finding = _check_headers_and_path(policy, _wsgi_headers(request, django), path)
+    return policy.enforce(finding)
 
 
 async def inspect_asgi_request(request, policy, *, evaluator=None, observer=None):
@@ -176,4 +219,7 @@ async def inspect_asgi_request(request, policy, *, evaluator=None, observer=None
         finding = observer(query, body)
         if finding:
             return finding
-    return policy.enforce((evaluator or policy.inspect)(query, body))
+    finding = (evaluator or policy.inspect)(query, body)
+    if not finding:
+        finding = _check_headers_and_path(policy, list(request.headers.items()), request.scope.get("path", ""))
+    return policy.enforce(finding)

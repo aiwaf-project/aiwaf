@@ -134,7 +134,21 @@ value closes that SQL value and what follows reads as SQL. It catches `1 OR 1=1`
 and `Drop table tennis; update your set list`.
 
 Text such as `union select password` on its own isn't flagged, because without a value to
-close it can't change a query. `AIWAF_SQL_INJECTION_MODE` still chooses whether a finding
+close it can't change a query.
+
+Besides the query string and body, the check reads the URL path and the headers, where SQL
+injection also reaches applications. The path is checked one segment at a time, as in
+`/post/1 OR 1=1`. Cookies are checked by their names and values, and the `Referer`,
+`X-Original-URL` and `X-Rewrite-URL` by their path and query string. Every other header is
+checked as one value, such as `User-Agent`, `X-Forwarded-For`, `Accept-Language` or an app's own
+`X-` headers. Headers that hold credentials, framing or browser-set values aren't checked:
+`Authorization`, `Accept`, `Content-*`, `Sec-*`, `If-*`, `Host`, CSRF tokens and tracing IDs.
+Values are decoded the same way, including IIS `%uXXXX` escapes and null bytes, and JSON and XML
+documents are checked by their values. Real browser, app, crawler, client and proxy headers,
+analytics and session cookies, and search referers are in `tests/fixtures/sql_header_cases.json`,
+and ordinary and attack paths in `tests/fixtures/sql_path_cases.json`. Every implementation runs
+both. None of the 11,743 URL paths found in the documentation of this project's dependencies is
+flagged. `AIWAF_SQL_INJECTION_MODE` still chooses whether a finding
 blocks (the default), is only logged, or is ignored.
 
 In Python, the whole request check runs in `aiwaf-rust`, which is required: one call walks
@@ -147,6 +161,29 @@ The cases in `tests/fixtures/sql_injection_cases.json` run against every copy in
 `python scripts/sql_accuracy.py` reports the result. They were written alongside the
 tokenizer, so passing them doesn't prove real-world accuracy. Add any miss or false block you
 see there.
+
+Outside test data is measured too. `python scripts/sql_benchmark.py` runs the whole SQL check
+against the OWASP Core Rule Set's SQL injection tests and libinjection's test data, and CI
+fails if the results get worse:
+
+| Test set | Attacks caught | Ordinary values flagged |
+| --- | --- | --- |
+| libinjection `sqli-*.txt` | 84,830 of 85,791 (98.9%) | 1 of 421 in `false_positives.txt` |
+| CRS 942, paranoia level 1 | 230 of 324 (71%) | 0 of 49 |
+| CRS 942, paranoia level 2 | 209 of 498 (42%) | 2 of 90 |
+
+CRS also matches SQL keywords and function names on their own, such as `concat(` or
+`cast(`, especially at higher paranoia levels. AIWAF flags values that break out of a
+SQL value, plus names that only appear in SQL such as `pg_sleep(` and `information_schema`, so
+it misses many of those CRS fragments by design: matching them would block code snippets and
+ordinary text. Each CRS test's whole request is checked, including its path and headers. Three
+CRS tests marked benign carry SQL injection, such as `/post/foo/24 union all select 1,2,3 from aa`,
+because CRS only means that one rule shouldn't match them. AIWAF flags them, and the benchmark
+lists them apart from false positives.
+
+The SQL tokenizer, request walker and route checks are fuzzed: for two minutes per target on
+each pull request, and for 30 minutes each week (`rust/fuzz`). Short random-input tests also
+run with every `cargo test`.
 
 ### Route-specific checks from init
 

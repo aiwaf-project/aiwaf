@@ -41,14 +41,14 @@ fn rules() -> &'static Vec<(&'static str, &'static str, Regex)> {
             // Shell commands are lower-case. A chained command needs an argument that looks like one,
             // so "cat food" passes, and Markdown's spaced backticks, as in "The `id` field", aren't commands.
             rule("command", "command_chain", format!(r#"[;&|]\s*(?:{COMMANDS})(?:\s*$|\s*[;&|`)]|\s+\S*[-/.$~'"0-9:\\])"#)),
-            rule("command", "command_substitution", format!(r"\$\(\s*(?:{COMMANDS})\b[^)]{{0,200}}\)|(?:^|\S)`\s*(?:{COMMANDS})\b[^`]{{0,200}}`")),
+            rule("command", "command_substitution", format!(r"\$\(\s*(?:{COMMANDS})(?-u:\b)[^)]{{0,200}}\)|(?:^|\S)`\s*(?:{COMMANDS})(?-u:\b)[^`]{{0,200}}`")),
             rule("path", "path_traversal", r"(?:^|[/\\])\.\.(?:[/\\]|$)".into()),
             rule("path", "path_sensitive_location", r"(?i)^(?:/etc/|/proc/|/root/|/var/log/|[a-z]:[/\\]|\\\\)".into()),
             rule("path", "path_null_byte", r"\x00".into()),
             rule("ssrf", "ssrf_scheme", r"(?i)^\s*(?:file|gopher|dict|ftp|ldap|tftp|netdoc)://".into()),
             rule("ssrf", "ssrf_internal_host", r"(?i)^\s*(?:https?:)?//(?:[^/@?#\s]{0,128}@)?(?:localhost|127\.\d|0\.0\.0\.0|10\.\d|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.|\[::1\]|metadata\.google\.internal)".into()),
-            rule("nosql", "nosql_operator", format!(r#"(?i)^\$(?:{NOSQL})$|\[\$(?:{NOSQL})\]|\{{\s*"?\$(?:{NOSQL})\b"#)),
-            rule("code", "code_expression", r"(?i)__import__|\b(?:eval|exec|compile)\s*\(|\brequire\s*\(|\bprocess\.(?:env|exit|mainModule)|java\.lang\.|Runtime\.getRuntime|\bT\s*\(\s*java".into()),
+            rule("nosql", "nosql_operator", format!(r#"(?i)^\$(?:{NOSQL})$|\[\$(?:{NOSQL})\]|\{{\s*"?\$(?:{NOSQL})(?-u:\b)"#)),
+            rule("code", "code_expression", r"(?i)__import__|(?-u:\b)(?:eval|exec|compile)\s*\(|(?-u:\b)require\s*\(|(?-u:\b)process\.(?:env|exit|mainModule)|java\.lang\.|Runtime\.getRuntime|(?-u:\b)T\s*\(\s*java".into()),
             rule("template", "template_expression", r"(?i)\{\{.{0,200}\}\}|\{%.{0,200}%\}|\$\{.{0,200}\}|<%.{0,200}%>|#\{.{0,200}\}".into()),
             rule("deserialization", "deserialization_marker", r#"^rO0AB|^aced0005|^gASV|!!python/|!!javax\.|^O:\d+:"|__reduce__|_\$\$ND_FUNC\$\$_"#.into()),
         ]

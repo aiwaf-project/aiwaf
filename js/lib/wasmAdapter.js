@@ -51,6 +51,8 @@ async function loadWasmFromDisk() {
     RouteRiskChecker: bg.RouteRiskChecker,
     route_rule: bg.route_rule,
     sql_inspect: bg.sql_inspect,
+    sql_inspect_headers: bg.sql_inspect_headers,
+    sql_inspect_path: bg.sql_inspect_path,
     sql_tokenizer: bg.sql_tokenizer
   };
 }

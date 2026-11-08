@@ -2,7 +2,7 @@
 
 // The SQL check and route checks run in aiwaf-wasm, which Node.js requires, as Python requires
 // aiwaf-rust. There is no JavaScript copy. Call load() once before the first check.
-const NEEDED = ['sql_inspect', 'sql_tokenizer', 'route_rule', 'RouteRiskChecker'];
+const NEEDED = ['sql_inspect', 'sql_inspect_headers', 'sql_inspect_path', 'sql_tokenizer', 'route_rule', 'RouteRiskChecker'];
 const MESSAGE = "AIWAF's request checks need aiwaf-wasm 0.2.6 or newer. Run: npm install aiwaf-wasm@^0.2.6";
 
 let pending = null;

@@ -149,3 +149,66 @@ def test_the_accuracy_report_passes(capsys):
     spec.loader.exec_module(module)
     assert module.main([]) == 0
     assert f"caught {len(_CASES['attacks'])} of {len(_CASES['attacks'])} attacks, flagged 0" in capsys.readouterr().out
+
+
+_HEADERS = _json.loads((_FIXTURES / "sql_header_cases.json").read_text(encoding="utf-8"))
+
+
+def test_shared_header_cases():
+    policy = _sql.SQLInjectionPolicy("block")
+    assert [pair for pair in _HEADERS["attacks"] if policy.inspect_headers([pair]) is None] == []
+    assert [pair for pair in _HEADERS["ordinary"] if policy.inspect_headers([pair]) is not None] == []
+    assert _sql.SQLInjectionPolicy("off").inspect_headers([("Cookie", "a=' OR 1=1--")]) is None
+    # Any header is checked, except those holding credentials, framing or browser-set values.
+    assert policy.inspect_headers([("Cookie", ""), ("X-Other", "' OR 1=1--")]).rule == "sql_breakout_single_quote"
+    assert policy.inspect_headers([("X-Forwarded-For", "127.0.0.1' AND SLEEP(5)--")]).rule == "sql_breakout_single_quote"
+    assert policy.inspect_headers([("Authorization", "Bearer ' OR 1=1--"), ("Content-Type", "text/plain")]) is None
+
+
+def test_url_paths_are_inspected():
+    policy = _sql.SQLInjectionPolicy("block")
+    assert policy.inspect_path("/post/1234%20OR%201=1").rule == "sql_breakout_numeric"
+    assert policy.inspect_path(b"/post/EmptyValue'%20and%20526=527") is not None
+    for path in ("/", "/api/v1/orders/123", "/users/o'reilly", "/blog/union-select-committee", "/c++/tutorial"):
+        assert policy.inspect_path(path) is None, path
+    assert _sql.SQLInjectionPolicy("off").inspect_path("/post/1 OR 1=1") is None
+    cases = _json.loads((_FIXTURES / "sql_path_cases.json").read_text(encoding="utf-8"))
+    assert [path for path in cases["attacks"] if policy.inspect_path(path) is None] == []
+    assert [path for path in cases["ordinary"] if policy.inspect_path(path) is not None] == []
+
+
+def test_frameworks_check_headers():
+    from flask import Flask
+
+    app = Flask(__name__)
+    app.config.update(TESTING=True)
+
+    @app.get("/")
+    def index():
+        return "ok"
+
+    from aiwaf.flask.ip_and_keyword_block_middleware import IPAndKeywordBlockMiddleware
+    from unittest.mock import MagicMock, patch
+
+    module = "aiwaf.flask.ip_and_keyword_block_middleware."
+    store = MagicMock()
+    store.get_top_keywords.return_value = []
+    with patch(module + "is_exempt", return_value=False), patch(module + "should_apply_middleware", return_value=True),          patch(module + "BlocklistManager.is_blocked", return_value=False), patch(module + "get_keyword_store", return_value=store):
+        IPAndKeywordBlockMiddleware(app)
+        client = app.test_client()
+        # Werkzeug's test client replaces the Cookie header with its own jar, so use the User-Agent.
+        blocked = client.get("/", headers={"User-Agent": "1' and lo_get(16400)::text::bool and 'true"})
+        allowed = client.get("/", headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Cookie": "_ga=GA1.2.1.1"})
+        forwarded = client.get("/", headers={"X-Forwarded-For": "127.0.0.1' AND SLEEP(5)--"})
+        in_path = client.get("/post/1234%20OR%201=1")
+    assert (blocked.status_code, blocked.get_json()["error"]) == (403, "sql_breakout_single_quote")
+    assert allowed.status_code == 200
+    assert forwarded.status_code == 403
+    assert (in_path.status_code, in_path.get_json()["error"]) == (403, "sql_breakout_numeric")
+
+
+def test_xml_bodies_are_inspected():
+    assert _sql.inspectable_content_type("application/xml; charset=utf-8")
+    assert _sql.inspectable_content_type("application/soap+xml")
+    policy = _sql.SQLInjectionPolicy("block")
+    assert policy.inspect(None, b'<?xml version="1.0"?><root><a probe="1234 OR 1=1"></a></root>').rule == "sql_breakout_numeric"

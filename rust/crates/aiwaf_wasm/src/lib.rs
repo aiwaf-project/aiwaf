@@ -222,6 +222,28 @@ pub fn sql_inspect(query: &[u8], body: &[u8], max_bytes: usize) -> String {
     }
 }
 
+/// Checks request headers for SQL injection: cookie names and values, the Referer's query
+/// string and path, and any other header except those holding credentials, framing or
+/// browser-set values. Takes a
+/// JSON array of [name, value] pairs and returns JSON like `sql_inspect`.
+#[wasm_bindgen]
+pub fn sql_inspect_headers(headers_json: &str, max_bytes: usize) -> String {
+    let headers: Vec<(String, String)> = serde_json::from_str(headers_json).unwrap_or_default();
+    match aiwaf_core::payload::inspect_sql_headers(headers.iter().map(|(n, v)| (n.as_str(), v.as_str())), max_bytes) {
+        Some((rule, status)) => serde_json::json!({"rule": rule, "status": status}).to_string(),
+        None => "null".into(),
+    }
+}
+
+/// Checks a URL path for SQL injection, one segment at a time. Returns JSON {rule, status} or null.
+#[wasm_bindgen]
+pub fn sql_inspect_path(path: &str, max_bytes: usize) -> String {
+    match aiwaf_core::payload::inspect_sql_path(path, max_bytes) {
+        Some((rule, status)) => serde_json::json!({"rule": rule, "status": status}).to_string(),
+        None => "null".into(),
+    }
+}
+
 /// Returns the SQL tokenizer's rule for one value, or undefined.
 #[wasm_bindgen]
 pub fn sql_tokenizer(value: &str) -> Option<String> {
@@ -916,6 +938,9 @@ mod request_check_tests {
         assert_eq!(sql_inspect(b"", b"aaaaaaaaaaaa", 10), r#"{"rule":"payload_inspection_limit","status":413}"#);
         assert_eq!(sql_tokenizer("1 OR 1=1").as_deref(), Some("sql_breakout_numeric"));
         assert_eq!(sql_tokenizer("o'reilly"), None);
+        assert_eq!(sql_inspect_headers(r#"[["Cookie","a=' OR 1=1--"]]"#, 65536), r#"{"rule":"sql_breakout_single_quote","status":403}"#);
+        assert_eq!(sql_inspect_headers(r#"[["User-Agent","Mozilla/5.0 (X11; Linux x86_64)"]]"#, 65536), "null");
+        assert_eq!(sql_inspect_headers("not json", 65536), "null");
     }
 
     #[test]

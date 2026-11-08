@@ -2166,6 +2166,8 @@ mod model_contract_tests {
         assert_eq!(predictions[1], -1);
     }
 }
+#[cfg(test)]
+mod fuzz_smoke;
 pub mod payload;
 pub mod route_risks;
 pub mod sql;
