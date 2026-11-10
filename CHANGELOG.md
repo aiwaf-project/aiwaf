@@ -98,6 +98,9 @@
 - Update package versions and matching native dependency requirements for the next release.
 - Remove benchmark/profiling utilities and consolidate release documentation into README/CHANGELOG.
 - Remove the deprecated Rust floating-point module import.
+- Write Flask and FastAPI combined access log timestamps in UTC to match their
+  `+0000` offset. On non-UTC servers, entries written before and after this fix
+  differ by the server's UTC offset; existing log files are not converted.
 - Use blocklist/allowlist in Python, JavaScript, Rust/WASM, Java, CLI help and
   website documentation. Retain prior import, method and command aliases.
 - Preserve existing CSV filenames, Django database/model identity, stored legacy
