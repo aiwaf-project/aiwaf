@@ -5,9 +5,78 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AiwafConsoleLogicTest {
+
+    private static final String VULNERABLE = """
+            @RestController
+            class App {
+                @PostMapping("/login")
+                String view(@RequestParam String value) throws Exception {
+                    Runtime.getRuntime().exec(value);
+                    return "ok";
+                }
+            }
+            """;
+
+    @Test
+    void audit_returns_exit_codes_and_writes_reports(@org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+        java.nio.file.Files.writeString(directory.resolve("App.java"), VULNERABLE);
+        String root = directory.toString();
+        java.nio.file.Path report = directory.resolve("report.json");
+
+        assertEquals(0, AiwafConsole.handleAudit(new String[]{"audit", root, "--output", report.toString()}));
+        assertTrue(java.nio.file.Files.readString(report).contains("found 1 possible"));
+        assertEquals(1, AiwafConsole.handleAudit(new String[]{"audit", root, "--fail-on-findings", "--output", report.toString()}));
+        assertEquals(0, AiwafConsole.handleAudit(new String[]{"audit", root, "--format", "json", "--output", report.toString()}));
+        assertTrue(java.nio.file.Files.readString(report).contains("\"language\" : \"java\""));
+        assertEquals(2, AiwafConsole.handleAudit(new String[]{"audit", root, "--format", "xml"}));
+        assertEquals(2, AiwafConsole.handleAudit(new String[]{"audit", root, "--output"}));
+        assertEquals(2, AiwafConsole.handleAudit(new String[]{"audit", directory.resolve("missing").toString()}));
+    }
+
+    @Test
+    void audit_saves_findings_to_a_manifest(@org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+        java.nio.file.Files.writeString(directory.resolve("App.java"), VULNERABLE);
+        java.nio.file.Path manifest = directory.resolve("paths.json");
+        String root = directory.toString();
+        java.nio.file.Path report = directory.resolve("report.txt");
+        assertEquals(2, AiwafConsole.handleAudit(new String[]{"audit", root, "--output", report.toString(), "--manifest", manifest.toString()}));
+        assertEquals(2, AiwafConsole.handleAudit(new String[]{"audit", root, "--manifest"}));
+        AiwafConsole.main(new String[]{"init", "--source", root, "--output", manifest.toString()});
+        assertEquals(0, AiwafConsole.handleAudit(new String[]{"audit", root, "--output", report.toString(), "--manifest", manifest.toString()}));
+        assertTrue(java.nio.file.Files.readString(manifest).contains("injection_risks"));
+    }
+
+    @Test
+    void init_can_read_routes_from_source(@org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+        java.nio.file.Files.writeString(directory.resolve("App.java"), VULNERABLE);
+        java.nio.file.Path manifest = directory.resolve("out").resolve("paths.json");
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        PrintStream oldOut = System.out;
+        System.setOut(new PrintStream(out));
+        try {
+            AiwafConsole.main(new String[]{"init", "--source", directory.toString(), "--output", manifest.toString()});
+        } finally {
+            System.setOut(oldOut);
+        }
+        String content = java.nio.file.Files.readString(manifest);
+        assertTrue(content.contains("/login"));
+        assertTrue(content.contains("java-source"));
+        // init saves the audit's findings for the route's checks.
+        assertTrue(content.contains("injection_risks"));
+
+        java.nio.file.Path plain = directory.resolve("plain.json");
+        System.setOut(new PrintStream(new ByteArrayOutputStream()));
+        try {
+            AiwafConsole.main(new String[]{"init", "--source", directory.toString(), "--output", plain.toString(), "--no-audit"});
+        } finally {
+            System.setOut(oldOut);
+        }
+        assertTrue(!java.nio.file.Files.readString(plain).contains("injection_risks"));
+    }
 
     @Test
     void geo_and_exempt_path_commands_are_supported() {

@@ -1,0 +1,89 @@
+name: Rust tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "rust/**"
+      - "py/aiwaf/**"
+      - "tests/**"
+      - "aiwaf_test.py"
+      - "pyproject.toml"
+      - ".github/workflows/rust-tests.yml"
+      - ".github/actions/setup-python-from-source/**"
+      - "scripts/check_rust_source_build.py"
+      - "scripts/stage_rust_package_files.py"
+  pull_request:
+    branches: [main]
+    paths:
+      - "rust/**"
+      - "py/aiwaf/**"
+      - "tests/**"
+      - "aiwaf_test.py"
+      - "pyproject.toml"
+      - ".github/workflows/rust-tests.yml"
+      - ".github/actions/setup-python-from-source/**"
+      - "scripts/check_rust_source_build.py"
+      - "scripts/stage_rust_package_files.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust core and WASM
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Test Rust core
+        run: cargo test --manifest-path rust/Cargo.toml --locked -p aiwaf_core
+
+      - name: Test PyO3 crate logic
+        run: cargo test --manifest-path rust/Cargo.toml --locked -p aiwaf_rust --lib
+
+      - name: Test native request engine policies
+        run: cargo test --manifest-path rust/Cargo.toml --locked -p aiwaf-wasm --lib
+
+      - name: Install WebAssembly target and wasm-pack
+        run: |
+          rustup target add wasm32-unknown-unknown
+          command -v wasm-pack || cargo install wasm-pack --locked
+
+      - name: Test WebAssembly bindings
+        working-directory: rust/crates/aiwaf_wasm
+        run: wasm-pack test --node
+
+  python-bindings:
+    name: Python against Rust built from source
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python packages with aiwaf-rust from source
+        uses: ./.github/actions/setup-python-from-source
+        with:
+          packages: -e ".[django,flask,fastapi]" pytest pytest-cov coverage httpx redis djangorestframework python-multipart
+
+      - name: Test Python bindings
+        run: python -m pytest rust/tests -q
+
+      - name: Test Python adapters against the source build
+        run: python aiwaf_test.py --rust-only --no-rust-build

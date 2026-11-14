@@ -17,20 +17,23 @@ class PolicyTests(unittest.TestCase):
     def test_attack_and_benign_corpus(self):
         policy = SQLInjectionPolicy()
         for value in ["admin@juice-sh.op' OR 1=1--", "admin@juice-sh.op'--", "x'/**/OR/**/1=1--",
-                      "x%2527%2520OR%25201%253D1--", "x' OR 'a'='a'--", 'UNION ALL SELECT password']:
+                      "x%2527%2520OR%25201%253D1--", "x' OR 'a'='a'--", '1 UNION ALL SELECT password']:
             with self.subTest(value=value):
                 self.assertEqual(policy.inspect(body={'nested': [{'email': value}]}).status, 403)
-        for value in ["O'Reilly", 'select a union membership', 'password#123', 'email@example.com']:
+        for value in ["O'Reilly", 'select a union membership', 'password#123', 'email@example.com',
+                      'UNION ALL SELECT password', '"Item" #3']:
             with self.subTest(value=value):
                 self.assertIsNone(policy.inspect(body={'email': value}))
 
     def test_query_form_and_json_escapes(self):
         policy = SQLInjectionPolicy()
         for body in [b'email=admin%27--', b'{"email":"admin\\u0027--"}']:
-            self.assertEqual(policy.inspect(body=body).rule, 'sql_quote_comment')
-        self.assertEqual(policy.inspect(query='q=union%20select%20password').rule, 'sql_union_select')
+            self.assertEqual(policy.inspect(body=body).rule, 'sql_breakout_single_quote')
+        self.assertEqual(policy.inspect(query='q=1%20union%20select%20password').rule, 'sql_breakout_numeric')
+        # Without a value to close, this text can't change a query.
+        self.assertIsNone(policy.inspect(query='q=union%20select%20password'))
         for encoding in ('utf-8-sig', 'utf-16', 'utf-32'):
-            self.assertEqual(policy.inspect(body='{"email":"admin\\u0027--"}'.encode(encoding)).rule, 'sql_quote_comment')
+            self.assertEqual(policy.inspect(body='{"email":"admin\\u0027--"}'.encode(encoding)).rule, 'sql_breakout_single_quote')
 
     def test_limits_modes_and_no_secret_evidence(self):
         cyclic = []; cyclic.append(cyclic)
@@ -98,3 +101,114 @@ class PolicyTests(unittest.TestCase):
             request._receive = receive
             return await inspect_asgi_request(request, SQLInjectionPolicy())
         self.assertEqual(asyncio.run(exercise()).status, 413)
+
+
+# The SQL check runs in aiwaf-rust. These cover the shared case files through the Python policy.
+import json as _json
+from pathlib import Path as _Path
+
+import pytest as _pytest
+
+from aiwaf.core import sql_injection as _sql
+from aiwaf.core.native_runtime import native_override as _native_override
+
+_FIXTURES = _Path(__file__).parents[1] / "fixtures"
+_CASES = _json.loads((_FIXTURES / "sql_injection_cases.json").read_text(encoding="utf-8"))
+_ORDINARY = _json.loads((_FIXTURES / "ordinary_text.json").read_text(encoding="utf-8"))["values"]
+
+
+@_pytest.mark.parametrize("use_rust", [True, False])
+def test_shared_cases_through_the_policy(use_rust):
+    policy = _sql.SQLInjectionPolicy("block")
+    with _native_override(use_rust):
+        missed = [value for value in _CASES["attacks"] if policy.inspect(body={"field": value}) is None]
+        flagged = [value for value in _CASES["ordinary"] + _ORDINARY if policy.inspect(body={"field": value}) is not None]
+    assert (missed, flagged) == ([], [])
+
+
+def test_each_rule_and_limit_comes_back_from_rust():
+    policy = _sql.SQLInjectionPolicy("block", max_bytes=64)
+    assert policy.inspect(b"id=1%20OR%201%3D1&page=2", None) == _sql.Finding("sql_breakout_numeric")
+    assert policy.inspect(None, "x' OR 1=1--") == _sql.Finding("sql_breakout_single_quote")
+    assert policy.inspect(None, b'{"a": "x\\" OR 1=1--"}') == _sql.Finding("sql_breakout_double_quote")
+    assert policy.inspect(None, b"a" * 65) == _sql.Finding("payload_inspection_limit", 413)
+    assert policy.inspect(None, {"bad": "\ud800' OR 1=1--"}).rule == "sql_breakout_single_quote"
+
+
+def test_a_missing_or_old_aiwaf_rust_is_reported(monkeypatch):
+    monkeypatch.setattr(_sql.rust_backend, "aiwaf_rust", None)
+    with _pytest.raises(RuntimeError, match="aiwaf-rust 0.2.8"):
+        _sql.SQLInjectionPolicy("block")
+
+
+def test_the_accuracy_report_passes(capsys):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("sql_accuracy", _Path(__file__).parents[2] / "scripts" / "sql_accuracy.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.main([]) == 0
+    assert f"caught {len(_CASES['attacks'])} of {len(_CASES['attacks'])} attacks, flagged 0" in capsys.readouterr().out
+
+
+_HEADERS = _json.loads((_FIXTURES / "sql_header_cases.json").read_text(encoding="utf-8"))
+
+
+def test_shared_header_cases():
+    policy = _sql.SQLInjectionPolicy("block")
+    assert [pair for pair in _HEADERS["attacks"] if policy.inspect_headers([pair]) is None] == []
+    assert [pair for pair in _HEADERS["ordinary"] if policy.inspect_headers([pair]) is not None] == []
+    assert _sql.SQLInjectionPolicy("off").inspect_headers([("Cookie", "a=' OR 1=1--")]) is None
+    # Any header is checked, except those holding credentials, framing or browser-set values.
+    assert policy.inspect_headers([("Cookie", ""), ("X-Other", "' OR 1=1--")]).rule == "sql_breakout_single_quote"
+    assert policy.inspect_headers([("X-Forwarded-For", "127.0.0.1' AND SLEEP(5)--")]).rule == "sql_breakout_single_quote"
+    assert policy.inspect_headers([("Authorization", "Bearer ' OR 1=1--"), ("Content-Type", "text/plain")]) is None
+
+
+def test_url_paths_are_inspected():
+    policy = _sql.SQLInjectionPolicy("block")
+    assert policy.inspect_path("/post/1234%20OR%201=1").rule == "sql_breakout_numeric"
+    assert policy.inspect_path(b"/post/EmptyValue'%20and%20526=527") is not None
+    for path in ("/", "/api/v1/orders/123", "/users/o'reilly", "/blog/union-select-committee", "/c++/tutorial"):
+        assert policy.inspect_path(path) is None, path
+    assert _sql.SQLInjectionPolicy("off").inspect_path("/post/1 OR 1=1") is None
+    cases = _json.loads((_FIXTURES / "sql_path_cases.json").read_text(encoding="utf-8"))
+    assert [path for path in cases["attacks"] if policy.inspect_path(path) is None] == []
+    assert [path for path in cases["ordinary"] if policy.inspect_path(path) is not None] == []
+
+
+def test_frameworks_check_headers():
+    from flask import Flask
+
+    app = Flask(__name__)
+    app.config.update(TESTING=True)
+
+    @app.get("/")
+    def index():
+        return "ok"
+
+    from aiwaf.flask.ip_and_keyword_block_middleware import IPAndKeywordBlockMiddleware
+    from unittest.mock import MagicMock, patch
+
+    module = "aiwaf.flask.ip_and_keyword_block_middleware."
+    store = MagicMock()
+    store.get_top_keywords.return_value = []
+    with patch(module + "is_exempt", return_value=False), patch(module + "should_apply_middleware", return_value=True),          patch(module + "BlocklistManager.is_blocked", return_value=False), patch(module + "get_keyword_store", return_value=store):
+        IPAndKeywordBlockMiddleware(app)
+        client = app.test_client()
+        # Werkzeug's test client replaces the Cookie header with its own jar, so use the User-Agent.
+        blocked = client.get("/", headers={"User-Agent": "1' and lo_get(16400)::text::bool and 'true"})
+        allowed = client.get("/", headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Cookie": "_ga=GA1.2.1.1"})
+        forwarded = client.get("/", headers={"X-Forwarded-For": "127.0.0.1' AND SLEEP(5)--"})
+        in_path = client.get("/post/1234%20OR%201=1")
+    assert (blocked.status_code, blocked.get_json()["error"]) == (403, "sql_breakout_single_quote")
+    assert allowed.status_code == 200
+    assert forwarded.status_code == 403
+    assert (in_path.status_code, in_path.get_json()["error"]) == (403, "sql_breakout_numeric")
+
+
+def test_xml_bodies_are_inspected():
+    assert _sql.inspectable_content_type("application/xml; charset=utf-8")
+    assert _sql.inspectable_content_type("application/soap+xml")
+    policy = _sql.SQLInjectionPolicy("block")
+    assert policy.inspect(None, b'<?xml version="1.0"?><root><a probe="1234 OR 1=1"></a></root>').rule == "sql_breakout_numeric"

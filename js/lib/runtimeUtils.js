@@ -7,12 +7,103 @@ const STATIC_EXTENSIONS = new Set([
   '.xml', '.txt', '.pdf', '.zip', '.tar', '.gz', '.webp', '.avif'
 ]);
 
-function getRequestIp(req = {}) {
-  const forwarded = req.headers?.['x-forwarded-for'];
-  const raw = forwarded
-    ? String(forwarded).split(',')[0].trim()
-    : (req.ip || req.connection?.remoteAddress || req.socket?.remoteAddress || '');
-  return String(raw).replace(/^::ffff:/, '');
+// Upstream peers allowed to supply X-Forwarded-For unless AIWAF_TRUSTED_PROXIES
+// is set. A public peer is never trusted by default, so internet clients that
+// reach the application directly can't choose their own address.
+const DEFAULT_TRUSTED_PROXIES = [
+  '127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16',
+  '::1/128', 'fc00::/7', 'fe80::/10'
+];
+const MAX_FORWARDED_FOR_LENGTH = 4096;
+const MAX_FORWARDED_FOR_ENTRIES = 32;
+const trustedProxyCache = new Map();
+
+function normalizeIp(value) {
+  let text = String(value ?? '').trim();
+  if (text.startsWith('[') && text.includes(']')) {
+    text = text.slice(1, text.indexOf(']'));
+  } else if (text.split(':').length === 2) {
+    // IPv4 with a port, as sent by some load balancers.
+    text = text.split(':')[0];
+  }
+  text = text.replace(/^::ffff:(?=\d+\.)/i, '');
+  return net.isIP(text) ? text : '';
+}
+
+function buildTrustedProxies(entries) {
+  const list = new net.BlockList();
+  let size = 0;
+  for (const entry of entries) {
+    const [address, prefix] = entry.split('/');
+    const family = net.isIP(address);
+    const bits = prefix === undefined ? (family === 6 ? 128 : 32) : Number(prefix);
+    const max = family === 6 ? 128 : 32;
+    if (!family || !Number.isInteger(bits) || bits < 0 || bits > max) {
+      // An unparseable entry must never widen trust.
+      console.warn(`[AIWAF] Ignoring invalid AIWAF_TRUSTED_PROXIES entry: ${entry}`);
+      continue;
+    }
+    list.addSubnet(address, bits, family === 6 ? 'ipv6' : 'ipv4');
+    size += 1;
+  }
+  return size ? list : null;
+}
+
+function getTrustedProxies(configured) {
+  const source = configured ?? process.env.AIWAF_TRUSTED_PROXIES ?? DEFAULT_TRUSTED_PROXIES;
+  const entries = (typeof source === 'string' ? source.split(',') : Array.from(source))
+    .map(entry => String(entry).trim())
+    .filter(Boolean);
+  const key = entries.join(',');
+  if (!trustedProxyCache.has(key)) trustedProxyCache.set(key, buildTrustedProxies(entries));
+  return trustedProxyCache.get(key);
+}
+
+function isTrustedProxy(ip, list) {
+  try {
+    return list.check(ip, net.isIP(ip) === 6 ? 'ipv6' : 'ipv4');
+  } catch {
+    return false;
+  }
+}
+
+function resolveForwardedIp(req, list) {
+  const header = String(req.headers?.['x-forwarded-for'] ?? '');
+  if (header && header.length <= MAX_FORWARDED_FOR_LENGTH) {
+    // Proxies append, so walk from the right and stop at the first untrusted
+    // address. Anything further left is client-supplied.
+    const hops = header.split(',').slice(-MAX_FORWARDED_FOR_ENTRIES).reverse();
+    let rightmost = '';
+    for (const hop of hops) {
+      const candidate = normalizeIp(hop);
+      // Stop rather than skip, so a malformed hop can't expose values to its left.
+      if (!candidate) break;
+      if (!isTrustedProxy(candidate, list)) return candidate;
+      rightmost = rightmost || candidate;
+    }
+    // Every hop is internal. Only the rightmost was written by our proxy.
+    if (rightmost) return rightmost;
+  }
+  return normalizeIp(req.headers?.['x-real-ip']);
+}
+
+/**
+ * Resolve the client address, honoring proxy headers only from a trusted peer.
+ * A framework that already resolved req.ip (Express `trust proxy`, for example)
+ * is respected. A missing peer means a local Unix socket.
+ */
+function getRequestIp(req = {}, trustedProxies) {
+  if (req.aiwafClientIp) return req.aiwafClientIp;
+  const socketPeer = req.socket?.remoteAddress || req.connection?.remoteAddress || '';
+  const rawPeer = String(socketPeer || req.ip || '');
+  const peer = normalizeIp(rawPeer);
+  const fallback = peer || rawPeer;
+  const declared = normalizeIp(req.ip);
+  if (socketPeer && declared && declared !== peer) return declared;
+
+  const list = getTrustedProxies(trustedProxies);
+  if (!list || (rawPeer && !(peer && isTrustedProxy(peer, list)))) return fallback;
+  return resolveForwardedIp(req, list) || fallback;
 }
 
 function isPrivateIp(ip) {

@@ -27,6 +27,30 @@ class RequestBoundarySecurityTest {
     }
 
     @Test
+    void malformed_forwarded_hop_does_not_expose_client_supplied_values() {
+        for (String malformed : new String[] {"garbage", "unknown", "", "203.0.113.5:4711"}) {
+            MockHttpServletRequest request = new MockHttpServletRequest();
+            request.setRemoteAddr("127.0.0.1");
+            request.addHeader("X-Forwarded-For", "198.51.100.66, " + malformed);
+
+            AiwafRequest mapped = ServletRequestMapper.from(request, Set.of(), new AiwafConfig());
+
+            assertEquals("127.0.0.1", mapped.ip(), "hop: '" + malformed + "'");
+        }
+    }
+
+    @Test
+    void forwarded_walk_returns_rightmost_untrusted_hop_past_trusted_proxies() {
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.setRemoteAddr("127.0.0.1");
+        request.addHeader("X-Forwarded-For", "198.51.100.66, 203.0.113.5, 127.0.0.2");
+
+        AiwafRequest mapped = ServletRequestMapper.from(request, Set.of(), new AiwafConfig());
+
+        assertEquals("203.0.113.5", mapped.ip());
+    }
+
+    @Test
     void buffers_body_for_downstream_and_detects_raw_java_stream() throws Exception {
         MockHttpServletRequest request = new MockHttpServletRequest();
         byte[] body = {(byte) 0xac, (byte) 0xed, 0, 5, 1, 2, 3};

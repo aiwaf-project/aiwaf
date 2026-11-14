@@ -91,6 +91,42 @@ public final class PathManifestCore {
         return manifest;
     }
 
+    /** Builds a manifest from routes read from source, without loading or starting the application. */
+    public static Map<String, Object> buildManifestFromSource(String framework, Collection<JavaSourceAnalysisCore.Route> routes) {
+        String frameworkName = framework == null || framework.isBlank() ? "java-source" : framework;
+        Map<String, Map<String, Object>> routeMap = new TreeMap<>();
+        if (routes != null) {
+            for (JavaSourceAnalysisCore.Route route : routes) {
+                if (route == null || isInternalAiwafPath(route.path())) {
+                    continue;
+                }
+                String path = normalizePath(route.path());
+                Map<String, Object> fresh = classifiedEntry(path, route.methods(), route.view(), route.name(), route.api(), route.auth());
+                Map<String, Object> existing = routeMap.get(path);
+                if (existing == null) {
+                    routeMap.put(path, fresh);
+                } else {
+                    TreeSet<String> methods = new TreeSet<>();
+                    addStrings(methods, existing.get("methods"));
+                    addStrings(methods, fresh.get("methods"));
+                    existing.put("methods", List.copyOf(methods));
+                }
+            }
+        }
+        Map<String, Object> context = new TreeMap<>();
+        context.put("app_context", Map.of());
+        context.put("framework", frameworkName);
+        context.put("routes", routeMap);
+
+        Map<String, Object> manifest = new LinkedHashMap<>();
+        manifest.put("schema_version", SCHEMA_VERSION);
+        manifest.put("framework", frameworkName);
+        manifest.put("context_hash", sha256(stableJson(context)));
+        manifest.put("generated_at", Instant.now().truncatedTo(ChronoUnit.SECONDS).toString());
+        manifest.put("routes", routeMap);
+        return manifest;
+    }
+
     public static Path writeManifest(Map<String, Object> manifest, Path outputPath) {
         if (outputPath == null) throw new IllegalArgumentException("outputPath must not be null");
         try {
@@ -234,9 +270,17 @@ public final class PathManifestCore {
     }
 
     private static Map<String, Object> routeEntry(RouteInfo route, String path) {
-        List<String> methods = normalizedMethods(route.httpMethods());
         ApiDetection api = ApiDetectionCore.detectApiEndpoint(route.method(), route.controllerClass(), path);
         Map<String, Object> auth = AuthDetectionCore.detectAuthEndpoint(path, route.method(), route.controllerClass());
+        String view = route.controllerClass() == null || route.method() == null
+                ? "" : route.controllerClass().getName() + "." + route.method().getName();
+        String name = route.method() == null ? "" : route.method().getName();
+        return classifiedEntry(path, route.httpMethods(), view, name, api, auth);
+    }
+
+    private static Map<String, Object> classifiedEntry(
+            String path, Collection<String> httpMethods, String view, String name, ApiDetection api, Map<String, Object> auth) {
+        List<String> methods = normalizedMethods(httpMethods);
 
         String lower = path.toLowerCase(Locale.ROOT);
         boolean authAction = Boolean.TRUE.equals(auth.get("is_auth"));
@@ -292,9 +336,8 @@ public final class PathManifestCore {
 
         Map<String, Object> entry = new LinkedHashMap<>();
         entry.put("methods", methods);
-        entry.put("view", route.controllerClass() == null || route.method() == null
-                ? "" : route.controllerClass().getName() + "." + route.method().getName());
-        entry.put("name", route.method() == null ? "" : route.method().getName());
+        entry.put("view", view);
+        entry.put("name", name);
         entry.put("category", category);
         entry.put("response_type", responseType);
         entry.put("auth_required", authRequired);
