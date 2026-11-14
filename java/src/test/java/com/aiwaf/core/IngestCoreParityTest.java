@@ -17,6 +17,20 @@ class IngestCoreParityTest {
     Path tempDir;
 
     @Test
+    void events_from_log_lines_keeps_ipv6_clients_and_their_written_form() {
+        List<String> lines = List.of(
+                "2001:db8::1 - - [05/Nov/2026:10:00:00 +0000] \"GET /a HTTP/1.1\" 200 12 \"-\" \"ua\"",
+                "::1 - - [05/Nov/2026:10:00:00 +0000] \"GET /a HTTP/1.1\" 200 12 \"-\" \"ua\"",
+                "::ffff:203.0.113.5 - - [05/Nov/2026:10:00:00 +0000] \"GET /a HTTP/1.1\" 200 12 \"-\" \"ua\""
+        );
+
+        List<NormalizedEvent> events = IngestCore.eventsFromLogLines(lines, null, null, "seconds");
+
+        assertEquals(List.of("2001:db8::1", "::1", "::ffff:203.0.113.5"),
+                events.stream().map(NormalizedEvent::ip).toList());
+    }
+
+    @Test
     void events_from_log_lines_parses_method_and_ms() {
         String line = "1.2.3.4 - - [01/Jan/2026:00:00:00 +0000] \"POST /x HTTP/1.1\" 404 0 \"-\" \"UA\" response-time=0.250";
         List<NormalizedEvent> events = IngestCore.eventsFromLogLines(List.of(line), null, null, "seconds");

@@ -25,8 +25,9 @@ import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
 
 public final class LogIoCore {
+    // Preserve the first client field verbatim, matching Python and runtime storage keys.
     private static final Pattern LOG_RX = Pattern.compile(
-            "(\\d+\\.\\d+\\.\\d+\\.\\d+).*\\[(.*?)\\].*\"(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?\" "
+            "^\\s*(\\S+)\\s+.*\\[(.*?)\\].*\"(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?\" "
                     + "(\\d{3}).*?\"(.*?)\" \"(.*?)\""
     );
     private static final Pattern RESPONSE_TIME_RX = Pattern.compile("response-time=(\\d+\\.\\d+)");
