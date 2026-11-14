@@ -169,3 +169,63 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(policy_path_rule_index, m)?)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn none() -> HashSet<String> {
+        HashSet::new()
+    }
+
+    #[test]
+    fn exact_ips_and_patterns_are_exempt() {
+        let ips = HashSet::from(["203.0.113.5".to_string()]);
+        assert_eq!(ip_exempt("203.0.113.5", &ips, &[], &[]), Some(true));
+        let patterns = vec![r"^198\.51\.100\.\d+$".to_string()];
+        assert_eq!(ip_exempt("198.51.100.7", &none(), &patterns, &[]), Some(true));
+        assert_eq!(ip_exempt("198.51.101.7", &none(), &patterns, &[]), Some(false));
+    }
+
+    #[test]
+    fn ipv4_networks_respect_the_prefix() {
+        let networks = vec![("10.1.0.0".to_string(), 16)];
+        assert_eq!(ip_exempt("10.1.200.3", &none(), &[], &networks), Some(true));
+        assert_eq!(ip_exempt("10.2.0.1", &none(), &[], &networks), Some(false));
+        let everything = vec![("0.0.0.0".to_string(), 0)];
+        assert_eq!(ip_exempt("8.8.8.8", &none(), &[], &everything), Some(true));
+    }
+
+    #[test]
+    fn ipv6_networks_and_zone_ids_are_supported() {
+        let networks = vec![("2001:db8::".to_string(), 32), ("fe80::".to_string(), 10)];
+        assert_eq!(ip_exempt("2001:db8:1::5", &none(), &[], &networks), Some(true));
+        assert_eq!(ip_exempt("2001:db9::5", &none(), &[], &networks), Some(false));
+        assert_eq!(ip_exempt("fe80::1%eth0", &none(), &[], &networks), Some(true));
+    }
+
+    #[test]
+    fn address_families_and_oversized_prefixes_never_match() {
+        let v6 = vec![("2001:db8::".to_string(), 32)];
+        assert_eq!(ip_exempt("10.0.0.1", &none(), &[], &v6), Some(false));
+        let oversized = vec![("10.0.0.1".to_string(), 33)];
+        assert_eq!(ip_exempt("10.0.0.1", &none(), &[], &oversized), Some(false));
+        let any = vec![("10.0.0.0".to_string(), 8)];
+        assert_eq!(ip_exempt("not-an-ip", &none(), &[], &any), Some(false));
+    }
+
+    #[test]
+    fn invalid_rules_defer_to_the_python_fallback() {
+        assert_eq!(ip_exempt("10.0.0.1", &none(), &["(".to_string()], &[]), None);
+        let bad_network = vec![("not-a-network".to_string(), 8)];
+        assert_eq!(ip_exempt("10.0.0.1", &none(), &[], &bad_network), None);
+    }
+
+    #[test]
+    fn matches_compiles_and_reuses_patterns() {
+        assert_eq!(matches("abc", "^a"), Some(true));
+        assert_eq!(matches("abc", "^a"), Some(true));
+        assert_eq!(matches("abc", "^b"), Some(false));
+        assert_eq!(matches("abc", "("), None);
+    }
+}

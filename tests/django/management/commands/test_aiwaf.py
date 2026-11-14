@@ -9,6 +9,6 @@ class TestAIWAFCommand(SimpleTestCase):
     def test_init_and_usage_error(self, generate):
         generate.return_value = {"framework": "django", "routes": {"/": {}}, "context_hash": "abc"}
         call_command("aiwaf", "init", output="paths.json")
-        generate.assert_called_once_with("paths.json")
+        generate.assert_called_once_with("paths.json", audit_source=".")
         with self.assertRaises(CommandError):
             call_command("aiwaf")

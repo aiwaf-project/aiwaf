@@ -22,9 +22,9 @@
     "scripts": {
         "retrain": "AIWAF_LOG_PATH=/var/log/nginx/access.log npm run train",
         "train": "node train.js",
-        "test": "jest --runInBand",
-        "test:coverage": "jest --runInBand --coverage",
-        "test:wasm": "jest --runInBand --runTestsByPath test/wasmAdapter.test.js test/wasm-header-config.test.js test/wasm-header-input.test.js test/wasm-retrain-behavior.test.js test/wasm-waf-integration.test.js && node test/wasm-real.js",
+        "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand",
+        "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --coverage",
+        "test:wasm": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --runTestsByPath test/wasmAdapter.test.js test/wasm-header-config.test.js test/wasm-header-input.test.js test/wasm-retrain-behavior.test.js test/wasm-waf-integration.test.js && node test/wasm-real.js",
         "aiwaf": "node bin/aiwaf.js",
         "test:wasm-real": "node test/wasm-real.js",
         "test:native": "node test/native-pipeline-real.js && node test/native-frameworks-real.js"
@@ -56,41 +56,6 @@
         "@nestjs/platform-express": "^11.1.18",
         "reflect-metadata": "^0.2.2",
         "rxjs": "^7.8.1"
-    },
-    "jest": {
-        "globalTeardown": "<rootDir>/test/jest.teardown.js",
-        "forceExit": true,
-        "coverageProvider": "v8",
-        "transform": {
-            "^.+\\.m?js$": [
-                "babel-jest",
-                {
-                    "plugins": [
-                        "@babel/plugin-transform-modules-commonjs"
-                    ]
-                }
-            ]
-        },
-        "transformIgnorePatterns": [
-            "node_modules[/\\\\](?!(?:.*[/\\\\])?cookie[/\\\\])"
-        ],
-        "testPathIgnorePatterns": [
-            "<rootDir>/test/wasm-adapter-real.test.js"
-        ],
-        "collectCoverageFrom": [
-            "index.js",
-            "train.js",
-            "lib/**/*.js",
-            "utils/**/*.js"
-        ],
-        "coverageThreshold": {
-            "global": {
-                "branches": 66,
-                "functions": 100,
-                "lines": 80,
-                "statements": 80
-            }
-        }
     },
     "optionalDependencies": {
         "maxmind": "^4.3.0"

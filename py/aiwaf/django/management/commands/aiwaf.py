@@ -20,7 +20,7 @@ class Command(BaseCommand):
         from aiwaf.django.path_manifest import generate_django_manifest
 
         output = options.get("output") or ".aiwaf/paths.json"
-        manifest = generate_django_manifest(output)
+        manifest = generate_django_manifest(output, audit_source=".")
         self.stdout.write(self.style.SUCCESS(f"Generated {output}"))
         self.stdout.write(f"Framework: {manifest['framework']}")
         self.stdout.write(f"Routes: {len(manifest.get('routes', {}))}")

@@ -127,14 +127,15 @@ describe('AIWAF Adonis middleware', () => {
       MAX_REQ: 1,
       FLOOD_REQ: 2
     });
-    const headers = { accept: 'application/json', 'x-forwarded-for': '198.51.100.61' };
+    const headers = { accept: 'application/json' };
+    const ip = '198.51.100.61';
 
-    const ctx1 = createMockCtx({ path: '/safe', headers });
+    const ctx1 = createMockCtx({ path: '/safe', headers, ip });
     const next1 = jest.fn();
     await middleware(ctx1, next1);
     expect(next1).toHaveBeenCalled();
 
-    const ctx2 = createMockCtx({ path: '/safe', headers });
+    const ctx2 = createMockCtx({ path: '/safe', headers, ip });
     const next2 = jest.fn();
     await middleware(ctx2, next2);
     expect(next2).not.toHaveBeenCalled();

@@ -18,13 +18,19 @@ New contributions to ELv2-covered code are submitted under the Elastic License 2
 
 ## Python development
 
-Create a virtual environment and install the package with its framework adapters:
+Create and activate a virtual environment, build `aiwaf-rust` from this repository, then install the package with its framework adapters. Rust must be installed. Build first so pip doesn't download `aiwaf-rust` from PyPI:
 
 ```bash
 python -m venv .venv
+python -m pip install maturin
+python scripts/stage_rust_package_files.py
+maturin develop --release --locked --manifest-path rust/Cargo.toml
 python -m pip install -e ".[django,flask,fastapi]"
 python -m pip install pytest httpx
+python scripts/check_rust_source_build.py
 ```
+
+`python aiwaf_test.py` rebuilds `aiwaf-rust` from `rust/` before running Python tests, so tests always use your current code. Use `--no-rust-build` to skip the build and test the installed copy. If you run `pytest` or `manage.py test` directly, rerun the `maturin develop` command after changing anything in `rust/`.
 
 Run every Python and JavaScript test group from the repository root:
 

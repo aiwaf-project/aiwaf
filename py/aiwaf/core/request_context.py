@@ -2,21 +2,40 @@
 
 from __future__ import annotations
 
-import ipaddress
 import json
 from typing import Dict, Iterable, Optional
 
-from .utils import get_ip_from_headers, get_ip_from_meta
+from .utils import _joined_header, get_ip_from_headers, get_ip_from_meta, resolve_client_ip
+
+
+def _django_trusted_proxies():
+    try:
+        from django.conf import settings
+        from django.core.exceptions import ImproperlyConfigured
+    except ImportError:
+        return None
+    try:
+        return getattr(settings, "AIWAF_TRUSTED_PROXIES", None)
+    except ImproperlyConfigured:
+        return None
+
+
+def _flask_trusted_proxies():
+    try:
+        from flask import current_app, has_app_context
+    except ImportError:
+        return None
+    return current_app.config.get("AIWAF_TRUSTED_PROXIES") if has_app_context() else None
 
 
 def extract_ip_from_django_request(request) -> str:
-    return get_ip_from_meta(getattr(request, "META", {}) or {})
+    return get_ip_from_meta(getattr(request, "META", {}) or {}, _django_trusted_proxies())
 
 
 def extract_ip_from_flask_request(request) -> str:
     headers = getattr(request, "headers", {}) or {}
     remote_addr = getattr(request, "remote_addr", None)
-    return get_ip_from_headers(headers, remote_addr)
+    return get_ip_from_headers(headers, remote_addr, _flask_trusted_proxies())
 
 
 def extract_ip_from_fastapi_request(request) -> str:
@@ -29,52 +48,18 @@ def extract_ip_from_fastapi_request(request) -> str:
 
 
 def resolve_ip_from_fastapi_request(request) -> str:
-    """
-    Resolve the effective client IP for FastAPI requests using proxy-aware rules.
-    """
-    extracted = extract_ip_from_fastapi_request(request)
-    if extracted and extracted != "unknown":
-        client_ip = extracted
-    else:
-        client = getattr(request, "client", None)
-        client_ip = getattr(client, "host", None) if client else None
-
-    # Prefer direct public client IP.
-    if client_ip and _is_valid_ip(client_ip) and not _is_proxy_like_ip(client_ip):
-        return client_ip
-
-    request_headers = dict(getattr(request, "headers", {}) or {})
-    headers_lower = {str(k).lower(): v for k, v in request_headers.items()}
-
-    # If request appears proxied/internal, trust first XFF hop if valid.
-    if client_ip is None or _is_proxy_like_ip(client_ip):
-        xff = headers_lower.get("x-forwarded-for")
-        if xff:
-            candidate = xff.split(",")[0].strip()
-            if _is_valid_ip(candidate):
-                return candidate
-
-        extracted_from_headers = get_ip_from_headers(request_headers, client_ip)
-        if extracted_from_headers and _is_valid_ip(extracted_from_headers):
-            return extracted_from_headers
-
-        for header in (
-            "x-forwarded-for",
-            "x-real-ip",
-            "x-client-ip",
-            "cf-connecting-ip",
-            "x-forwarded",
-            "forwarded-for",
-            "forwarded",
-        ):
-            if header in headers_lower:
-                ip = headers_lower[header].split(",", 1)[0].strip()
-                if _is_valid_ip(ip):
-                    return ip
-
-    if client_ip:
-        return client_ip
-    return "unknown"
+    """Resolve the client IP, honoring proxy headers only from a trusted peer."""
+    client = getattr(request, "client", None)
+    client_ip = getattr(client, "host", None) if client else None
+    headers = getattr(request, "headers", {}) or {}
+    if not hasattr(headers, "getlist"):
+        headers = {str(k).lower(): v for k, v in dict(headers).items()}
+    resolved = resolve_client_ip(
+        client_ip,
+        _joined_header(headers, "x-forwarded-for"),
+        headers.get("x-real-ip"),
+    )
+    return resolved or "unknown"
 
 
 def extract_headers_from_django_request(request) -> Dict[str, str]:
@@ -350,30 +335,3 @@ def extract_blocklist_extended_info_from_fastapi_request(
     if host:
         info["host"] = host
     return info
-
-
-def _is_valid_ip(ip: str) -> bool:
-    try:
-        ipaddress.ip_address(ip)
-        return True
-    except ValueError:
-        return False
-
-
-def _is_proxy_like_ip(ip: str) -> bool:
-    try:
-        ip_obj = ipaddress.ip_address(ip)
-        return (
-            ip_obj.is_private
-            or ip_obj.is_loopback
-            or ip_obj.is_link_local
-            or ip_obj.is_reserved
-        )
-    except ValueError:
-        return False
-
-
-# Compatibility aliases for callers using the previous terminology.
-extract_blacklist_extended_info_from_django_request = extract_blocklist_extended_info_from_django_request
-extract_blacklist_extended_info_from_flask_request = extract_blocklist_extended_info_from_flask_request
-extract_blacklist_extended_info_from_fastapi_request = extract_blocklist_extended_info_from_fastapi_request

@@ -30,16 +30,16 @@ def test_native_flask_body_replay_and_policy_order(tmp_path, monkeypatch):
     app = app_for(tmp_path)
     client = app.test_client()
     assert client.post('/echo', json={'field':'value'}).json['body'] == '{"field": "value"}'
-    assert client.get('/echo?q=union+select').status_code == 403
-    assert client.post('/echo', json={'field':'uni\u006fn select'}).status_code == 403
+    assert client.get('/echo?q=1+union+select+1').status_code == 403
+    assert client.post('/echo', json={'field':'1 uni\u006fn select 1'}).status_code == 403
     assert client.get('/wp-content/plugins/pods/init.php').status_code == 403
     assert app.extensions['aiwaf_csv_pipeline'].pipeline.native.processed_requests == 4
 
 
 def test_native_flask_decorators_and_limit(tmp_path):
     client = app_for(tmp_path, max_bytes=30).test_client()
-    assert client.get('/exempt?q=union+select').status_code == 200
-    assert client.get('/required?q=union+select').status_code == 403
+    assert client.get('/exempt?q=1+union+select+1').status_code == 200
+    assert client.get('/required?q=1+union+select+1').status_code == 403
     assert client.post('/echo', data='x'*31, content_type='application/json').status_code == 413
 
 

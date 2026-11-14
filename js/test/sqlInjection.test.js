@@ -1,11 +1,20 @@
+const fs = require('fs');
+const path = require('path');
 const { createInspector } = require('../lib/sqlInjection');
+const wasmChecks = require('../lib/wasmChecks');
+
+const FIXTURES = path.join(__dirname, '../../tests/fixtures');
+const CASES = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'sql_injection_cases.json'), 'utf8'));
+const ORDINARY = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'ordinary_text.json'), 'utf8')).values;
+
+beforeAll(() => wasmChecks.load());
 
 describe('bounded SQL injection inspection', () => {
   const inspect = createInspector();
   test.each([
     "admin@juice-sh.op' OR 1=1--", "admin@juice-sh.op'--",
     "x'/**/OR/**/1=1--", "x%2527%2520OR%25201%253D1--",
-    "x' OR 'a'='a'--", "UNION ALL SELECT password FROM users"
+    "x' OR 'a'='a'--", "1 UNION ALL SELECT password FROM users"
   ])('finds SQL signatures inside nested payloads: %s', email => {
     expect(inspect({ body: { login: [{ email }] } }).status).toBe(403);
   });
@@ -13,8 +22,10 @@ describe('bounded SQL injection inspection', () => {
     expect(inspect({ body: { email } })).toBeNull();
   });
   test('inspects query parameters and serialized JSON escapes', () => {
-    expect(inspect({ url: '/search?q=union%20select%20password' }).rule).toBe('sql_union_select');
-    expect(inspect({ body: '{"email":"admin\\u0027--"}' }).rule).toBe('sql_quote_comment');
+    expect(inspect({ url: '/search?q=1%20union%20select%20password' }).rule).toBe('sql_breakout_numeric');
+    // Without a value to close, this text can't change a query.
+    expect(inspect({ url: '/search?q=union%20select%20password' })).toBeNull();
+    expect(inspect({ body: '{"email":"admin\\u0027--"}' }).rule).toBe('sql_breakout_single_quote');
   });
   test('bounds bytes, nesting and cyclic objects', () => {
     expect(createInspector({ AIWAF_PAYLOAD_MAX_BYTES: 8 })({ body: '123456789' }).status).toBe(413);
@@ -26,7 +37,7 @@ describe('bounded SQL injection inspection', () => {
   test('supports off and monitor without including secrets in findings', () => {
     expect(createInspector({ AIWAF_SQL_INJECTION_MODE: 'off' })({ body: "admin'--" })).toBeNull();
     expect(createInspector({ AIWAF_SQL_INJECTION_MODE: 'monitor' })({ body: "admin'--" }))
-      .toEqual({ rule: 'sql_quote_comment', status: 403, mode: 'monitor' });
+      .toEqual({ rule: 'sql_breakout_single_quote', status: 403, mode: 'monitor' });
     expect(() => createInspector({ AIWAF_SQL_INJECTION_MODE: 'typo' })).toThrow();
   });
   test('does not consume unparsed upload streams', () => {
@@ -35,5 +46,77 @@ describe('bounded SQL injection inspection', () => {
     expect(inspect({ body })).toBeNull();
     expect(body.readableFlowing).toBeNull();
     body.destroy();
+  });
+});
+
+describe('the SQL check in aiwaf-wasm', () => {
+  const inspect = req => createInspector({})(req);
+
+  test('shared attacks are caught and ordinary text passes', () => {
+    expect(CASES.attacks.filter(value => !inspect({ body: { field: value } }))).toEqual([]);
+    expect([...CASES.ordinary, ...ORDINARY].filter(value => inspect({ body: { field: value } }))).toEqual([]);
+    expect(CASES.attacks.filter(value => !wasmChecks.get().sql_tokenizer(value))).toEqual([]);
+  });
+
+  test('JSON bodies are checked by their values, and a literal + is still seen', () => {
+    expect(inspect({ body: '{"field": "const fn = match(\\"/*splat\\");"}' })).toBeNull();
+    expect(inspect({ body: '{"a": "x\\" OR 1=1--"}' }).rule).toBe('sql_breakout_double_quote');
+    expect(inspect({ body: { q: "'+(SELECT 1)+'" } }).rule).toBe('sql_breakout_single_quote');
+    expect(inspect({ body: "'+(SELECT 1)+'" }).rule).toBe('sql_breakout_single_quote');
+  });
+
+  test('every request shape is read', () => {
+    expect(inspect({ url: '/x?id=1%20OR%201%3D1' }).rule).toBe('sql_breakout_numeric');
+    expect(inspect({ query: { q: '1 OR 1=1' } }).rule).toBe('sql_breakout_numeric');
+    expect(inspect({ body: Buffer.from('a=1 OR 1=1') }).rule).toBe('sql_breakout_numeric');
+    expect(inspect({ body: { pipe() {} } })).toBeNull();
+    const cyclic = {}; cyclic.self = cyclic;
+    expect(inspect({ body: cyclic }).status).toBe(413);
+    expect(inspect({ query: cyclic }).status).toBe(413);
+  });
+
+  test('the accuracy script reports the same cases', () => {
+    expect(CASES.attacks.length).toBeGreaterThan(50);
+  });
+});
+
+describe('headers', () => {
+  const HEADERS = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'sql_header_cases.json'), 'utf8'));
+  const inspect = headers => createInspector({})({ headers });
+
+  test('shared header cases', () => {
+    expect(HEADERS.attacks.filter(([name, value]) => !inspect({ [name.toLowerCase()]: value }))).toEqual([]);
+    expect(HEADERS.ordinary.filter(([name, value]) => inspect({ [name.toLowerCase()]: value }))).toEqual([]);
+  });
+
+  test('repeated and missing headers', () => {
+    expect(inspect({ cookie: ['a=1', "b=' OR 1=1--"] }).rule).toBe('sql_breakout_single_quote');
+    expect(inspect({ authorization: "Bearer ' OR 1=1--", cookie: undefined })).toBeNull();
+    expect(inspect(undefined)).toBeNull();
+  });
+
+  test('other headers are checked, except credentials and framing', () => {
+    expect(inspect({ 'x-other': "' OR 1=1--" }).rule).toBe('sql_breakout_single_quote');
+    expect(inspect({ 'x-forwarded-for': "127.0.0.1' AND SLEEP(5)--" })).not.toBeNull();
+    expect(inspect({ 'x-forwarded-for': '203.0.113.7, 198.51.100.2', 'content-type': "text/plain; x=' OR 1=1--" })).toBeNull();
+  });
+});
+
+describe('URL path', () => {
+  const inspect = url => createInspector({})({ url, headers: {} });
+
+  test('payloads in the path are caught and ordinary paths pass', () => {
+    expect(inspect('/post/1234%20OR%201=1').rule).toBe('sql_breakout_numeric');
+    expect(inspect("/post/EmptyValue'%20and%20526=527?page=2")).not.toBeNull();
+    for (const url of ['/', '/api/v1/orders/123?sort=desc', "/users/o'reilly", '/blog/union-select-committee', '/c++/tutorial']) {
+      expect(inspect(url)).toBeNull();
+    }
+  });
+
+  test('shared path cases', () => {
+    const cases = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'sql_path_cases.json'), 'utf8'));
+    expect(cases.attacks.filter(url => !inspect(url))).toEqual([]);
+    // A query string is checked on its own, as a query.
+    expect(cases.ordinary.filter(url => inspect(url.split('?')[0]))).toEqual([]);
   });
 });

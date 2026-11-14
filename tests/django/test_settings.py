@@ -3,8 +3,16 @@ Django Test Settings for AIWAF
 This file provides the necessary Django configuration for running unit tests.
 """
 
+import os
 import sys
+import tempfile
 from pathlib import Path
+
+# Keep keyword fallback writes out of the tracked package directory.
+os.environ.setdefault(
+    "AIWAF_FALLBACK_KEYWORDS_PATH",
+    os.path.join(tempfile.mkdtemp(prefix="aiwaf-fallback-"), "fallback_keywords.json"),
+)
 
 # Project root (repo root). This file lives at `tests/django/test_settings.py`.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

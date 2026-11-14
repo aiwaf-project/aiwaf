@@ -107,3 +107,72 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(training_date_parts, m)?)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parts;
+
+    #[test]
+    fn apache_dates_parse_with_any_month_case() {
+        for stamp in ["10/Oct/2026:12:00:05 +0000", "10/OCT/2026:12:00:05 +0000"] {
+            let parsed = parts(stamp, true).unwrap();
+            assert_eq!(
+                (parsed.0, parsed.1, parsed.2, parsed.3, parsed.4, parsed.5, parsed.6),
+                (2026, 10, 10, 12, 0, 5, 0)
+            );
+        }
+    }
+
+    #[test]
+    fn apache_dates_reject_unknown_forms_so_python_can_fall_back() {
+        for stamp in [
+            "10/Foo/2026:12:00:05 +0000",
+            "10/Oct/26:12:00:05 +0000",
+            "10/Oct/2026:12:00:05.5 +0000",
+            "10/Oct/2026:12:00 +0000",
+            "10/Őct/2026:12:00:05 +0000",
+            "",
+        ] {
+            assert_eq!(parts(stamp, true), None, "{stamp:?}");
+        }
+    }
+
+    #[test]
+    fn iso_dates_keep_their_utc_offset() {
+        let cases = [
+            ("2026-10-12T01:02:03Z", Some(0)),
+            ("2026-10-12T01:02:03+05:30", Some(19800)),
+            ("2026-10-12T01:02:03-05:00", Some(-18000)),
+            ("2026-10-12T01:02:03", None),
+        ];
+        for (stamp, offset) in cases {
+            assert_eq!(
+                parts(stamp, false),
+                Some((2026, 10, 12, 1, 2, 3, 0, offset)),
+                "{stamp}"
+            );
+        }
+    }
+
+    #[test]
+    fn iso_fractions_become_microseconds() {
+        assert_eq!(parts("2026-10-12T01:02:03.5", false).unwrap().6, 500_000);
+        assert_eq!(parts("2026-10-12T01:02:03,25", false).unwrap().6, 250_000);
+        assert_eq!(parts("2026-10-12T01:02:03.1234567", false).unwrap().6, 123_456);
+    }
+
+    #[test]
+    fn iso_dates_reject_malformed_values() {
+        for stamp in [
+            "2026-10-12",
+            "2026/10/12T01:02:03",
+            "2026-10-12T01:02:03+5:30",
+            "2026-10-12T01:02:03+24:00",
+            "2026-10-12T01:02:03+05:60",
+            "2026-10-12T01:02:03.",
+            "2026-10-12T01:02:xx",
+        ] {
+            assert_eq!(parts(stamp, false), None, "{stamp:?}");
+        }
+    }
+}

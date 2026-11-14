@@ -3,6 +3,8 @@ const request = require('supertest');
 const bodyParser = require('../lib/bodyParser');
 const { createInspector } = require('../lib/sqlInjection');
 
+beforeAll(() => require('../lib/wasmChecks').load());
+
 function app(limit) {
   const server = express();
   server.use(bodyParser(limit ? { AIWAF_PAYLOAD_MAX_BYTES: limit } : {}));

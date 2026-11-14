@@ -8,10 +8,10 @@ import aiwaf_rust
 def test_wheel_exposes_complete_csv_pipeline(tmp_path):
     engine = aiwaf_rust.NativeCSVPipeline(json.dumps({
         'data_dir':str(tmp_path), 'enabled':['ip_keyword_block', 'logging'], 'exempt_paths':[]}))
-    context, status, payload = engine.begin('8.8.8.8', '/docs', 'GET', {}, b'q=union+select', b'',
+    context, status, payload = engine.begin('8.8.8.8', '/docs', 'GET', {}, b'q=1+union+select+2', b'',
         True, True, True, True, False, set(), False, 100., '2026-10-12T00:00:00+00:00')
     assert status == 403
-    assert json.loads(payload)['error'] == 'sql_union_select'
+    assert json.loads(payload)['error'] == 'sql_breakout_numeric'
     assert engine.finish(context, status, 100.1, str(len(payload)))[0] == 403
     assert engine.processed_requests == 1
     with (tmp_path / 'requests.csv').open(newline='') as file:
@@ -34,3 +34,30 @@ def test_wheel_memory_honeypot_is_local_and_keeps_timing_policy(tmp_path):
     assert call(other, 'POST', 100.05) == 0
     assert call(engine, 'POST', 100.05) == 403
     assert not (tmp_path / 'pipeline_state.csv').exists()
+
+
+def test_csv_pipeline_checks_sql_in_headers(tmp_path):
+    engine = aiwaf_rust.NativeCSVPipeline(json.dumps({
+        'data_dir': str(tmp_path), 'enabled': ['ip_keyword_block'], 'exempt_paths': []}))
+    begin = lambda headers: engine.begin('8.8.8.8', '/docs', 'GET', headers, b'q=ok', b'',
+        True, True, True, True, False, set(), False, 100., '2026-10-12T00:00:00+00:00')
+    _, status, payload = begin({'HTTP_COOKIE': "theme=dark; session=' OR '1'='x'--"})
+    assert (status, json.loads(payload)['error']) == (403, 'sql_breakout_single_quote')
+    _, status, payload = begin({'HTTP_USER_AGENT': "1' and lo_get(16400)::text::bool and 'true"})
+    assert status == 403
+    _, status, _ = begin({'HTTP_USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'HTTP_COOKIE': '_ga=GA1.2.1.1',
+                          'HTTP_AUTHORIZATION': "Bearer ' OR 1=1--"})
+    assert status != 403
+    _, status, _ = begin({'HTTP_X_FORWARDED_FOR': "127.0.0.1' AND SLEEP(5)--"})
+    assert status == 403
+
+
+def test_csv_pipeline_checks_sql_in_the_path(tmp_path):
+    engine = aiwaf_rust.NativeCSVPipeline(json.dumps({
+        'data_dir': str(tmp_path), 'enabled': ['ip_keyword_block'], 'exempt_paths': []}))
+    begin = lambda path: engine.begin('8.8.8.8', path, 'GET', {}, b'', b'',
+        True, True, True, True, False, set(), False, 100., '2026-10-12T00:00:00+00:00')
+    _, status, payload = begin('/post/1234%20OR%201=1')
+    assert (status, json.loads(payload)['error']) == (403, 'sql_breakout_numeric')
+    _, status, _ = begin("/users/o'reilly")
+    assert status != 403
