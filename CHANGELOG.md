@@ -83,6 +83,10 @@
   builds a route manifest without starting the application, including for plain Servlet
   applications, and reads method bodies for API, form and login signals. Source analysis
   needs a JDK.
+- Java access-log ingestion now takes the first field of each line as the client, as Python
+  does ([#45](https://github.com/aiwaf-project/aiwaf/pull/45)). Logs that put something before
+  the client field, such as a syslog header, now record that prefix as the client; strip it
+  before ingesting, or log the client first.
 
 ## Python 1.1.8 / Rust-Python 0.2.7 / Node.js 1.1.5 / WASM 0.2.5 / Java 1.3.5 — prepared release
 
