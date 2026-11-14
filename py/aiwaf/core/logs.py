@@ -45,20 +45,20 @@ def write_csv_log(csv_file: str, headers: list[str], row: dict, *, durable: bool
 
 
 _LOG_RX_PATTERNS = [
-    # Combined log format with response time (IPv4 + IPv6)
+    # Combined log format with response-time= (int or float, IPv4 + IPv6)
     re.compile(
-        r'(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" '
-        r'(\d{3}).*?"(.*?)" "(.*?)".*?response-time=(\d+\.\d+)'
+        r'(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH) (.*?) HTTP/.*?" '
+        r'(\d{3}).*?"(.*?)" "(.*?)".*?response-time=(\d+\.?\d*)'
     ),
-    # Standard combined log format (IPv4 + IPv6)
+    # Standard combined log format with optional trailing Nms (IPv4 + IPv6)
     re.compile(
-        r'(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" '
-        r'(\d{3}) (\d+) "(.*?)" "(.*?)"'
+        r'(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH) (.*?) HTTP/.*?" '
+        r'(\d{3}) (\d+|-) "(.*?)" "(.*?)"(?: (\d+)ms)?'
     ),
-    # Common log format (IPv4 + IPv6)
+    # Common log format with size number or - (IPv4 + IPv6)
     re.compile(
-        r'(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" '
-        r'(\d{3}) (\d+)'
+        r'(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH) (.*?) HTTP/.*?" '
+        r'(\d{3}) (\d+|-) '
     ),
 ]
 
@@ -90,13 +90,35 @@ def parse_log_line(line: str) -> dict | None:
         status = groups[3]
 
         rt = 0.0
+        # Prefer explicit response-time= or trailing Nms; ignore plain size groups.
         for group in groups[4:]:
+            if group is None:
+                continue
+            g = str(group)
             try:
-                if "." in str(group):
-                    rt = float(group)
+                if g.endswith("ms"):
+                    rt = float(g[:-2]) / 1000.0
+                    break
+                if "." in g and re.fullmatch(r"\d+\.\d+", g):
+                    rt = float(g)
                     break
             except (ValueError, TypeError):
                 continue
+        # Handle whole-number response-time= (captured as last group without '.')
+        # and optional ms group that is pure digits when pattern has it.
+        if rt == 0.0:
+            for group in reversed(groups[4:]):
+                if group is None:
+                    continue
+                g = str(group)
+                if re.fullmatch(r"\d+", g) and len(g) <= 6:  # reasonable ms or small int
+                    # Only treat as ms/seconds if the original line suggests it
+                    if "ms" in line or "response-time=" in line:
+                        if "ms" in line:
+                            rt = float(g) / 1000.0
+                        else:
+                            rt = float(g)
+                        break
 
         try:
             ts = datetime.strptime(ts_str.split()[0], "%d/%b/%Y:%H:%M:%S")
