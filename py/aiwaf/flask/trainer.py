@@ -135,7 +135,7 @@ class FlaskAITrainer:
         try:
             self.app.url_map.bind("").match(f"/{candidate}", method='GET')
             return True
-        except:
+        except Exception:
             pass
         
         # Try with trailing slash
@@ -143,7 +143,7 @@ class FlaskAITrainer:
             try:
                 self.app.url_map.bind("").match(f"/{candidate}/", method='GET')
                 return True
-            except:
+            except Exception:
                 pass
         
         # Try without trailing slash
@@ -151,7 +151,7 @@ class FlaskAITrainer:
             try:
                 self.app.url_map.bind("").match(f"/{candidate.rstrip('/')}", method='GET')
                 return True
-            except:
+            except Exception:
                 pass
         
         return False
@@ -889,14 +889,14 @@ def _print_geoip_summary(ips, title):
         return
     db_path = _get_geoip_db_path()
     if not db_path or not os.path.exists(db_path):
-        print("GeoIP summary skipped: AIWAF_GEOIP_DB_PATH not set or file missing.")
+        logger.info("GeoIP summary skipped: AIWAF_GEOIP_DB_PATH not set or file missing.")
         return
 
     emit_geoip_summary(
         ips,
         title,
         lambda ip: lookup_country_name(ip, cache_prefix=None, cache_seconds=None, db_path=db_path),
-        print,
+        logger.info,
     )
 
 
