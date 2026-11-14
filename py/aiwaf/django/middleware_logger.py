@@ -86,7 +86,8 @@ class AIWAFLoggerMiddleware(MiddlewareMixin):
     def _get_csv_path(self) -> str:
         csv_file = self.log_file
         if not csv_file.endswith(".csv"):
-            csv_file = csv_file.replace(".log", ".csv")
+            from aiwaf.core.logs import csv_path
+            csv_file = csv_path(csv_file)
         return csv_file
 
     def _write_csv_log(self, request, response, response_time):
