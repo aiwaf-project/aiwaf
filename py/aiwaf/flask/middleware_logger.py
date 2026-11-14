@@ -10,6 +10,7 @@ from flask import g, request
 
 from .utils import get_ip
 from aiwaf.core.storage_csv import file_lock
+from aiwaf.core.logs import csv_path
 
 
 class AIWAFLoggerMiddleware:
@@ -47,7 +48,7 @@ class AIWAFLoggerMiddleware:
     def _get_csv_path(self) -> str:
         csv_file = self.app.config.get("AIWAF_MIDDLEWARE_LOG", "aiwaf_requests.log")
         if not csv_file.endswith(".csv"):
-            csv_file = csv_file.replace(".log", ".csv")
+            csv_file = csv_path(csv_file)
         return csv_file
 
     def _write_csv_log(self, response, response_time: float) -> None:

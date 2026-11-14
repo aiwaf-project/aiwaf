@@ -67,7 +67,7 @@ def is_exempt(request):
             endpoint_func = current_app.view_functions.get(request.endpoint)
             if endpoint_func and getattr(endpoint_func, '_aiwaf_exempt', False):
                 return True
-        except:
+        except Exception:
             pass
     
     return False

@@ -135,7 +135,7 @@ class FlaskAITrainer:
         try:
             self.app.url_map.bind("").match(f"/{candidate}", method='GET')
             return True
-        except:
+        except Exception:
             pass
         
         # Try with trailing slash
@@ -143,7 +143,7 @@ class FlaskAITrainer:
             try:
                 self.app.url_map.bind("").match(f"/{candidate}/", method='GET')
                 return True
-            except:
+            except Exception:
                 pass
         
         # Try without trailing slash
@@ -151,7 +151,7 @@ class FlaskAITrainer:
             try:
                 self.app.url_map.bind("").match(f"/{candidate.rstrip('/')}", method='GET')
                 return True
-            except:
+            except Exception:
                 pass
         
         return False

@@ -44,7 +44,7 @@ def _get_storage_mode():
             'sqlalchemy' in current_app.extensions):
             return 'database'
             
-    except:
+    except Exception:
         pass
     
     return 'memory'
@@ -129,7 +129,7 @@ def _get_data_dir():
         configured = current_app.config.get("AIWAF_DATA_DIR")
         if configured:
             return configured
-    except:
+    except Exception:
         configured = None
 
     # Support env var override for test isolation / container deployment.
