@@ -743,6 +743,28 @@ def test_policy_sql_inspect_checks_whole_requests():
         assert aiwaf_rust.policy_sql_inspect(b"", json.dumps({"f": value}).encode(), 65536), value
 
 
+def test_policy_sql_inspect_headers_checks_cookies_referer_and_custom_headers():
+    inspect = aiwaf_rust.policy_sql_inspect_headers
+    assert inspect([("Cookie", "session=x' OR 1=1--")], 65536) == ("sql_breakout_single_quote", 403)
+    assert inspect([("Referer", "https://example.com/a?id=1 OR 1=1")], 65536) == ("sql_breakout_numeric", 403)
+    assert inspect([("X-Search", "' UNION SELECT password FROM users--")], 65536) == ("sql_breakout_single_quote", 403)
+    # Credential headers are skipped, and ordinary values are not attacks.
+    assert inspect([("Authorization", "Bearer ' OR 1=1--")], 65536) is None
+    assert inspect([("User-Agent", "Mozilla/5.0"), ("Cookie", "name=O'Reilly")], 65536) is None
+    assert inspect([], 65536) is None
+    assert inspect([("X-Data", "a" * 50)], 10) == ("payload_inspection_limit", 413)
+
+
+def test_policy_sql_inspect_path_checks_each_segment():
+    inspect = aiwaf_rust.policy_sql_inspect_path
+    assert inspect("/post/1 OR 1=1", 65536) == ("sql_breakout_numeric", 403)
+    assert inspect("/post/1%20OR%201%3D1", 65536) == ("sql_breakout_numeric", 403)
+    assert inspect("/users/O'Reilly", 65536) is None
+    assert inspect("/blog/2026/hello-world", 65536) is None
+    assert inspect("/", 65536) is None
+    assert inspect("/" + "a" * 50, 10) == ("payload_inspection_limit", 413)
+
+
 def test_route_risk_checker_and_rules():
     manifest = {"routes": {"/files/<path:name>": {"injection_risks": [{"sink": "path", "input": "name", "confidence": "medium"}]}}}
     checker = aiwaf_rust.RouteRiskChecker(json.dumps(manifest))
