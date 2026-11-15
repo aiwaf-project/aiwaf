@@ -21,6 +21,18 @@ def default_trust(monkeypatch):
     monkeypatch.delenv("AIWAF_TRUSTED_PROXIES", raising=False)
 
 
+@pytest.fixture(autouse=True, params=["rust", "python"])
+def resolver(request, monkeypatch):
+    """Run every test through aiwaf-rust and through the Python fallback for older aiwaf-rust."""
+    from aiwaf.core import rust_backend
+
+    if request.param == "python":
+        monkeypatch.setattr(rust_backend, "aiwaf_rust", None)
+    elif getattr(rust_backend.aiwaf_rust, "TrustedProxySet", None) is None:
+        pytest.skip("aiwaf-rust without TrustedProxySet")
+    return request.param
+
+
 def django_request(peer, xff):
     return SimpleNamespace(META={"REMOTE_ADDR": peer, "HTTP_X_FORWARDED_FOR": xff})
 
@@ -206,3 +218,17 @@ def test_untrusted_peer_sending_only_real_ip_is_reported(warnings_reset):
 def test_no_warning_without_a_misconfigured_proxy(warnings_reset, peer, xff, configured):
     resolve_client_ip(peer, xff, trusted_proxies=configured)
     assert _proxy_warnings(warnings_reset) == []
+
+
+def test_trusted_proxy_networks_expands_names_and_skips_invalid_entries(monkeypatch):
+    import ipaddress
+
+    from aiwaf.core.utils import CLOUDFLARE_PROXIES, DEFAULT_TRUSTED_PROXIES, trusted_proxy_networks
+
+    expected = [ipaddress.ip_network(e) for e in DEFAULT_TRUSTED_PROXIES + CLOUDFLARE_PROXIES]
+    assert list(trusted_proxy_networks("default, Cloudflare")) == expected
+    assert list(trusted_proxy_networks(["10.0.0.0/8", "not-a-network"])) == [ipaddress.ip_network("10.0.0.0/8")]
+    monkeypatch.setenv("AIWAF_TRUSTED_PROXIES", "192.0.2.1")
+    assert list(trusted_proxy_networks()) == [ipaddress.ip_network("192.0.2.1/32")]
+    monkeypatch.delenv("AIWAF_TRUSTED_PROXIES")
+    assert list(trusted_proxy_networks()) == [ipaddress.ip_network(e) for e in DEFAULT_TRUSTED_PROXIES]
