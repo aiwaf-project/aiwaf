@@ -1,61 +1,67 @@
-// Deterministic, bounded signatures. Findings never include request values.
-const RULES = [
-  ['sql_union_select', /\bunion\s+(?:all\s+)?select\b/i],
-  ['sql_boolean_tautology', /['"`]\s*(?:or|and)\s+(?:true\b|\d+\s*=\s*\d+|['"][^'"\r\n]{0,80}['"]\s*=\s*['"])/i],
-  ['sql_quote_comment', /['"`]\s*(?:--|#)/],
-  ['sql_stacked_statement', /;\s*(?:drop\s+table|delete\s+from|insert\s+into|update\s+\w+\s+set)\b/i]
-];
+'use strict';
+
+// SQL injection checks. The check runs in aiwaf-wasm (sql_inspect), which walks the query and
+// body, decodes values, parses JSON, applies the size limits and runs the SQL tokenizer.
+// Findings never include request values.
+const wasmChecks = require('./wasmChecks');
+
+const EMPTY = new Uint8Array(0);
+
+// Returns body bytes, or null when the body can't be serialized, such as one that contains itself.
+function bodyBytes(body) {
+  if (body === undefined || body === null) return EMPTY;
+  if (Buffer.isBuffer(body) || body instanceof Uint8Array) return body;
+  if (typeof body === 'string') return Buffer.from(body);
+  // Frameworks may expose an unparsed upload stream; never read or consume it.
+  if (typeof body.pipe === 'function') return EMPTY;
+  try {
+    return Buffer.from(JSON.stringify(body) ?? '');
+  } catch (_) {
+    return null;
+  }
+}
+
+// Every header is passed on. aiwaf-wasm decides which to check: cookies, the Referer and any
+// other header except those holding credentials, framing or browser-set values.
+function headerPairs(headers) {
+  if (!headers || typeof headers !== 'object') return [];
+  const found = [];
+  for (const [name, value] of Object.entries(headers)) {
+    if (value === undefined || value === null) continue;
+    for (const item of Array.isArray(value) ? value : [value]) {
+      found.push([String(name), String(item)]);
+      if (found.length >= 256) return found;
+    }
+  }
+  return found;
+}
 
 function createInspector(options = {}) {
   const mode = String(options.AIWAF_SQL_INJECTION_MODE ?? process.env.AIWAF_SQL_INJECTION_MODE ?? 'block').toLowerCase();
   if (!['block', 'monitor', 'off'].includes(mode)) throw new Error('Invalid AIWAF_SQL_INJECTION_MODE');
   const maxBytes = Number(options.AIWAF_PAYLOAD_MAX_BYTES ?? process.env.AIWAF_PAYLOAD_MAX_BYTES ?? 65536);
   if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > 1048576) throw new Error('AIWAF_PAYLOAD_MAX_BYTES must be 1..1048576');
+  /** Checks a request. Await wasmChecks.load() before the first call. */
   return function inspect(req) {
     if (mode === 'off') return null;
-    const stack = [[req.body, 0], [req.query, 0]];
-    // Also handles raw Node requests whose framework has not populated query.
-    const query = String(req.originalUrl || req.url || '').split('?').slice(1).join('?');
-    if (query) stack.push([query, 0]);
-    let bytes = 0, nodes = 0;
-    const seen = new Set();
-    const finding = (rule, status = 403) => ({ rule, status, mode });
-    while (stack.length) {
-      const [value, depth] = stack.pop();
-      if (++nodes > 4096 || depth > 16) return finding('payload_inspection_limit', 413);
-      if (value === undefined || value === null) continue;
-      // Frameworks may expose an unparsed upload stream; never traverse or consume it.
-      if (typeof value.pipe === 'function') continue;
-      if (Buffer.isBuffer(value)) {
-        if (value.length + bytes > maxBytes) return finding('payload_inspection_limit', 413);
-        stack.push([value.toString('utf8'), depth + 1]);
-      } else if (typeof value === 'object') {
-        if (seen.has(value)) return finding('payload_inspection_limit', 413);
-        seen.add(value);
-        for (const [key, item] of Object.entries(value)) {
-          stack.push([key, depth + 1], [item, depth + 1]);
-          if (stack.length > 4096) return finding('payload_inspection_limit', 413);
-        }
-      } else if (typeof value === 'string') {
-        bytes += Buffer.byteLength(value);
-        if (bytes > maxBytes) return finding('payload_inspection_limit', 413);
-        let normalized = value;
-        for (let round = 0; round < 2; round++) {
-          try { normalized = decodeURIComponent(normalized.replace(/\+/g, ' ')); } catch (_) { break; }
-        }
-        // Decode serialized JSON escapes before signature matching.
-        if (/^\s*[\[{]/.test(normalized)) {
-          try {
-            const parsed = JSON.parse(normalized);
-            stack.push([parsed, depth + 1]);
-          } catch (_) { /* Non-JSON strings still receive signature checks. */ }
-        }
-        normalized = normalized.replace(/\/\*[\s\S]*?\*\//g, ' ');
-        for (const [rule, pattern] of RULES) if (pattern.test(normalized)) return finding(rule);
-      }
+    const wasm = wasmChecks.get();
+    const body = bodyBytes(req.body);
+    if (body === null) return { rule: 'payload_inspection_limit', status: 413, mode };
+    // Raw Node requests have only a URL. Frameworks may also have parsed the query.
+    const raw = String(req.originalUrl || req.url || '').split('?').slice(1).join('?');
+    let found = JSON.parse(wasm.sql_inspect(Buffer.from(raw), body, maxBytes));
+    if (!found && !raw && req.query && typeof req.query === 'object') {
+      const query = bodyBytes(req.query);
+      found = query === null
+        ? { rule: 'payload_inspection_limit', status: 413 }
+        : JSON.parse(wasm.sql_inspect(EMPTY, query, maxBytes));
     }
-    return null;
+    if (!found) found = JSON.parse(wasm.sql_inspect_headers(JSON.stringify(headerPairs(req.headers)), maxBytes));
+    // The URL path, one segment at a time, as in /post/1 OR 1=1.
+    const path = String(req.originalUrl || req.url || '').split('?')[0];
+    if (!found && path) found = JSON.parse(wasm.sql_inspect_path(path, maxBytes));
+    return found ? { rule: found.rule, status: found.status, mode } : null;
   };
 }
 
-module.exports = { createInspector };
+module.exports = { createInspector, bodyBytes };

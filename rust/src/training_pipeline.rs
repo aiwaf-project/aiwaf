@@ -112,9 +112,9 @@ impl TrainingCSVReader {
 static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
 fn patterns() -> &'static Vec<Regex> {
     PATTERNS.get_or_init(|| [
-        r#"(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" (\d{3}).*?"(.*?)" "(.*?)".*?response-time=(\d+\.\d+)"#,
-        r#"(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" (\d{3}) (\d+) "(.*?)" "(.*?)""#,
-        r#"(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" (\d{3}) (\d+)"#,
+        r#"(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" (\d{3}).*?"(.*?)" "(.*?)".*?response-time=(\d+\.\d+)"#,
+        r#"(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" (\d{3}) (\d+) "(.*?)" "(.*?)""#,
+        r#"(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" (\d{3}) (\d+)"#,
     ].iter().map(|s| Regex::new(s).unwrap()).collect())
 }
 
@@ -415,4 +415,72 @@ fn training_anomaly_stats(
             .map(|(ip, g)| (ip, (g.0 / g.1 as f64, g.2, g.3 / g.4 as f64, g.5)))
             .collect())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kw(values: &[&str]) -> HashSet<String> {
+        values.iter().map(|v| v.to_string()).collect()
+    }
+
+    fn fields(line: &str) -> Vec<Vec<String>> {
+        patterns()
+            .iter()
+            .filter_map(|pattern| pattern.captures(line))
+            .map(|m| (1..=4).map(|i| m[i].to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn patterns_read_each_supported_log_format() {
+        let expected = vec!["203.0.113.5", "10/Oct/2026:12:00:00 +0000", "/a", "200"];
+        let prefix = r#"203.0.113.5 - - [10/Oct/2026:12:00:00 +0000] "GET /a HTTP/1.1" 200"#;
+        let cases = [
+            (format!(r#"{prefix} 12 "-" "ua" response-time=0.125"#), 3),
+            (format!(r#"{prefix} 12 "-" "ua""#), 2),
+            (format!("{prefix} 12"), 1),
+        ];
+        for (line, matching_patterns) in cases {
+            let found = fields(&line);
+            assert_eq!(found.len(), matching_patterns, "{line}");
+            assert_eq!(found[0], expected, "{line}");
+        }
+    }
+
+    #[test]
+    fn patterns_accept_ipv6_clients() {
+        let line = r#"2001:db8::1 - - [10/Oct/2026:12:00:00 +0000] "POST /a HTTP/1.1" 404 0 "-" "ua""#;
+        assert_eq!(fields(line)[0][0], "2001:db8::1");
+    }
+
+    #[test]
+    fn patterns_ignore_lines_that_are_not_requests() {
+        assert!(fields("").is_empty());
+        assert!(fields("server started on port 8000").is_empty());
+    }
+
+    #[test]
+    fn malicious_detects_known_attack_strings() {
+        for path in ["/../etc", "/.env", "/wp-admin/x", "/a?q=union+select", "/%2e%2e/x"] {
+            assert!(malicious(path, "200", &kw(&[])), "{path}");
+        }
+    }
+
+    #[test]
+    fn malicious_needs_two_static_keywords() {
+        assert!(!malicious("/alpha/page", "200", &kw(&["alpha", "beta"])));
+        assert!(malicious("/alpha/beta", "200", &kw(&["alpha", "beta"])));
+    }
+
+    #[test]
+    fn malicious_treats_odd_paths_as_suspicious_only_on_404() {
+        let long = format!("/{}", "a".repeat(60));
+        assert!(malicious(&long, "404", &kw(&[])));
+        assert!(!malicious(&long, "200", &kw(&[])));
+        assert!(malicious("/a<b", "404", &kw(&[])));
+        assert!(!malicious("/a<b", "200", &kw(&[])));
+        assert!(!malicious("/docs/page", "404", &kw(&[])));
+    }
 }

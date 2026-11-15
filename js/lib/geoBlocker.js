@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const geoStore = require('./geoStore');
 const { evaluateGeoPolicy } = require('./geoPolicy');
+const { getRequestIp } = require('./runtimeUtils');
 
 let config = {
   enabled: false,
@@ -17,13 +18,6 @@ let config = {
 
 function normalizeCountry(value) {
   return String(value || '').trim().toUpperCase();
-}
-
-function getRequestIp(req) {
-  const rawIp = req.headers?.['x-forwarded-for']
-    ? String(req.headers['x-forwarded-for']).split(',')[0].trim()
-    : (req.ip || req.connection?.remoteAddress || req.socket?.remoteAddress || '');
-  return String(rawIp).replace(/^::ffff:/, '');
 }
 
 function getCachedCountry(ip) {

@@ -26,7 +26,7 @@ test('monitor logs only rule metadata and forwards the request', async () => {
   const warn = jest.fn();
   await request(appFor({ AIWAF_SQL_INJECTION_MODE: 'monitor', logger: { warn } }))
     .post('/login').send({ email: "admin'--", password: 'private-secret' }).expect(401);
-  expect(warn).toHaveBeenCalledWith({ event: 'aiwaf.payload', rule: 'sql_quote_comment', mode: 'monitor' });
+  expect(warn).toHaveBeenCalledWith({ event: 'aiwaf.payload', rule: 'sql_breakout_single_quote', mode: 'monitor' });
   expect(JSON.stringify(warn.mock.calls)).not.toContain('private-secret');
 });
 

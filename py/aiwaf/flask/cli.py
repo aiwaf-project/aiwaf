@@ -1450,7 +1450,7 @@ def main():
             from aiwaf.flask.path_manifest import generate_flask_manifest
 
             app = _load_flask_app(args.app)
-            manifest = generate_flask_manifest(app, args.output)
+            manifest = generate_flask_manifest(app, args.output, audit_source=".")
         except Exception as e:
             print(f" Init failed: {e}")
             return

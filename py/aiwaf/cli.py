@@ -116,6 +116,44 @@ def _prepend_cwd_to_syspath() -> None:
     sys.path.insert(0, project_root)
 
 
+def _handle_audit(argv) -> int:
+    """Report possible injection paths. This reads source files and runs no application code."""
+    import argparse
+
+    from aiwaf.core.injection_analysis import analyze_path, format_report, to_json
+
+    parser = argparse.ArgumentParser(
+        prog="aiwaf audit",
+        description="Report where request input reaches SQL, commands, files and other dangerous operations.",
+    )
+    parser.add_argument("path", nargs="?", default=".", help="File or folder to scan (default: current folder)")
+    parser.add_argument("--format", choices=["text", "json"], default="text")
+    parser.add_argument("--output", help="Write the report to this file")
+    parser.add_argument("--include-tests", action="store_true", help="Also scan test files")
+    parser.add_argument("--fail-on-findings", action="store_true", help="Exit with status 1 if anything is found")
+    parser.add_argument("--manifest", help="Save findings to this route manifest for AIWAF_INJECTION_RISK_MODE=log")
+    args = parser.parse_args(argv)
+    try:
+        report = analyze_path(args.path, include_tests=args.include_tests)
+    except FileNotFoundError as error:
+        print(error, file=sys.stderr)
+        return 2
+    content = to_json(report) if args.format == "json" else format_report(report)
+    if args.output:
+        Path(args.output).write_text(content + "\n", encoding="utf-8")
+    else:
+        print(content)
+    if args.manifest:
+        from aiwaf.core.route_risks import format_counts, update_manifest
+
+        try:
+            print(format_counts(update_manifest(report, args.manifest), args.manifest))
+        except (OSError, ValueError) as error:
+            print(error, file=sys.stderr)
+            return 2
+    return 1 if args.fail_on_findings and report["findings"] else 0
+
+
 def _handle_init(argv) -> None:
     import argparse
     import importlib
@@ -125,7 +163,10 @@ def _handle_init(argv) -> None:
     parser.add_argument("--app", help="App import path for Flask/FastAPI (module:app or module:create_app)")
     parser.add_argument("--settings", help="Django settings module for standalone `aiwaf init`")
     parser.add_argument("--output", default=".aiwaf/paths.json", help="Output manifest path")
+    parser.add_argument("--source", default=".", help="Source to audit for injection checks (default: current folder)")
+    parser.add_argument("--no-audit", action="store_true", help="Don't audit source or save injection checks")
     args = parser.parse_args(argv)
+    audit_source = None if args.no_audit else args.source
 
     framework = _normalize_framework(args.framework)
     app = None
@@ -153,23 +194,26 @@ def _handle_init(argv) -> None:
 
         from aiwaf.django.path_manifest import generate_django_manifest
 
-        manifest = generate_django_manifest(args.output)
+        manifest = generate_django_manifest(args.output, audit_source=audit_source)
     else:
         if app is None:
             parser.error("--app is required for Flask/FastAPI")
         if framework == "flask":
             from aiwaf.flask.path_manifest import generate_flask_manifest
 
-            manifest = generate_flask_manifest(app, args.output)
+            manifest = generate_flask_manifest(app, args.output, audit_source=audit_source)
         else:
             from aiwaf.fast.path_manifest import generate_fastapi_manifest
 
-            manifest = generate_fastapi_manifest(app, args.output)
+            manifest = generate_fastapi_manifest(app, args.output, audit_source=audit_source)
+
+    from aiwaf.core.route_risks import describe_audit
 
     print(f"Generated {args.output}")
     print(f"Framework: {manifest['framework']}")
     print(f"Routes: {len(manifest.get('routes', {}))}")
     print(f"Context hash: {manifest['context_hash']}")
+    print(describe_audit(manifest))
 
 
 def aiwaf_detect() -> None:
@@ -198,6 +242,9 @@ def main() -> None:
     if argv and argv[0] == "init":
         _handle_init(argv[1:])
         return
+
+    if argv and argv[0] == "audit":
+        raise SystemExit(_handle_audit(argv[1:]))
 
     if argv and argv[0] in frameworks:
         framework = _normalize_framework(argv[0])

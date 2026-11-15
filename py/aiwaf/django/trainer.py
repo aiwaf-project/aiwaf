@@ -32,6 +32,7 @@ from .blocklist_manager import BlocklistManager
 from .settings_compat import apply_legacy_settings
 from .model_store import save_model_data
 from .geoip import lookup_country, lookup_country_name
+from aiwaf.core.geoip import emit_geoip_summary
 from ..core.constants import STATUS_IDX as CORE_STATUS_IDX
 from ..core.logs import parse_log_line as core_parse_log_line, read_rotated_logs as core_read_rotated_logs
 from ..core.training_pipeline import iter_training_batches, iter_csv_training_batches, aggregate_training_records, count_training_keywords, anomaly_statistics
@@ -86,7 +87,7 @@ def path_exists_in_django(path: str) -> bool:
     try:
         get_resolver().resolve(f"/{candidate}")
         return True
-    except:
+    except Exception:
         pass
     
     # Also try with trailing slash if it doesn't have one
@@ -94,7 +95,7 @@ def path_exists_in_django(path: str) -> bool:
         try:
             get_resolver().resolve(f"/{candidate}/")
             return True
-        except:
+        except Exception:
             pass
     
     # Try without trailing slash if it has one
@@ -102,7 +103,7 @@ def path_exists_in_django(path: str) -> bool:
         try:
             get_resolver().resolve(f"/{candidate.rstrip('/')}")
             return True
-        except:
+        except Exception:
             pass
 
     # If direct resolution fails, be conservative
@@ -245,7 +246,7 @@ def _extract_django_route_keywords() -> set:
                     try:
                         for nested_pattern in pattern.url_patterns:
                             extract_from_pattern(nested_pattern, prefix)
-                    except:
+                    except Exception:
                         pass
                 
                 elif isinstance(pattern, URLPattern):
@@ -560,24 +561,12 @@ def _print_geoip_summary(ips, title):
         logger.info("GeoIP summary skipped: AIWAF_GEOIP_DB_PATH not set or file missing.")
         return
 
-    counts = Counter()
-    unknown = 0
-    for ip in ips:
-        name = lookup_country_name(ip, cache_prefix=None, cache_seconds=None)
-        if name:
-            counts[name] += 1
-        else:
-            unknown += 1
-
-    if not counts and not unknown:
-        return
-
-    top = counts.most_common(10)
-    logger.info(title)
-    for code, cnt in top:
-        logger.info(f"  - {code}: {cnt}")
-    if unknown:
-        logger.info(f"  - UNKNOWN: {unknown}")
+    emit_geoip_summary(
+        ips,
+        title,
+        lambda ip: lookup_country_name(ip, cache_prefix=None, cache_seconds=None),
+        logger.info,
+    )
 
 
 def _print_geoip_blocklist_summary():
