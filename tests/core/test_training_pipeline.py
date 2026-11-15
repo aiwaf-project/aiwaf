@@ -163,3 +163,60 @@ def test_context_callbacks_keep_learning_order(native):
         is_malicious_context=context)
     assert calls[0] == 'shellupload'
     assert result.learned_keywords == ['shellupload']
+
+
+ISSUE_34_PREFIX = '203.0.113.5 - - [05/Nov/2026:10:00:00 +0000] '
+# (rest of line, expected (path, status, response time) or None when the line is dropped)
+ISSUE_34_LINES = [
+    # Rows from #34
+    ('"PATCH /a HTTP/1.1" 200 12 "-" "ua"', ('/a', '200', 0.0)),
+    ('"GET /old HTTP/1.1" 304 - "-" "ua"', ('/old', '304', 0.0)),
+    ('"GET /a HTTP/1.1" 304 -', ('/a', '304', 0.0)),
+    ('"GET /a HTTP/1.1" 200 - "-" "ua" 5ms - "-"', ('/a', '200', 0.005)),
+    ('"GET /a HTTP/1.1" 200 12 "-" "ua" 5ms - "-"', ('/a', '200', 0.005)),
+    ('"GET /a HTTP/1.1" 200 - "-" "ua" response-time=1', ('/a', '200', 1.0)),
+    # PATCH in each format
+    ('"PATCH /a HTTP/1.1" 200 12 "-" "ua" response-time=0.25', ('/a', '200', 0.25)),
+    ('"PATCH /a HTTP/1.1" 201 12', ('/a', '201', 0.0)),
+    # Existing behavior that must not change
+    ('"GET /a HTTP/1.1" 200 12 "-" "ua" response-time=0.125', ('/a', '200', 0.125)),
+    ('"GET /a HTTP/1.1" 200 12', ('/a', '200', 0.0)),
+    ('"GET /a HTTP/1.1" 200 1234 "-" "ua" 1500ms BLOCKED "rate"', ('/a', '200', 1.5)),
+    # Sizes, paths, referers and user agents are never read as response times
+    ('"GET /items HTTP/1.1" 200 1234 "-" "ua"', ('/items', '200', 0.0)),
+    ('"GET /a HTTP/1.1" 200 800 "https://example.com/terms" "msnbot"', ('/a', '200', 0.0)),
+    ('"GET /a HTTP/1.1" 200 12 "-" "1.5"', ('/a', '200', 0.0)),
+    ('"GET /a HTTP/1.1" 200 12 "-" "ua" 5msx', ('/a', '200', 0.0)),
+    # Still dropped
+    ('"TRACE /a HTTP/1.1" 200 12', None),
+    ('"GET /a HTTP/1.1" 200', None),
+]
+
+
+
+@pytest.mark.parametrize(('rest', 'expected'), ISSUE_34_LINES)
+def test_python_parser_reads_methods_sizes_and_response_times(rest, expected):
+    record = parse_log_line(ISSUE_34_PREFIX + rest)
+    actual = None if record is None else (record['path'], record['status'], record['response_time'])
+    assert actual == expected
+    if record is not None:
+        assert record['ip'] == '203.0.113.5'
+
+
+@pytest.mark.parametrize(('rest', 'expected'), ISSUE_34_LINES)
+def test_rust_parser_reads_methods_sizes_and_response_times(native, rest, expected):
+    candidates = native.training_parse_lines([ISSUE_34_PREFIX + rest])[0]
+    actual = None if not candidates else candidates[0][2:]
+    assert actual == expected
+    if candidates:
+        assert candidates[0][0] == '203.0.113.5'
+
+
+def test_training_parser_routes_agree_on_issue_34_lines(native, monkeypatch):
+    lines = [ISSUE_34_PREFIX + rest + '\n' for rest, _ in ISSUE_34_LINES]
+    expected = [(path, status, rt) for _, value in ISSUE_34_LINES if value for path, status, rt in [value]]
+    native_records = parse_training_logs(lines)
+    assert [(r['path'], r['status'], r['response_time']) for r in native_records] == expected
+    monkeypatch.setattr(rust_backend, 'aiwaf_rust', None)
+    python_records = parse_training_logs(lines)
+    assert python_records == native_records

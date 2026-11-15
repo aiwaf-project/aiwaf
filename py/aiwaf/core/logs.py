@@ -56,23 +56,30 @@ def csv_log_path(path: str) -> str:
     return path
 
 
+# Keep in step with PATTERNS in rust/src/training_pipeline.rs. The first pattern that matches
+# wins. A response size may be "-", and the response time comes only from `rt` (seconds, from
+# response-time=) or `ms` (milliseconds, the trailing "5ms" in AIWAF's own Flask and FastAPI logs).
+_LOG_PREFIX = (
+    r'(?P<ip>\S+).*\[(?P<ts>.*?)\].*"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (?P<path>.*?) HTTP/.*?" '
+)
 _LOG_RX_PATTERNS = [
-    # Combined log format with response time (IPv4 + IPv6)
-    re.compile(
-        r'(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" '
-        r'(\d{3}).*?"(.*?)" "(.*?)".*?response-time=(\d+\.\d+)'
-    ),
-    # Standard combined log format (IPv4 + IPv6)
-    re.compile(
-        r'(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" '
-        r'(\d{3}) (\d+) "(.*?)" "(.*?)"'
-    ),
+    # Combined log format with response-time= (IPv4 + IPv6)
+    re.compile(_LOG_PREFIX + r'(?P<status>\d{3}).*?"(.*?)" "(.*?)".*?response-time=(?P<rt>\d+(?:\.\d+)?)'),
+    # Combined log format, optionally followed by a response time in milliseconds (IPv4 + IPv6)
+    re.compile(_LOG_PREFIX + r'(?P<status>\d{3}) (?:\d+|-) "(.*?)" "(.*?)"(?: (?P<ms>\d+(?:\.\d+)?)ms\b)?'),
     # Common log format (IPv4 + IPv6)
-    re.compile(
-        r'(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" '
-        r'(\d{3}) (\d+)'
-    ),
+    re.compile(_LOG_PREFIX + r'(?P<status>\d{3}) (?:\d+|-)'),
 ]
+
+
+def _response_time(match: re.Match) -> float:
+    """Response time in seconds, or 0.0 when the line doesn't record one."""
+    fields = match.groupdict()
+    if fields.get("rt"):
+        return float(fields["rt"])
+    if fields.get("ms"):
+        return float(fields["ms"]) / 1000
+    return 0.0
 
 
 def read_rotated_logs(base_path: str) -> list[str]:
@@ -95,20 +102,8 @@ def parse_log_line(line: str) -> dict | None:
         m = pattern.search(line)
         if not m:
             continue
-        groups = m.groups()
-        ip = groups[0]
-        ts_str = groups[1]
-        path = groups[2]
-        status = groups[3]
-
-        rt = 0.0
-        for group in groups[4:]:
-            try:
-                if "." in str(group):
-                    rt = float(group)
-                    break
-            except (ValueError, TypeError):
-                continue
+        ip, ts_str, path, status = m.group("ip", "ts", "path", "status")
+        rt = _response_time(m)
 
         try:
             ts = datetime.strptime(ts_str.split()[0], "%d/%b/%Y:%H:%M:%S")

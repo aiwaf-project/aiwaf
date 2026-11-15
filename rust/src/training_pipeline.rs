@@ -109,13 +109,30 @@ impl TrainingCSVReader {
         })
     }
 }
+// Keep in step with _LOG_RX_PATTERNS in py/aiwaf/core/logs.py. A response size may be "-", and
+// the response time comes only from `rt` (seconds, from response-time=) or `ms` (milliseconds,
+// the trailing "5ms" in AIWAF's own Flask and FastAPI logs).
+const LOG_PREFIX: &str = r#"(?P<ip>\S+).*\[(?P<ts>.*?)\].*"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (?P<path>.*?) HTTP/.*?" "#;
 static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
 fn patterns() -> &'static Vec<Regex> {
-    PATTERNS.get_or_init(|| [
-        r#"(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" (\d{3}).*?"(.*?)" "(.*?)".*?response-time=(\d+\.\d+)"#,
-        r#"(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" (\d{3}) (\d+) "(.*?)" "(.*?)""#,
-        r#"(\S+).*\[(.*?)\].*"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (.*?) HTTP/.*?" (\d{3}) (\d+)"#,
-    ].iter().map(|s| Regex::new(s).unwrap()).collect())
+    PATTERNS.get_or_init(|| {
+        [
+            r#"(?P<status>\d{3}).*?"(.*?)" "(.*?)".*?response-time=(?P<rt>\d+(?:\.\d+)?)"#,
+            r#"(?P<status>\d{3}) (?:\d+|-) "(.*?)" "(.*?)"(?: (?P<ms>\d+(?:\.\d+)?)ms\b)?"#,
+            r#"(?P<status>\d{3}) (?:\d+|-)"#,
+        ]
+        .iter()
+        .map(|tail| Regex::new(&format!("{LOG_PREFIX}{tail}")).unwrap())
+        .collect()
+    })
+}
+
+/// Response time in seconds, or 0.0 when the line doesn't record one.
+fn response_time(m: &regex::Captures<'_>) -> f64 {
+    let number = |name| m.name(name).and_then(|v| v.as_str().parse::<f64>().ok());
+    number("rt")
+        .or_else(|| number("ms").map(|ms| ms / 1000.0))
+        .unwrap_or(0.0)
 }
 
 #[pyfunction]
@@ -128,14 +145,13 @@ fn training_parse_lines(py: Python<'_>, lines: Vec<String>) -> Vec<Vec<Fields>> 
                     .iter()
                     .filter_map(|pattern| {
                         let m = pattern.captures(line)?;
-                        // Preserve Python's unusual "first float-like group" rule exactly.
-                        let rt = (5..m.len())
-                            .filter_map(|i| m.get(i))
-                            .map(|v| v.as_str())
-                            .filter(|s| s.contains('.'))
-                            .find_map(|s| s.parse::<f64>().ok())
-                            .unwrap_or(0.0);
-                        Some((m[1].into(), m[2].into(), m[3].into(), m[4].into(), rt))
+                        Some((
+                            m["ip"].into(),
+                            m["ts"].into(),
+                            m["path"].into(),
+                            m["status"].into(),
+                            response_time(&m),
+                        ))
                     })
                     .collect()
             })
@@ -453,6 +469,42 @@ mod tests {
     fn patterns_accept_ipv6_clients() {
         let line = r#"2001:db8::1 - - [10/Oct/2026:12:00:00 +0000] "POST /a HTTP/1.1" 404 0 "-" "ua""#;
         assert_eq!(fields(line)[0][0], "2001:db8::1");
+    }
+
+    #[test]
+    fn patterns_accept_patch_dash_sizes_and_response_time_forms() {
+        let prefix = r#"203.0.113.5 - - [05/Nov/2026:10:00:00 +0000] "#;
+        let cases = [
+            (r#""PATCH /a HTTP/1.1" 200 12 "-" "ua""#, "200", 0.0),
+            (r#""GET /old HTTP/1.1" 304 - "-" "ua""#, "304", 0.0),
+            (r#""GET /a HTTP/1.1" 304 -"#, "304", 0.0),
+            (
+                r#""GET /a HTTP/1.1" 200 - "-" "ua" 5ms - "-""#,
+                "200",
+                0.005,
+            ),
+            (
+                r#""GET /a HTTP/1.1" 200 12 "-" "ua" 5ms - "-""#,
+                "200",
+                0.005,
+            ),
+            (
+                r#""GET /a HTTP/1.1" 200 - "-" "ua" response-time=1"#,
+                "200",
+                1.0,
+            ),
+            (r#""GET /a HTTP/1.1" 200 12 "-" "1.5""#, "200", 0.0),
+            (r#""GET /items HTTP/1.1" 200 1234 "-" "ua""#, "200", 0.0),
+        ];
+        for (rest, status, expected) in cases {
+            let line = format!("{prefix}{rest}");
+            let m = patterns()
+                .iter()
+                .find_map(|pattern| pattern.captures(&line))
+                .unwrap_or_else(|| panic!("dropped: {line}"));
+            assert_eq!(&m["status"], status, "{line}");
+            assert_eq!(response_time(&m), expected, "{line}");
+        }
     }
 
     #[test]

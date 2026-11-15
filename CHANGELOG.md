@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Python and Rust log parsers no longer drop or misread some valid lines
+  ([#34](https://github.com/aiwaf-project/aiwaf/issues/34)). They accept `-` as the
+  response size, as in `304` responses and AIWAF's own Flask and FastAPI logs, accept
+  whole-number `response-time=` values, and read the trailing `5ms` in AIWAF's logs as
+  0.005 seconds. Response times now come only from `response-time=` or a trailing `ms`
+  value: a referer or user agent that looks like a number, such as `"1.5"`, is no longer
+  read as one. Ships in `aiwaf-rust` 0.2.8, which the Python package already requires.
 - Fix the middleware CSV log path so only a trailing `.log` becomes `.csv`
   (Django and Flask middleware plus the `aiwaf_logging` and `debug_csv`
   commands). A `.log` elsewhere in the path, such as in a folder name, and a
