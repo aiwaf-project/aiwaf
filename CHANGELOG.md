@@ -90,6 +90,7 @@
 
 ## Python 1.1.8 / Rust-Python 0.2.7 / Node.js 1.1.5 / WASM 0.2.5 / Java 1.3.5 — prepared release
 
+- Recognize PATCH HTTP method in Python and Rust access log parsers.
 - **Security:** Python and Node.js no longer let a client choose its own address with
   `X-Forwarded-For`, which could evade blocks and rate limits or match `AIWAF_EXEMPT_IPS`.
   Forwarded headers now count only from a trusted peer and are walked from the right.

@@ -18,14 +18,14 @@ def native(monkeypatch):
     return module
 
 
-def line(path='/wp-content/shell.php', status='404', stamp='10/Oct/2026:12:00:00 +0530', tail='response-time=0.125'):
-    return f'203.0.113.1 - - [{stamp}] "GET {path} HTTP/1.1" {status} 207 "-" "pytest" {tail}\n'
+def line(path='/wp-content/shell.php', status='404', stamp='10/Oct/2026:12:00:00 +0530', tail='response-time=0.125', method='GET'):
+    return f'203.0.113.1 - - [{stamp}] "{method} {path} HTTP/1.1" {status} 207 "-" "pytest" {tail}\n'
 
 
 def test_batch_parser_matches_single_line_parser(native, monkeypatch):
     lines = [line(), line(stamp='2026-10-10T12:00:00Z'), line(stamp='bad'), 'bad\n',
              line(path='/über/config'), line(tail=''), line(tail='response-time=1.0'),
-             line(path='/known', status='200'), line(stamp='2026-10-10T12:00:00.123456-04:00')]
+             line(path='/known', status='200'), line(path='/api/patch-endpoint', method='PATCH'), line(stamp='2026-10-10T12:00:00.123456-04:00')]
     expected = [record for text in lines if (record := parse_log_line(text))]
     assert parse_training_logs(lines) == expected
     monkeypatch.setenv('AIWAF_RUST_CSV', 'false')
