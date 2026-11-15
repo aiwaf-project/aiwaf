@@ -20,10 +20,10 @@ def test_flask_engine_route_sql_body_and_learning(tmp_path, enabled):
     assert client.get('/safe').status_code == 200
     if enabled:
         assert hasattr(middleware, '_native_request_engine_profile')
-    assert client.get('/safe?q=1+UNION+SELECT').status_code == 403
+    assert client.get('/safe?q=1+UNION+SELECT+1').status_code == 403
     response = client.post('/safe', json={'field': 'original body'})
     assert response.status_code == 200 and response.json == {'field': 'original body'}
-    assert client.post('/safe', json={'field': '1 UNION SELECT'}).status_code == 403
+    assert client.post('/safe', json={'field': '1 UNION SELECT 1'}).status_code == 403
     assert client.get('/shell/admin.php?x=shell-script').status_code == 403
 
 

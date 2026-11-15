@@ -38,7 +38,7 @@ class FrameworkCases:
         self.assertEqual(body['received'], payload)
 
     def test_query_and_urlencoded_form(self):
-        self.assertEqual(self.send({}, query='q=union%20select%20password')[0], 403)
+        self.assertEqual(self.send({}, query='q=1%20union%20select%20password')[0], 403)
         self.assertEqual(self.send(b'email=admin%27--', content_type='application/x-www-form-urlencoded')[0], 403)
 
     def test_multipart_body_preserved(self):

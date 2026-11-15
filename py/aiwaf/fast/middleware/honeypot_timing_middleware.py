@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from ..blocklist import BlocklistManager
 from ..decorators import should_apply_middleware
 from ..utils import get_blocklist_extended_info, get_ip
-from ...core.runtime_storage import get_storage
+from ...core.runtime_storage import HoneypotStateCache
 from ...core.honeypot import (
     store_honeypot_get_timestamp,
     load_honeypot_get_timestamp,
@@ -20,26 +20,7 @@ from ...core.honeypot import (
 from ...core.method_validation import evaluate_method_policy, ACTION_BLOCK as METHOD_BLOCK
 from ...core.method_validation import fastapi_route_accepts_method
 
-class _HoneypotStateCache:
-    def __setitem__(self, key, value):
-        get_storage().set(key, value, ttl=300)
-
-    def get(self, key, default=None):
-        value = get_storage().get(key)
-        return default if value is None else value
-
-    def pop(self, key, default=None):
-        value = get_storage().get(key)
-        get_storage().delete(key)
-        return default if value is None else value
-
-    def clear(self):
-        storage = get_storage()
-        for key in storage.get_all_keys("honeypot_get:*"):
-            storage.delete(key)
-
-
-_AIWAF_CACHE = _HoneypotStateCache()
+_AIWAF_CACHE = HoneypotStateCache()
 
 
 class HoneypotTimingMiddleware(BaseHTTPMiddleware):

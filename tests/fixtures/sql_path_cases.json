@@ -1,0 +1,43 @@
+{
+  "about": "URL paths for the SQL check, shared by the Rust, Python, Node.js and Java tests. Each path segment is checked on its own, and a query string is ignored here because it's checked separately. Add any path that was wrongly blocked to ordinary.",
+  "attacks": [
+    "/post/1234%20OR%201=1",
+    "/post/2010-01-01'+sleep(20.to_i)+'",
+    "/post/EmptyValue'%20and%20526=527",
+    "/post/foo')waitfor%20delay'5%3a0%3a20'--",
+    "/post/sleep(20)",
+    "/post/foo/24'union+all+select+1,2,3+from+aa/bar",
+    "/get/if(now()=sysdate(),sleep(12),0)",
+    "/get/if(now()=sysdate(),sleep(/*comment*/12),0)/",
+    "/items/1%27%20UNION%20SELECT%20password%20FROM%20users--",
+    "/user/admin'--",
+    "/cart;id=1%20OR%201=1",
+    "/api/v1/orders/1%2527%2520OR%25201%253D1--"
+  ],
+  "ordinary": [
+    "/",
+    "/api/v1/orders/123/items",
+    "/users/o'reilly",
+    "/wiki/Don't_Stop_Me_Now",
+    "/blog/2024/01/union-select-committee",
+    "/search/rock%20'n'%20roll",
+    "/files/report%20(1).pdf",
+    "/product/12\"-ruler",
+    "/drop/table-of-contents",
+    "/cart;jsessionid=8F1A2B3C",
+    "/static/js/app.min.js",
+    "/@user/posts",
+    "/~home/index.html",
+    "/c++/tutorial",
+    "/select-a-colour",
+    "/orders?id=1 OR 1=1",
+    "/en-us/docs/Web/API/Fetch_API",
+    "/questions/12345/how-to-order-by-date-in-sql",
+    "/r/AskReddit/comments/abc123/whats_your_favourite_book/",
+    "/maps/@51.5072,-0.1276,12z",
+    "/products/sku-1234-blue?ref=home",
+    "/a/b/c/d/e/f/g",
+    "/2024/11/07/release-notes-v2.3.0/",
+    "/download/file_v1.0.0-beta+build.5.zip"
+  ]
+}

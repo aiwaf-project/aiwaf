@@ -22,10 +22,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Use Node.js 22 LTS
+      - name: Use Node.js 26 LTS
         uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 26
           package-manager-cache: false
 
       - name: Use current npm CLI

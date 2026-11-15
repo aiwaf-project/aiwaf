@@ -23,6 +23,9 @@ _DEFAULT_TOP = KeywordStore.get_top_keywords
 _DEFAULT_QUERY_KEYS = extract_query_keys_from_fastapi_request
 
 
+from aiwaf.core.route_risks import observer_for
+
+
 class IPAndKeywordBlockMiddleware(BaseHTTPMiddleware):
     def __init__(self, app, path_rules=None, malicious_keywords=None, sql_injection_mode=None, payload_max_bytes=None):
         super().__init__(app)
@@ -124,8 +127,12 @@ class IPAndKeywordBlockMiddleware(BaseHTTPMiddleware):
             with native_override(bool(cfg.get('AIWAF_USE_RUST', True) and cfg.get('AIWAF_RUST_CSV', True))):
                 return prepared[0](query, body)
 
-        finding = (await inspect_asgi_request(request, self.sql_policy, evaluator=evaluate_combined)
-                   if prepared else await inspect_asgi_request(request, self.sql_policy))
+        observer = observer_for(
+            cfg.get('AIWAF_INJECTION_RISK_MODE') if has_config else None,
+            (cfg.get('AIWAF_PATH_MANIFEST') or cfg.get('path_manifest') or cfg.get('PATH_MANIFEST')) if has_config else None,
+            request.url.path, request.method)
+        finding = (await inspect_asgi_request(request, self.sql_policy, evaluator=evaluate_combined, observer=observer)
+                   if prepared else await inspect_asgi_request(request, self.sql_policy, observer=observer))
         if finding:
             request.state.aiwaf_blocked = True
             request.state.aiwaf_block_reason = finding.rule

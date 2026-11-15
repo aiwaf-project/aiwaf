@@ -85,11 +85,13 @@ public final class ServletRequestMapper {
             String[] parts = forwardedFor.split(",");
             int start = Math.max(0, parts.length - Math.max(1, config.maxForwardedForEntries));
             for (int i = parts.length - 1; i >= start; i--) {
-                String part = parts[i];
-                String candidate = part.trim();
-                if (!candidate.isBlank() && !"unknown".equalsIgnoreCase(candidate)
-                        && isIpLiteral(candidate)
-                        && !isTrustedProxy(candidate, config.trustedProxyCidrs)) {
+                String candidate = parts[i].trim();
+                // Stop rather than skip, so a malformed hop can't expose
+                // client-supplied values to its left.
+                if (!isIpLiteral(candidate)) {
+                    break;
+                }
+                if (!isTrustedProxy(candidate, config.trustedProxyCidrs)) {
                     return candidate;
                 }
             }

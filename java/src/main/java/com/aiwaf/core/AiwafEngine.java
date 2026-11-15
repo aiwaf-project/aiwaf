@@ -162,6 +162,15 @@ public final class AiwafEngine {
         }
 
         if (!pathExempted && !ipExempted && config.ipKeywordBlockEnabled
+                && !isRuleDisabled(req, rule, config, "ip_keyword_block")) {
+            String riskRule = RouteRiskCore.observe(req, config);
+            if (riskRule != null) {
+                telemetryIncrement("middleware.injection_risk." + riskRule);
+                return finalizeDecision(AiwafDecision.deny(403, riskRule), startedNs, "injection_risk");
+            }
+        }
+
+        if (!pathExempted && !ipExempted && config.ipKeywordBlockEnabled
                 && !isRuleDisabled(req, rule, config, "ip_keyword_block")
                 && !"off".equals(config.sqlInjectionMode)) {
             String finding = SqlInjectionCore.inspect(req, config);

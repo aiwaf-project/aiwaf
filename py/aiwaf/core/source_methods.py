@@ -8,6 +8,9 @@ import textwrap
 from typing import Any, Dict, Optional, Set
 
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
+ROUTE_HINT_POST_TOKENS = (
+    "login", "signin", "upload", "create", "edit", "update", "delete", "submit", "save", "add", "post",
+)
 
 
 def literal_http_method(node: ast.AST) -> Optional[str]:
@@ -235,3 +238,26 @@ def infer_methods_from_source(callback: Any) -> list[str]:
     except SyntaxError:
         return []
     return methods_from_ast(tree, view_name)
+
+
+def normalize_methods(methods: Any) -> list[str]:
+    return sorted({str(method).upper() for method in methods or [] if str(method).upper() in HTTP_METHODS})
+
+
+def methods_from_route_hint(raw_path: str = "", route_name: str = "", extra_tokens: tuple = ()) -> list[str]:
+    """Guess methods from route naming when a view's source gives no answer."""
+    text = f"{raw_path} {route_name}".lower()
+    methods = {"GET"}
+    if any(token in text for token in ROUTE_HINT_POST_TOKENS + tuple(extra_tokens)):
+        methods.add("POST")
+    return sorted(methods)
+
+
+def decorator_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Call):
+        return decorator_name(node.func)
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return ""

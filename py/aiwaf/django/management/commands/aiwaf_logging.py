@@ -162,5 +162,5 @@ class Command(BaseCommand):
         try:
             with open(csv_file, 'r', encoding='utf-8') as f:
                 return sum(1 for line in f) - 1  # Subtract header
-        except:
+        except Exception:
             return 0

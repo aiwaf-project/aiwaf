@@ -20,6 +20,9 @@ _DEFAULT_STORE_TOP = _engine_storage.KeywordStore.get_top_keywords
 _DEFAULT_GET_TOP = _engine_storage.get_top_keywords
 _DEFAULT_QUERY_KEYS = extract_query_keys_from_flask_request
 
+from aiwaf.core.route_risks import observer_for
+
+
 class IPAndKeywordBlockMiddleware:
     def __init__(self, app=None):
         self.app = app
@@ -125,8 +128,10 @@ class IPAndKeywordBlockMiddleware:
                         file=Path(_engine_storage._get_data_dir()) / KEYWORDS_CSV, counts=False,
                         static=self.malicious_keywords, legitimate=self.legitimate_path_keywords,
                         exempt=self.exempt_keywords, prefixes=self.safe_prefixes, malicious=self.malicious_keywords)
-            finding = (inspect_wsgi_request(request, self.sql_policy, evaluator=prepared[0])
-                       if prepared else inspect_wsgi_request(request, self.sql_policy))
+            observer = observer_for(app.config.get('AIWAF_INJECTION_RISK_MODE'),
+                                    app.config.get('AIWAF_PATH_MANIFEST'), request.path, request.method)
+            finding = (inspect_wsgi_request(request, self.sql_policy, evaluator=prepared[0], observer=observer)
+                       if prepared else inspect_wsgi_request(request, self.sql_policy, observer=observer))
             if finding:
                 if logger:
                     logger.mark_request_blocked(finding.rule)

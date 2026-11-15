@@ -1,0 +1,39 @@
+name: Set up Python with aiwaf-rust from source
+description: Builds aiwaf-rust from this repository, then installs Python packages without fetching it from PyPI.
+
+inputs:
+  packages:
+    description: Arguments passed to pip install after aiwaf-rust is built.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Cache Rust build
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: rust
+
+    - name: Create virtual environment
+      shell: bash
+      run: |
+        python -m venv "$RUNNER_TEMP/venv"
+        echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+        echo "VIRTUAL_ENV=$RUNNER_TEMP/venv" >> "$GITHUB_ENV"
+
+    - name: Build aiwaf-rust from source
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install "maturin==1.11.5"
+        python scripts/stage_rust_package_files.py
+        maturin develop --release --locked --manifest-path rust/Cargo.toml
+
+    # Runs after the build so pip treats the aiwaf-rust requirement as already met.
+    - name: Install Python packages
+      shell: bash
+      run: python -m pip install ${{ inputs.packages }}
+
+    - name: Check aiwaf-rust came from this repository
+      shell: bash
+      run: python scripts/check_rust_source_build.py

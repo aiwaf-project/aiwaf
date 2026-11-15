@@ -194,7 +194,7 @@ describe('aiwaf CLI routing', () => {
       'fastify',
       null,
       output,
-      { routes: [{ method: 'GET', path: '/api/test' }] }
+      { routes: [{ method: 'GET', path: '/api/test' }], auditSource: '.' }
     );
   });
 
