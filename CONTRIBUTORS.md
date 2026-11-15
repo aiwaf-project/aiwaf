@@ -19,5 +19,7 @@ Thank you to everyone who has helped improve AIWAF.
 
 - [@Knoor59](https://github.com/Knoor59): reviewed [#43](https://github.com/aiwaf-project/aiwaf/pull/43)
 - [@roberthollinswork](https://github.com/roberthollinswork): reviewed [#45](https://github.com/aiwaf-project/aiwaf/pull/45)
+- **Edward Lee** ([@edwardlee4948](https://github.com/edwardlee4948)): reviewed [#38](https://github.com/aiwaf-project/aiwaf/pull/38)
+- **Emin Mirzayev** ([@eminmirzayev](https://github.com/eminmirzayev)): reviewed [#35](https://github.com/aiwaf-project/aiwaf/pull/35)
 
 Licensing details for contributions originally made under the MIT license are in [NOTICE](NOTICE).
