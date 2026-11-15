@@ -1,9 +1,9 @@
-import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from aiwaf.fast.middleware import logging_middleware
 from aiwaf.fast.middleware.logging_middleware import AIWAFLoggingMiddleware
 
 
@@ -51,26 +51,32 @@ def test_csv_and_aiwaf_event_log_writers(tmp_path):
     assert "BLOCKED" in (tmp_path / "aiwaf.log").read_text(encoding="utf-8")
 
 
+class _ServerInUtcMinus5(datetime):
+    """datetime whose naive now() is local time on a server in UTC-5, on any OS."""
+
+    @classmethod
+    def now(cls, tz=None):
+        real = datetime.now(timezone.utc)
+        if tz is None:
+            return (real - timedelta(hours=5)).replace(tzinfo=None)
+        return real.astimezone(tz)
+
+
 def test_combined_log_timestamp_is_utc_on_non_utc_server(tmp_path, monkeypatch):
-    monkeypatch.setenv("TZ", "Etc/GMT+5")  # POSIX sign: UTC-5
-    time.tzset()
-    try:
-        app = FastAPI()
+    monkeypatch.setattr(logging_middleware, "datetime", _ServerInUtcMinus5)
+    app = FastAPI()
 
-        @app.get("/ok")
-        async def ok():
-            return {"ok": True}
+    @app.get("/ok")
+    async def ok():
+        return {"ok": True}
 
-        app.add_middleware(AIWAFLoggingMiddleware, log_dir=str(tmp_path), log_format="combined")
-        client = TestClient(app)
-        before = datetime.now(timezone.utc).replace(microsecond=0)
-        client.get("/ok", headers={"user-agent": "Mozilla/5.0", "accept": "text/html"})
-        after = datetime.now(timezone.utc)
+    app.add_middleware(AIWAFLoggingMiddleware, log_dir=str(tmp_path), log_format="combined")
+    client = TestClient(app)
+    before = datetime.now(timezone.utc).replace(microsecond=0)
+    client.get("/ok", headers={"user-agent": "Mozilla/5.0", "accept": "text/html"})
+    after = datetime.now(timezone.utc)
 
-        line = (tmp_path / "access.log").read_text(encoding="utf-8")
-        stamp = line.split("[", 1)[1].split("]", 1)[0]
-        logged = datetime.strptime(stamp, "%d/%b/%Y:%H:%M:%S %z")
-        assert before <= logged <= after
-    finally:
-        monkeypatch.undo()
-        time.tzset()
+    line = (tmp_path / "access.log").read_text(encoding="utf-8")
+    stamp = line.split("[", 1)[1].split("]", 1)[0]
+    logged = datetime.strptime(stamp, "%d/%b/%Y:%H:%M:%S %z")
+    assert before <= logged <= after

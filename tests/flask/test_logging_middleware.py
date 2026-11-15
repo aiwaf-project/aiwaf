@@ -216,31 +216,36 @@ def test_logging_factory_block_event_and_json_analysis(tmp_path):
 
 
 def test_combined_log_timestamp_is_utc_on_non_utc_server(tmp_path, monkeypatch):
-    import time
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
     from flask import Flask
+    from aiwaf.flask import logging_middleware
     from aiwaf.flask.logging_middleware import AIWAFLoggingMiddleware
 
-    monkeypatch.setenv("TZ", "Etc/GMT+5")  # POSIX sign: UTC-5
-    time.tzset()
-    try:
-        app = Flask(__name__)
-        app.config["AIWAF_LOG_DIR"] = str(tmp_path)
-        app.config["AIWAF_LOG_FORMAT"] = "combined"
-        AIWAFLoggingMiddleware(app)
+    class _ServerInUtcMinus5(datetime):
+        """datetime whose naive now() is local time on a server in UTC-5, on any OS."""
 
-        @app.route("/ok")
-        def ok():
-            return "ok"
+        @classmethod
+        def now(cls, tz=None):
+            real = datetime.now(timezone.utc)
+            if tz is None:
+                return (real - timedelta(hours=5)).replace(tzinfo=None)
+            return real.astimezone(tz)
 
-        before = datetime.now(timezone.utc).replace(microsecond=0)
-        app.test_client().get("/ok")
-        after = datetime.now(timezone.utc)
+    monkeypatch.setattr(logging_middleware, "datetime", _ServerInUtcMinus5)
+    app = Flask(__name__)
+    app.config["AIWAF_LOG_DIR"] = str(tmp_path)
+    app.config["AIWAF_LOG_FORMAT"] = "combined"
+    AIWAFLoggingMiddleware(app)
 
-        line = (tmp_path / "access.log").read_text(encoding="utf-8")
-        stamp = line.split("[", 1)[1].split("]", 1)[0]
-        logged = datetime.strptime(stamp, "%d/%b/%Y:%H:%M:%S %z")
-        assert before <= logged <= after
-    finally:
-        monkeypatch.undo()
-        time.tzset()
+    @app.route("/ok")
+    def ok():
+        return "ok"
+
+    before = datetime.now(timezone.utc).replace(microsecond=0)
+    app.test_client().get("/ok")
+    after = datetime.now(timezone.utc)
+
+    line = (tmp_path / "access.log").read_text(encoding="utf-8")
+    stamp = line.split("[", 1)[1].split("]", 1)[0]
+    logged = datetime.strptime(stamp, "%d/%b/%Y:%H:%M:%S %z")
+    assert before <= logged <= after
