@@ -13,6 +13,7 @@ Thank you to everyone who has helped improve AIWAF.
 - **Abhijeet Malviya** ([@abhi16apr](https://github.com/abhi16apr)): faster Java path normalization, with regression tests ([#29](https://github.com/aiwaf-project/aiwaf/pull/29))
 - [@rene9ate](https://github.com/rene9ate): replaced bare `except:` clauses with `except Exception:`, sent the Flask GeoIP summary through the logger, and added a test that guards against new bare excepts ([#43](https://github.com/aiwaf-project/aiwaf/pull/43))
 - [@7thplanetyt](https://github.com/7thplanetyt): Java access-log parsing that keeps the first client field, so IPv6 clients are no longer dropped, with regression tests ([#45](https://github.com/aiwaf-project/aiwaf/pull/45))
+- **Aryan Gupta** ([@aryangup451-del](https://github.com/aryangup451-del)): `PATCH` support in the Python and Rust access-log parsers, so those requests are no longer dropped from training ([#36](https://github.com/aiwaf-project/aiwaf/pull/36))
 
 ## Reviews
 
