@@ -3,6 +3,7 @@ package com.aiwaf.spring;
 import com.aiwaf.core.AiwafConfig;
 import com.aiwaf.core.AiwafConfigCompatCore;
 import com.aiwaf.core.AiwafConfigFileCore;
+import com.aiwaf.core.TrustedProxies;
 import org.springframework.core.env.Environment;
 
 import java.io.IOException;
@@ -111,6 +112,8 @@ public final class SpringAiwafConfig {
         config.logFormat = text(environment, "aiwaf.logging.format", config.logFormat);
         config.privateIpsExempted = bool(environment, "aiwaf.exemptions.private-ips", config.privateIpsExempted);
         config.localhostExempted = bool(environment, "aiwaf.exemptions.localhost", config.localhostExempted);
+        String trustedProxies = environment.getProperty("aiwaf.trusted-proxies");
+        if (trustedProxies != null) config.trustedProxyCidrs = new HashSet<>(TrustedProxies.parse(trustedProxies));
         config.exemptIps.addAll(csv(environment.getProperty("aiwaf.exemptions.ips")));
         config.exemptIpPatterns.addAll(csv(environment.getProperty("aiwaf.exemptions.ip-patterns")));
         config.exemptPaths.addAll(csv(environment.getProperty("aiwaf.exemptions.paths")));

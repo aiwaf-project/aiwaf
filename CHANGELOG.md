@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+## Python 1.1.9 / aiwaf-rust 0.2.8 / Node.js 1.1.6 / WASM 0.2.6 / Java 1.3.6 — prepared release
+
+- **Security:** Python and Node.js no longer let a client choose its own address with
+  `X-Forwarded-For`, which could evade blocks and rate limits or match `AIWAF_EXEMPT_IPS`.
+  Forwarded headers now count only from a trusted peer and are walked from the right.
+  **Upgrade check:** proxies connecting from public addresses must be added to the new
+  `AIWAF_TRUSTED_PROXIES` setting, or all visitors will appear as the proxy. Proxies on
+  loopback and private networks are trusted by default. AIWAF logs a warning naming an
+  untrusted peer that sends these headers, and behind Cloudflare
+  `AIWAF_TRUSTED_PROXIES=default,cloudflare` is enough.
+  `CF-Connecting-IP` and `Forwarded`-style fallbacks are no longer read for the client IP.
+- **Security:** Java stops reading `X-Forwarded-For` at a malformed entry instead of
+  skipping it, so entries left of it can't be taken as the client address. It then
+  falls back to `X-Real-IP` or the peer address.
+- Python, Node.js and Java: when a peer that isn't trusted sends `X-Forwarded-For` or
+  `X-Real-IP`, AIWAF logs one warning per process naming that peer, so a proxy or CDN
+  missing from `AIWAF_TRUSTED_PROXIES` shows up in the logs. `AIWAF_TRUSTED_PROXIES` also
+  accepts two names: `default` for the runtime's built-in ranges and `cloudflare` for
+  Cloudflare's published ranges. Behind Cloudflare, use `default,cloudflare`. The
+  Cloudflare ranges are opt-in, since anyone can send requests through Cloudflare.
+- Python and Node.js resolve the client address in `aiwaf-rust` and `aiwaf-wasm`
+  (`TrustedProxySet`), with trusted networks parsed once per setting. A request with
+  31 forged Cloudflare hops costs about 6 µs in Python instead of 360 µs. The
+  Python and JavaScript walks remain only as fallbacks for older native packages,
+  and parity tests check that both give the same answers. Node.js now writes IPv6
+  addresses in canonical form, as Python does, for example `2001:db8::1` for
+  `2001:DB8::1`, and an IPv4-mapped address such as `::ffff:a00:1` as IPv4.
+- Java parses the trusted proxy list once into masks and caches it by its contents, instead
+  of parsing every range on each lookup. With the Cloudflare list, 16 forged
+  `X-Forwarded-For` hops cost about 6 µs instead of 350 µs. A plain address entry now
+  matches the same address in any form, such as `2001:DB8::1` and `2001:db8::1`, and
+  a prefix length must be digits only (`10.0.0.0/+8` is rejected).
+- Java: trusted proxies can now be set with the `AIWAF_TRUSTED_PROXIES` environment
+  variable, the `aiwaf.trusted-proxies` Spring property, or `security.trusted_proxies`
+  in the JSON config file, each replacing the default. The file key takes a list or a
+  comma-separated string, `save()` writes it, and loading fails on an invalid entry.
+  The default is unchanged: loopback only.
 - Python and Rust log parsers no longer drop or misread some valid lines
   ([#34](https://github.com/aiwaf-project/aiwaf/issues/34)). They accept `-` as the
   response size, as in `304` responses and AIWAF's own Flask and FastAPI logs, accept
@@ -103,23 +140,14 @@
   does ([#45](https://github.com/aiwaf-project/aiwaf/pull/45)). Logs that put something before
   the client field, such as a syslog header, now record that prefix as the client; strip it
   before ingesting, or log the client first.
-
-## Python 1.1.8 / Rust-Python 0.2.7 / Node.js 1.1.5 / WASM 0.2.5 / Java 1.3.5 — prepared release
-
 - Recognize PATCH HTTP method in Python and Rust access log parsers.
-- **Security:** Python and Node.js no longer let a client choose its own address with
-  `X-Forwarded-For`, which could evade blocks and rate limits or match `AIWAF_EXEMPT_IPS`.
-  Forwarded headers now count only from a trusted peer and are walked from the right.
-  **Upgrade check:** proxies connecting from public addresses must be added to the new
-  `AIWAF_TRUSTED_PROXIES` setting, or all visitors will appear as the proxy.
-  `CF-Connecting-IP` and `Forwarded`-style fallbacks are no longer read for the client IP.
-- **Security:** Java stops reading `X-Forwarded-For` at a malformed entry instead of
-  skipping it, so entries left of it can't be taken as the client address. It then
-  falls back to `X-Real-IP` or the peer address.
 - Rust and WASM: `validate_headers_with_config` now enforces every required header. It
   previously checked only `User-Agent` and `Accept`, and only `HTTP_`-style names. The
   Django, FastAPI, Flask and Node.js middleware already enforced these headers themselves.
 - CI builds `aiwaf-rust` from this repository for Python tests instead of installing it from PyPI.
+
+## Python 1.1.8 / Rust-Python 0.2.7 / Node.js 1.1.5 / WASM 0.2.5 / Java 1.3.5 — released 2026-10-14
+
 - Update package versions and matching native dependency requirements for the next release.
 - Remove benchmark/profiling utilities and consolidate release documentation into README/CHANGELOG.
 - Remove the deprecated Rust floating-point module import.

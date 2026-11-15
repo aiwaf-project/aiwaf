@@ -39,15 +39,15 @@ the supported Redis backends when sharing limits across workers.
 
 Each package is versioned and released independently.
 
-Python 1.1.8, Rust/Python 0.2.7, Node.js 1.1.5, WASM 0.2.5, and Java 1.3.5 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
+Python 1.1.9, Rust/Python 0.2.8, Node.js 1.1.6, WASM 0.2.6, and Java 1.3.6 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
 
 | Runtime | Package | Repository version | Primary use |
 | --- | --- | ---: | --- |
-| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.1.8` | Django, Flask, and FastAPI protection |
-| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.1.5` | Express and Node framework middleware |
-| Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.7` | Native Python acceleration and JSON model inference |
-| WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.5` | Rust detection and model primitives for JavaScript |
-| Java | `io.github.aiwaf-project:aiwaf-java` | `1.3.5` | Spring MVC and Jakarta Servlet protection |
+| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.1.9` | Django, Flask, and FastAPI protection |
+| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.1.6` | Express and Node framework middleware |
+| Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.8` | Native Python acceleration and JSON model inference |
+| WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.6` | Rust detection and model primitives for JavaScript |
+| Java | `io.github.aiwaf-project:aiwaf-java` | `1.3.6` | Spring MVC and Jakarta Servlet protection |
 
 Supported framework integrations include Django, Flask, FastAPI, Express, Fastify, Hapi, Koa, NestJS, Next.js API routes, AdonisJS, Sails.js, Spring MVC, and Jakarta Servlet.
 
@@ -70,9 +70,11 @@ The runtimes share policy intent and training feature names, but their framework
 
 ## Client IP addresses and proxies
 
-Blocks, exemptions, rate limits, and geo policies all depend on the client address. Python and Node.js read `X-Forwarded-For` and `X-Real-IP` only when the connecting peer is a trusted proxy. They walk `X-Forwarded-For` from the right and stop at the first untrusted address, because anything further left is client-supplied. `CF-Connecting-IP` and other vendor headers are not read for this purpose.
+Blocks, exemptions, rate limits, and geo policies all depend on the client address. Python, Node.js, and Java read `X-Forwarded-For` and `X-Real-IP` only when the connecting peer is a trusted proxy. They walk `X-Forwarded-For` from the right and stop at the first untrusted address, because anything further left is client-supplied. `CF-Connecting-IP` and other vendor headers are not read for this purpose. In Python and Node.js the walk runs in `aiwaf-rust` and `aiwaf-wasm`, which also write IPv6 addresses in canonical form.
 
-By default, loopback, RFC 1918, link-local, and IPv6 unique-local peers are trusted, so a proxy on a private network needs no configuration. Set `AIWAF_TRUSTED_PROXIES` to a list or comma-separated string of addresses and CIDR ranges to replace those defaults. An empty value trusts no proxy.
+By default, Python and Node.js trust loopback, RFC 1918, link-local, and IPv6 unique-local peers, so a proxy on a private network needs no configuration. Java trusts loopback only. Set `AIWAF_TRUSTED_PROXIES` to a list or comma-separated string of addresses and CIDR ranges to replace those defaults. An empty value trusts no proxy. Two names can be used alongside addresses: `default` for the runtime's built-in ranges and `cloudflare` for [Cloudflare's published ranges](https://www.cloudflare.com/ips/). Behind Cloudflare, use `AIWAF_TRUSTED_PROXIES=default,cloudflare` to keep trusting a local proxy as well.
+
+When a peer that isn't trusted sends `X-Forwarded-For` or `X-Real-IP`, all three runtimes log one warning per process naming that peer. If the peer is your proxy or CDN, add it to `AIWAF_TRUSTED_PROXIES`. A client sending the header directly causes the same warning, and then no action is needed.
 
 | Runtime | Where to set it |
 | --- | --- |
@@ -80,10 +82,10 @@ By default, loopback, RFC 1918, link-local, and IPv6 unique-local peers are trus
 | Flask | `app.config["AIWAF_TRUSTED_PROXIES"]`, or the environment variable |
 | FastAPI | The environment variable |
 | Node.js | The `AIWAF_TRUSTED_PROXIES` or `trustedProxies` option, or the environment variable |
-| Java | `trustedProxyCidrs` (defaults to loopback only) |
+| Java | `aiwaf.trusted-proxies` in Spring properties, the environment variable, `security.trusted_proxies` in the JSON config file, or the `trustedProxyCidrs` field |
 
 > [!IMPORTANT]
-> If your proxy or CDN connects from a public address (Cloudflare or Google Cloud load balancers, for example), add its ranges to `AIWAF_TRUSTED_PROXIES`. Otherwise every visitor appears to come from the proxy, and rate limiting or a block can then affect all of them.
+> If your proxy or CDN connects from a public address (Cloudflare or Google Cloud load balancers, for example), add its ranges to `AIWAF_TRUSTED_PROXIES`. Otherwise every visitor appears to come from the proxy, and rate limiting or a block can then affect all of them. The `cloudflare` name trusts every Cloudflare address, and anyone can send requests through Cloudflare. If clients could also send requests through Cloudflare to your origin from outside your zone, restrict the origin to your zone, for example with authenticated origin pulls.
 
 If untrusted hosts can reach the application directly from your private network, narrow the list to your proxy's addresses. Addresses already resolved by Flask's `ProxyFix`, Uvicorn's `--proxy-headers`, or Express `trust proxy` are respected, except that AIWAF still walks the headers when the resolved address is itself in a trusted range. The Rust-owned Node pipeline uses `req.ip` only, so configure `trust proxy` there.
 
@@ -254,7 +256,7 @@ pip install "aiwaf[django]"
 pip install "aiwaf[flask]"
 pip install "aiwaf[fastapi]"
 
-# Backward-compatible alias; Python 1.1.8 already installs aiwaf-rust
+# Backward-compatible alias; Python 1.1.9 already installs aiwaf-rust
 pip install "aiwaf[rust]"
 
 # Node.js middleware
@@ -264,13 +266,13 @@ npm install aiwaf
 npm install aiwaf-wasm
 ```
 
-Java 1.3.5, after it is published to Maven Central:
+Java 1.3.6, after it is published to Maven Central:
 
 ```xml
 <dependency>
   <groupId>io.github.aiwaf-project</groupId>
   <artifactId>aiwaf-java</artifactId>
-  <version>1.3.5</version>
+  <version>1.3.6</version>
 </dependency>
 ```
 
@@ -278,7 +280,7 @@ Java 1.3.5, after it is published to Maven Central:
 
 The Python package requires Python 3.10 or newer. Framework dependencies are optional, so install only the extra needed by the application.
 
-Python 1.1.8 requires `aiwaf-rust>=0.2.7`; the `rust` extra remains an installation
+Python 1.1.9 requires `aiwaf-rust>=0.2.8`; the `rust` extra remains an installation
 alias. Publish the matching Rust wheel with `NativeCSVPipeline` support before
 the Python release. The Rust release workflow builds Linux x86_64/aarch64,
 musl x86_64, macOS x86_64/arm64 and Windows x86_64 wheels and checks the native
@@ -1184,7 +1186,7 @@ cp -R ../licenses crates/aiwaf_wasm/pkg/
 
 ## Java package
 
-AIWAF Java 1.3.5 targets Java 17, Spring Framework 7.0, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
+AIWAF Java 1.3.6 targets Java 17, Spring Framework 7.0, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
 
 ### Core engine
 
@@ -1253,7 +1255,7 @@ aiwaf.storage.redis-pool-min-idle=0
 aiwaf.storage.redis-pool-max-wait-millis=250
 ```
 
-Set `aiwaf.config-file=/etc/aiwaf/config.json` (or `AIWAF_CONFIG_FILE`) to load the same nested JSON configuration used by the Python runtime. Environment variables and Spring properties override file values. `AiwafConfigFileCore` also exposes load, save, deep-merge, and validation APIs for non-Spring applications.
+Set `aiwaf.config-file=/etc/aiwaf/config.json` (or `AIWAF_CONFIG_FILE`) to load the same nested JSON configuration used by the Python runtime. Environment variables and Spring properties override file values. Java-only keys include `security.trusted_proxies`, a list such as `["default", "cloudflare"]` or a comma-separated string; an empty list trusts no proxy, and loading fails on an entry that isn't an address, a CIDR range, `default`, or `cloudflare`. `AiwafConfigFileCore` also exposes load, save, deep-merge, and validation APIs for non-Spring applications.
 
 Define an `AiwafConfig`, `AiwafEngine`, or `AiwafFilter` bean only when the application needs a custom replacement. For plain Spring MVC without Boot, register the filter directly; passing the application context enables the same live route discovery:
 
@@ -1273,7 +1275,7 @@ UUID protection uses Python-compatible weighted signals: malformed input, valid 
 Generate a route manifest from the live Spring application rather than supplying controller methods manually:
 
 ```bash
-java -cp "your-app.jar:aiwaf-java-1.3.5.jar" \
+java -cp "your-app.jar:aiwaf-java-1.3.6.jar" \
   com.aiwaf.cli.AiwafConsole init \
   --app com.example.Application \
   --output .aiwaf/paths.json
@@ -1504,11 +1506,11 @@ Release versions and tags must match the relevant manifest.
 
 | Package | Manifest | Tag | Workflow |
 | --- | --- | --- | --- |
-| Python `aiwaf` | `pyproject.toml` | `python-v1.1.8` | `python-publish.yml` |
-| npm `aiwaf` | `js/package.json` | `js-v1.1.5` | `npm-publish.yml` |
-| PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.7` | `rust-publish.yml` |
-| npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.5` | `wasm-publish.yml` |
-| Maven `aiwaf-java` | `java/pom.xml` | `java-v1.3.5` | `java-publish.yml` |
+| Python `aiwaf` | `pyproject.toml` | `python-v1.1.9` | `python-publish.yml` |
+| npm `aiwaf` | `js/package.json` | `js-v1.1.6` | `npm-publish.yml` |
+| PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.8` | `rust-publish.yml` |
+| npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.6` | `wasm-publish.yml` |
+| Maven `aiwaf-java` | `java/pom.xml` | `java-v1.3.6` | `java-publish.yml` |
 
 Python and Rust publish to PyPI with trusted publishing. The npm workflows use npm trusted publishing and stage packages for approval. Configure the trusted publisher with organization `aiwaf-project`, repository `aiwaf`, the exact workflow filename, and the environment used by that workflow.
 
@@ -1516,11 +1518,12 @@ Java publishing uses the protected `maven-publish` environment plus `GPG_PRIVATE
 
 Registry releases are immutable. Increment the relevant manifest version before publishing another release.
 
-For this release, publish `aiwaf-rust 0.2.7` before Python `aiwaf 1.1.8`, and
-`aiwaf-wasm 0.2.5` before npm `aiwaf 1.1.5`. After WASM publication, refresh the
-npm lockfile against the registry to record the actual companion checksum, then
-run `npm ci` and the release checks. The prepared future WASM lock entry has no
-integrity checksum; it cannot be installed until that package is published.
+For this release, publish `aiwaf-rust 0.2.8` before Python `aiwaf 1.1.9`, and
+`aiwaf-wasm 0.2.6` before npm `aiwaf 1.1.6`. npm `aiwaf` 1.1.6 needs `aiwaf-wasm`
+0.2.6, but its dependency and lockfile still name 0.2.5 so that `npm ci` keeps
+working until 0.2.6 is published. After WASM publication, run
+`npm install aiwaf-wasm@^0.2.6` in `js/` to update both, commit that, run `npm ci`
+and the release checks, and only then publish npm `aiwaf`.
 
 ## Security and limitations
 

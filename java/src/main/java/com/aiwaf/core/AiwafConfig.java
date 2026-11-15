@@ -112,7 +112,8 @@ public final class AiwafConfig {
     public boolean blockIpOnRateLimitBreach = false;
     public boolean blockIpOnFloodBreach = false;
     public int rateLimitFloodThreshold = 40;
-    public Set<String> trustedProxyCidrs = new HashSet<>(Set.of("127.0.0.0/8", "::1/128"));
+    /** Addresses, CIDR ranges, or the names "default" and "cloudflare". Empty trusts no proxy. */
+    public Set<String> trustedProxyCidrs = new HashSet<>(TrustedProxies.DEFAULT);
     public int maxForwardedForEntries = 16;
     public Set<String> exemptIps = new HashSet<>();
     public Set<String> exemptIpPatterns = new HashSet<>();

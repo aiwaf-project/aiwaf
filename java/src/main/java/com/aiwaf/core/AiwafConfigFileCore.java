@@ -119,6 +119,14 @@ public final class AiwafConfigFileCore {
         range(errors, "performance.max_runtime_state_entries", config.maxRuntimeStateEntries, 100, 10_000_000);
         if (config.minFormTimeSeconds < 0) errors.add("honeypot.min_form_time cannot be negative");
         if (config.maxFormPageTimeSeconds <= 0) errors.add("honeypot.max_page_time must be positive");
+        if (config.trustedProxyCidrs != null) {
+            for (String entry : new java.util.TreeSet<>(config.trustedProxyCidrs)) {
+                if (!TrustedProxies.isValidEntry(entry)) {
+                    errors.add("security.trusted_proxies entry " + entry
+                            + " must be an IP address, a CIDR range, default, or cloudflare");
+                }
+            }
+        }
         if (config.aiAnomalyScoreThreshold < 0 || config.aiAnomalyScoreThreshold > 1) {
             errors.add("ai_anomaly.threshold must be between 0 and 1");
         }
@@ -227,7 +235,9 @@ public final class AiwafConfigFileCore {
                 "allow_compressed_request_bodies", config.allowCompressedRequestBodies,
                 "max_parameter_count", config.maxParameterCount,
                 "max_parameter_bytes", config.maxParameterBytes,
-                "allow_duplicate_parameters", config.allowDuplicateParameters
+                "allow_duplicate_parameters", config.allowDuplicateParameters,
+                "trusted_proxies", config.trustedProxyCidrs == null
+                        ? List.of() : new ArrayList<>(new java.util.TreeSet<>(config.trustedProxyCidrs))
         ));
         root.put("performance", map("max_runtime_state_entries", config.maxRuntimeStateEntries));
         root.put("path_manifest", map(

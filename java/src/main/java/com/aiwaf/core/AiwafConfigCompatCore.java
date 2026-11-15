@@ -138,6 +138,10 @@ public final class AiwafConfigCompatCore {
         cfg.logQueryParameters = bool(logging.get("log_query_parameters"), cfg.logQueryParameters);
 
         Map<String, Object> security = map(settings.get("security"));
+        if (security.get("trusted_proxies") != null) {
+            // Replaces the default list, like AIWAF_TRUSTED_PROXIES.
+            cfg.trustedProxyCidrs = new HashSet<>(TrustedProxies.fromConfigValue(security.get("trusted_proxies")));
+        }
         cfg.methodValidationEnabled = bool(security.get("method_validation_enabled"), cfg.methodValidationEnabled);
         Set<String> allowedMethods = upperSet(security.get("allowed_methods"));
         if (!allowedMethods.isEmpty()) cfg.allowedMethods = allowedMethods;
@@ -201,6 +205,8 @@ public final class AiwafConfigCompatCore {
         get(env, "AIWAF_RATE_LIMITING_ENABLED").ifPresent(v -> cfg.rateLimitEnabled = parseBool(v, cfg.rateLimitEnabled));
         get(env, "AIWAF_RATE_MAX_REQUESTS").ifPresent(v -> cfg.rateLimitMax = parseInt(v, cfg.rateLimitMax));
         get(env, "AIWAF_RATE_WINDOW_SECONDS").ifPresent(v -> cfg.rateLimitWindowSeconds = parseInt(v, cfg.rateLimitWindowSeconds));
+        // Replaces the default list, as in Python and Node.js.
+        get(env, "AIWAF_TRUSTED_PROXIES").ifPresent(v -> cfg.trustedProxyCidrs = new HashSet<>(TrustedProxies.parse(v)));
         get(env, "AIWAF_GEO_BLOCK_ENABLED").ifPresent(v -> cfg.geoBlockEnabled = parseBool(v, cfg.geoBlockEnabled));
         get(env, "AIWAF_GEO_BLOCK_COUNTRIES").ifPresent(v -> cfg.geoBlockedCountries.addAll(csvUpper(v)));
         get(env, "AIWAF_GEO_ALLOW_COUNTRIES").ifPresent(v -> cfg.geoAllowedCountries.addAll(csvUpper(v)));

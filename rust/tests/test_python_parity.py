@@ -84,3 +84,71 @@ def test_uuid_checks_agree_with_the_standard_library(text):
     except ValueError:
         valid = False
     assert aiwaf_rust.policy_uuid(text) is valid
+
+
+# Client IP resolution: aiwaf-rust's TrustedProxySet must match the Python fallback exactly.
+from aiwaf.core import utils as _utils  # noqa: E402
+
+DEFAULT_TRUST = _utils.DEFAULT_TRUSTED_PROXIES
+TRUST_CONFIGS = [
+    DEFAULT_TRUST,
+    DEFAULT_TRUST + _utils.CLOUDFLARE_PROXIES,
+    ("10.0.0.0/255.0.0.0", "192.168.1.0/0.0.0.255", "2001:db8::/32", "203.0.113.9"),
+    ("10.0.0.0/33", "not-a-network", "::/129", "10.0.0.0/8/1", "010.0.0.0/8", "10.0.0.0/+8"),
+    (),
+]
+ADDRESSES = [
+    "", " ", "unknown", "10.0.0.1", " 10.0.0.1 ", "10.0.0.1:8080", "203.0.113.5", "203.0.113.5:443",
+    "010.0.0.1", "1.2.3", "256.1.1.1", "::1", "[::1]", "[::1]:443", "[2001:DB8::1]:8443", "2001:DB8:0:0:0:0:0:1",
+    "::ffff:10.0.0.1", "::ffff:203.0.113.5", "::ffff:a00:1", "::1.2.3.4", "::ffff:0:1.2.3.4", "fe80::1%eth0",
+    "fe80::1%", "fe80::1%a%b", "2001:db8::1%25", "[fe80::1%eth0]:80", "104.16.0.1", "2606:4700::1",
+    "2c0f:f248::1", "2001:0db8::0001", "1:2:3:4:5:6:7:8", "1::", "[", "[::1", "::1]", "\x1c10.0.0.1\x1f",
+    "１０.0.0.1", "10.0.0.1\n",
+]
+FORWARDED = [
+    None, "", "203.0.113.5", "127.0.0.1, 203.0.113.5, 10.0.0.2", "203.0.113.5, junk, 10.0.0.2",
+    "10.0.0.3, 10.0.0.2", " 203.0.113.5 ,10.0.0.2 ", "2001:db8::5, 104.16.0.1", "203.0.113.5,,10.0.0.2",
+    ", ".join(["10.0.0.2"] * 40), ", ".join(["203.0.113.7"] + ["104.16.0.1"] * 31),
+    "1" * 4096, "1" * 4100 + ",203.0.113.5", "é" * 3000 + ",203.0.113.5", "[2001:DB8::9]:1234, 10.0.0.2",
+]
+REAL_IPS = [None, "", "203.0.113.9", "unknown", " 2001:DB8::7 "]
+
+
+def _both(peer, forwarded_for, real_ip, entries, monkeypatch):
+    monkeypatch.setattr(_utils, "_untrusted_peer_warned", True)  # keep logs quiet
+    native = aiwaf_rust.TrustedProxySet(list(entries))
+    rust_ip, _ = native.resolve(str(peer or ""), str(forwarded_for or ""), str(real_ip or ""))
+    return rust_ip, _utils._resolve_client_ip_python(peer, forwarded_for, real_ip, tuple(entries))
+
+
+@pytest.mark.parametrize("entries", TRUST_CONFIGS, ids=["default", "cloudflare", "netmasks", "invalid", "none"])
+def test_client_ip_resolution_agrees(entries, monkeypatch):
+    for peer in ADDRESSES:
+        for forwarded_for in FORWARDED:
+            for real_ip in REAL_IPS:
+                rust_ip, python_ip = _both(peer, forwarded_for, real_ip, entries, monkeypatch)
+                assert rust_ip == python_ip, (peer, forwarded_for, real_ip)
+
+
+@pytest.mark.parametrize("address", ADDRESSES + [a for f in FORWARDED if f for a in f.split(",")])
+def test_address_normalization_agrees(address, monkeypatch):
+    # With every address trusted, a single hop is returned as Rust or Python writes it.
+    rust_ip, python_ip = _both("10.0.0.1", address, None, ("0.0.0.0/0", "::/0"), monkeypatch)
+    assert rust_ip == python_ip
+
+
+def test_invalid_entries_agree():
+    entries = TRUST_CONFIGS[3]
+    python_valid = len(_utils._parse_trusted_networks(tuple(entries)))
+    native = aiwaf_rust.TrustedProxySet(list(entries))
+    assert len(entries) - len(native.invalid) == python_valid
+    assert native.is_empty() == (python_valid == 0)
+
+
+def test_ignored_header_is_reported_like_python(monkeypatch, caplog):
+    native = aiwaf_rust.TrustedProxySet(list(DEFAULT_TRUST))
+    assert native.resolve("198.51.100.7", "203.0.113.5", "") == ("198.51.100.7", "X-Forwarded-For")
+    assert native.resolve("198.51.100.7", "", "203.0.113.5") == ("198.51.100.7", "X-Real-IP")
+    assert native.resolve("198.51.100.7", "", "") == ("198.51.100.7", None)
+    assert native.resolve("unknown", "203.0.113.5", "") == ("unknown", None)
+    assert native.resolve("10.0.0.1", "203.0.113.5", "") == ("203.0.113.5", None)

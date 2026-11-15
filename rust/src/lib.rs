@@ -1,4 +1,5 @@
 #![allow(unsafe_op_in_unsafe_fn)]
+mod client_ip;
 mod csv_runtime;
 mod training_evidence;
 mod native_anomaly;
@@ -1056,6 +1057,7 @@ fn contamination_to_py<'py>(py: Python<'py>, value: &Contamination) -> PyObject 
 
 #[pymodule]
 fn aiwaf_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    client_ip::register(m)?;
     csv_pipeline::register(m)?;
     csv_runtime::register(m)?;
     native_anomaly::register(m)?;

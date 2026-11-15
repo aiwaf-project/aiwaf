@@ -130,3 +130,79 @@ def test_flask_logging_cannot_be_poisoned_by_other_headers():
     headers = {"CF-Connecting-IP": SPOOFED, "X-Forwarded-For": SPOOFED, "X-Real-IP": SPOOFED}
     with app.test_request_context("/", headers=headers, environ_base={"REMOTE_ADDR": PUBLIC_PEER}):
         assert AIWAFLoggingMiddleware._get_client_ip(object()) == PUBLIC_PEER
+
+
+CLOUDFLARE_PEER = "104.16.0.1"
+CLOUDFLARE_PEER_V6 = "2606:4700::1"
+
+
+@pytest.mark.parametrize("configured", ["cloudflare", "Cloudflare", ["cloudflare"]])
+def test_cloudflare_shortcut_trusts_cloudflare_ranges_only(configured):
+    assert resolve_client_ip(CLOUDFLARE_PEER, CLIENT, trusted_proxies=configured) == CLIENT
+    assert resolve_client_ip(CLOUDFLARE_PEER_V6, CLIENT, trusted_proxies=configured) == CLIENT
+    # Setting the variable replaces the defaults, so a local proxy is no longer trusted.
+    assert resolve_client_ip(PROXY, CLIENT, trusted_proxies=configured) == PROXY
+    assert resolve_client_ip(PUBLIC_PEER, CLIENT, trusted_proxies=configured) == PUBLIC_PEER
+
+
+def test_default_shortcut_keeps_builtin_ranges_alongside_cloudflare(monkeypatch):
+    monkeypatch.setenv("AIWAF_TRUSTED_PROXIES", "default, cloudflare")
+    assert resolve_client_ip(PROXY, CLIENT) == CLIENT
+    assert resolve_client_ip(CLOUDFLARE_PEER, CLIENT) == CLIENT
+    # Cloudflare in front of a local proxy: both hops are trusted, so the walk reaches the client.
+    assert resolve_client_ip(PROXY, f"{CLIENT}, {CLOUDFLARE_PEER}") == CLIENT
+    assert resolve_client_ip(PUBLIC_PEER, CLIENT) == PUBLIC_PEER
+
+
+def test_cloudflare_shortcut_matches_node_and_java():
+    from pathlib import Path
+    import re
+
+    from aiwaf.core.utils import CLOUDFLARE_PROXIES
+
+    root = Path(__file__).resolve().parents[2]
+    node = (root / "js" / "lib" / "runtimeUtils.js").read_text(encoding="utf-8")
+    block = re.search(r"const CLOUDFLARE_PROXIES = \[(.*?)\];", node, re.S).group(1)
+    assert tuple(re.findall(r"'([^']+)'", block)) == CLOUDFLARE_PROXIES
+    java = (root / "java/src/main/java/com/aiwaf/core/TrustedProxies.java").read_text(encoding="utf-8")
+    block = re.search(r"List<String> CLOUDFLARE = List\.of\((.*?)\);", java, re.S).group(1)
+    assert tuple(re.findall(r'"([^"]+)"', block)) == CLOUDFLARE_PROXIES
+
+
+@pytest.fixture
+def warnings_reset(monkeypatch, caplog):
+    from aiwaf.core import utils
+
+    monkeypatch.setattr(utils, "_untrusted_peer_warned", False)
+    caplog.set_level("WARNING", logger="aiwaf.core.utils")
+    return caplog
+
+
+def _proxy_warnings(caplog):
+    return [r.getMessage() for r in caplog.records if "AIWAF_TRUSTED_PROXIES" in r.getMessage()
+            and "untrusted peer" in r.getMessage()]
+
+
+def test_untrusted_peer_sending_forwarded_for_is_reported_once(warnings_reset):
+    assert resolve_client_ip(PUBLIC_PEER, CLIENT) == PUBLIC_PEER
+    assert resolve_client_ip("198.51.100.8", CLIENT) == "198.51.100.8"
+    messages = _proxy_warnings(warnings_reset)
+    assert len(messages) == 1
+    assert "X-Forwarded-For" in messages[0] and PUBLIC_PEER in messages[0]
+    assert "default,cloudflare" in messages[0]
+
+
+def test_untrusted_peer_sending_only_real_ip_is_reported(warnings_reset):
+    assert resolve_client_ip(PUBLIC_PEER, None, CLIENT) == PUBLIC_PEER
+    assert "X-Real-IP" in _proxy_warnings(warnings_reset)[0]
+
+
+@pytest.mark.parametrize("peer, xff, configured", [
+    (PUBLIC_PEER, None, None),     # a direct client with no proxy headers
+    (PROXY, CLIENT, None),         # a trusted proxy
+    (PUBLIC_PEER, CLIENT, ""),     # trusting no proxy was chosen deliberately
+    ("", CLIENT, None),            # a local Unix socket
+])
+def test_no_warning_without_a_misconfigured_proxy(warnings_reset, peer, xff, configured):
+    resolve_client_ip(peer, xff, trusted_proxies=configured)
+    assert _proxy_warnings(warnings_reset) == []

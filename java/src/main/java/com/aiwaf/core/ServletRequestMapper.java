@@ -52,8 +52,9 @@ public final class ServletRequestMapper {
         }
         if (duplicateParameters[0]) headers.put("AIWAF-Internal-Duplicate-Parameters", "true");
 
-        boolean trustedPeer = isTrustedProxy(req.getRemoteAddr(), config.trustedProxyCidrs);
-        String clientIp = resolveClientIp(req, headers, config, trustedPeer);
+        TrustedProxies.Compiled trusted = TrustedProxies.compile(config.trustedProxyCidrs);
+        boolean trustedPeer = trusted.contains(req.getRemoteAddr());
+        String clientIp = resolveClientIp(req, headers, config, trusted, trustedPeer);
         String country = trustedPeer ? getHeader(headers, "X-Country").trim().toUpperCase(java.util.Locale.ROOT) : "";
         if (!country.matches("[A-Z]{2}")) country = "";
         if (country.isBlank() && (config.geoBlockEnabled
@@ -75,12 +76,18 @@ public final class ServletRequestMapper {
         );
     }
 
-    private static String resolveClientIp(HttpServletRequest req, Map<String, String> headers, AiwafConfig config, boolean trustedPeer) {
+    private static String resolveClientIp(HttpServletRequest req, Map<String, String> headers, AiwafConfig config,
+                                          TrustedProxies.Compiled trusted, boolean trustedPeer) {
         String remote = req.getRemoteAddr();
+        String forwardedFor = getHeader(headers, "X-Forwarded-For");
         if (!trustedPeer) {
+            String realIpHeader = getHeader(headers, "X-Real-IP");
+            if (remote != null && isIpLiteral(remote) && !trusted.isEmpty()
+                    && (!forwardedFor.isBlank() || !realIpHeader.isBlank())) {
+                TrustedProxies.warnUntrustedPeerOnce(remote, forwardedFor.isBlank() ? "X-Real-IP" : "X-Forwarded-For");
+            }
             return (remote == null || remote.isBlank()) ? "127.0.0.1" : remote;
         }
-        String forwardedFor = getHeader(headers, "X-Forwarded-For");
         if (!forwardedFor.isBlank() && forwardedFor.length() <= 4096) {
             String[] parts = forwardedFor.split(",");
             int start = Math.max(0, parts.length - Math.max(1, config.maxForwardedForEntries));
@@ -91,7 +98,7 @@ public final class ServletRequestMapper {
                 if (!isIpLiteral(candidate)) {
                     break;
                 }
-                if (!isTrustedProxy(candidate, config.trustedProxyCidrs)) {
+                if (!trusted.contains(candidate)) {
                     return candidate;
                 }
             }
@@ -105,17 +112,6 @@ public final class ServletRequestMapper {
 
     private static boolean isIpLiteral(String value) {
         return CidrUtil.isLiteral(value);
-    }
-
-    private static boolean isTrustedProxy(String ip, Set<String> cidrs) {
-        if (ip == null || cidrs == null) return false;
-        for (String cidr : cidrs) {
-            if (cidr == null) continue;
-            if (cidr.equals(ip) || ("::1/128".equals(cidr) && "::1".equals(ip)) || CidrUtil.contains(cidr, ip)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private static String getHeader(Map<String, String> headers, String name) {

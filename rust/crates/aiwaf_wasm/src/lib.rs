@@ -244,6 +244,47 @@ pub fn sql_inspect_path(path: &str, max_bytes: usize) -> String {
     }
 }
 
+/// Trusted proxy networks, parsed once. `resolve` runs per request; the JavaScript adapter reads
+/// the setting, expands shortcut names such as "cloudflare" and logs the warning.
+#[wasm_bindgen]
+pub struct TrustedProxySet {
+    inner: aiwaf_core::client_ip::TrustedProxies,
+    ignored_header: Option<&'static str>,
+}
+
+#[wasm_bindgen]
+impl TrustedProxySet {
+    #[wasm_bindgen(constructor)]
+    pub fn new(entries: JsValue) -> Result<TrustedProxySet, JsValue> {
+        let entries: Vec<String> = from_value(entries)?;
+        Ok(Self {
+            inner: aiwaf_core::client_ip::TrustedProxies::new(entries),
+            ignored_header: None,
+        })
+    }
+
+    /// Entries that aren't an address or a CIDR range. They never widen trust.
+    pub fn invalid(&self) -> Result<JsValue, JsValue> {
+        to_value(self.inner.invalid()).map_err(Into::into)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// The client address. Afterwards, `ignored_header` names the proxy header an untrusted
+    /// peer sent, if any.
+    pub fn resolve(&mut self, peer: &str, forwarded_for: &str, real_ip: &str) -> String {
+        let (ip, ignored) = self.inner.resolve(peer, forwarded_for, real_ip);
+        self.ignored_header = ignored.map(|header| header.name());
+        ip
+    }
+
+    pub fn ignored_header(&self) -> Option<String> {
+        self.ignored_header.map(str::to_string)
+    }
+}
+
 /// Returns the SQL tokenizer's rule for one value, or undefined.
 #[wasm_bindgen]
 pub fn sql_tokenizer(value: &str) -> Option<String> {

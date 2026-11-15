@@ -9,6 +9,8 @@ import logging
 import os
 from functools import lru_cache
 
+from . import rust_backend
+
 logger = logging.getLogger(__name__)
 
 # Upstream peers allowed to supply X-Forwarded-For unless AIWAF_TRUSTED_PROXIES
@@ -24,6 +26,20 @@ DEFAULT_TRUSTED_PROXIES = (
     "fc00::/7",
     "fe80::/10",
 )
+# Published at https://www.cloudflare.com/ips/ (retrieved 2026-11-15). Keep in step with
+# CLOUDFLARE_PROXIES in js/lib/runtimeUtils.js. Opt-in only: anyone can send requests
+# through Cloudflare, so these ranges don't prove a request came from your own zone.
+CLOUDFLARE_PROXIES = (
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+    "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+    "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+    "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+    "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
+    "2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
+)
+# Names accepted in AIWAF_TRUSTED_PROXIES alongside addresses and ranges, for example
+# "default,cloudflare" to keep the built-in ranges and add Cloudflare's.
+TRUSTED_PROXY_PRESETS = {"default": DEFAULT_TRUSTED_PROXIES, "cloudflare": CLOUDFLARE_PROXIES}
 MAX_FORWARDED_FOR_LENGTH = 4096
 MAX_FORWARDED_FOR_ENTRIES = 32
 
@@ -91,15 +107,64 @@ def _parse_trusted_networks(entries: tuple) -> tuple:
     return tuple(networks)
 
 
-def trusted_proxy_networks(configured=None) -> tuple:
-    """Parse a list or comma-separated string; None uses the env var, then defaults."""
+@lru_cache(maxsize=32)
+def _expand_trusted_entries(configured) -> tuple:
+    if isinstance(configured, str):
+        configured = configured.split(",")
+    entries = []
+    for entry in (str(e).strip() for e in configured):
+        if entry:
+            entries.extend(TRUSTED_PROXY_PRESETS.get(entry.lower(), (entry,)))
+    return tuple(entries)
+
+
+def _trusted_entries(configured=None) -> tuple:
+    """Addresses and ranges from a list or comma-separated string, with shortcut names expanded.
+    None uses the environment variable, then the defaults."""
     if configured is None:
         configured = os.environ.get("AIWAF_TRUSTED_PROXIES")
     if configured is None:
         configured = DEFAULT_TRUSTED_PROXIES
-    if isinstance(configured, str):
-        configured = configured.split(",")
-    return _parse_trusted_networks(tuple(str(e).strip() for e in configured if str(e).strip()))
+    try:
+        return _expand_trusted_entries(configured if isinstance(configured, str) else tuple(configured))
+    except TypeError:  # Entries that can't be cached, such as unhashable objects.
+        return _expand_trusted_entries.__wrapped__(configured)
+
+
+def trusted_proxy_networks(configured=None) -> tuple:
+    """Parse a list or comma-separated string; None uses the env var, then defaults."""
+    return _parse_trusted_networks(_trusted_entries(configured))
+
+
+@lru_cache(maxsize=32)
+def _native_trusted_set(entries: tuple, native_module):
+    """The aiwaf-rust resolver for these entries, parsed once, or None when it isn't installed."""
+    cls = getattr(native_module, "TrustedProxySet", None)
+    if cls is None:
+        return None
+    trusted = cls(list(entries))
+    for entry in trusted.invalid:
+        # An unparseable entry must never widen trust.
+        logger.warning("Ignoring invalid AIWAF_TRUSTED_PROXIES entry: %r", entry)
+    return trusted
+
+
+_untrusted_peer_warned = False
+
+
+def _warn_untrusted_peer_once(peer_ip: str, header: str) -> None:
+    """Point out, once per process, a proxy that may need adding to AIWAF_TRUSTED_PROXIES."""
+    global _untrusted_peer_warned
+    if _untrusted_peer_warned:
+        return
+    _untrusted_peer_warned = True
+    logger.warning(
+        "AIWAF is ignoring %s from untrusted peer %s and using the peer's address as the client. "
+        "If %s is your proxy or CDN, add it to AIWAF_TRUSTED_PROXIES (behind Cloudflare, use "
+        "AIWAF_TRUSTED_PROXIES=default,cloudflare); otherwise no action is needed. "
+        "This warning is logged once.",
+        header, peer_ip, peer_ip,
+    )
 
 
 def _in_networks(ip_text: str, networks: tuple) -> bool:
@@ -114,14 +179,30 @@ def resolve_client_ip(peer, forwarded_for=None, real_ip=None, trusted_proxies=No
     trustworthy: walk from the right and stop at the first address outside the
     trusted networks. Anything further left is client-supplied. A missing peer
     means a local Unix socket, which only a co-located proxy can reach.
+
+    The walk runs in aiwaf-rust (``TrustedProxySet``). The Python version below is used
+    only when an older aiwaf-rust without it is installed.
     """
-    networks = trusted_proxy_networks(trusted_proxies)
+    entries = _trusted_entries(trusted_proxies)
+    native = _native_trusted_set(entries, rust_backend.aiwaf_rust)
+    if native is None:
+        return _resolve_client_ip_python(peer, forwarded_for, real_ip, entries)
+    ip, ignored = native.resolve(str(peer or ""), str(forwarded_for or ""), str(real_ip or ""))
+    if ignored:
+        _warn_untrusted_peer_once(ip, ignored)
+    return ip
+
+
+def _resolve_client_ip_python(peer, forwarded_for, real_ip, entries: tuple) -> str:
+    networks = _parse_trusted_networks(entries)
     peer_text = str(peer or "").strip()
     peer_ip = _normalize_ip(peer_text)
     fallback = peer_ip or peer_text
     if not networks:
         return fallback
     if peer_text and not (peer_ip and _in_networks(peer_ip, networks)):
+        if peer_ip and (forwarded_for or real_ip):
+            _warn_untrusted_peer_once(peer_ip, "X-Forwarded-For" if forwarded_for else "X-Real-IP")
         return fallback
 
     header = str(forwarded_for or "")

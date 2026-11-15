@@ -2168,6 +2168,7 @@ mod model_contract_tests {
 }
 #[cfg(test)]
 mod fuzz_smoke;
+pub mod client_ip;
 pub mod payload;
 pub mod route_risks;
 pub mod sql;

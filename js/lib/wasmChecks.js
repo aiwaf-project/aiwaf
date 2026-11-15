@@ -32,4 +32,9 @@ function get() {
   return loaded;
 }
 
-module.exports = { load, get, MESSAGE };
+/** Returns the loaded module, or null when load() hasn't finished. */
+function loadedModule() {
+  return loaded;
+}
+
+module.exports = { load, get, loadedModule, MESSAGE };

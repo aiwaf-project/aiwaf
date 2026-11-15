@@ -26,6 +26,15 @@ public final class CidrUtil {
         }
     }
 
+    /** The address bytes (4 or 16), or null when {@code value} isn't an IP literal. */
+    public static byte[] toBytes(String value) {
+        try {
+            return parseLiteral(value);
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
     public static boolean isLiteral(String value) {
         try {
             parseLiteral(value);
