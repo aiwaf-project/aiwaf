@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Write Flask and FastAPI combined access log timestamps in UTC to match their
+  `+0000` offset. On non-UTC servers, entries written before and after this fix
+  differ by the server's UTC offset; existing log files are not converted.
 - Java: read the first client field in access logs, retaining IPv6, IPv4-mapped
   IPv6, and hostname fields verbatim, matching the Python parser. Later IPv4
   fields no longer replace the client address during ingestion.
