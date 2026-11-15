@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Fix the middleware CSV log path so only a trailing `.log` becomes `.csv`
+  (Django and Flask middleware plus the `aiwaf_logging` and `debug_csv`
+  commands). A `.log` elsewhere in the path, such as in a folder name, and a
+  non-`.log` extension now keep the configured path; anyone who relied on the
+  old rewrite will see CSV logs move to the configured folder and may need to
+  move existing files.
 - Write Flask and FastAPI combined access log timestamps in UTC to match their
   `+0000` offset. On non-UTC servers, entries written before and after this fix
   differ by the server's UTC offset; existing log files are not converted.

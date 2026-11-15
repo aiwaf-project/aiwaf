@@ -2,7 +2,7 @@ import gzip
 import csv
 import pytest
 
-from aiwaf.core.logs import read_rotated_logs, parse_log_line
+from aiwaf.core.logs import csv_log_path, parse_log_line, read_rotated_logs
 from aiwaf.core.logs import write_csv_log
 from aiwaf.core.native_runtime import native_override, close_csv_logs
 
@@ -64,3 +64,18 @@ def test_parse_log_line_supports_patch_method():
     assert res_common["path"] == "/api/resource"
     assert res_common["status"] == "200"
 
+
+@pytest.mark.parametrize(
+    ('configured', 'expected'),
+    [
+        ('aiwaf_requests.log', 'aiwaf_requests.csv'),
+        ('logs/aiwaf.log', 'logs/aiwaf.csv'),
+        ('/var/app.logs/access.log', '/var/app.logs/access.csv'),
+        ('/srv/my.log.d/aiwaf.log', '/srv/my.log.d/aiwaf.csv'),
+        ('/var/app.logs/x.csv', '/var/app.logs/x.csv'),
+        ('access.log.old', 'access.log.old'),
+        ('requests.txt', 'requests.txt'),
+    ],
+)
+def test_csv_log_path_only_rewrites_trailing_log(configured, expected):
+    assert csv_log_path(configured) == expected

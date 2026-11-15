@@ -44,6 +44,18 @@ def write_csv_log(csv_file: str, headers: list[str], row: dict, *, durable: bool
         pass
 
 
+def csv_log_path(path: str) -> str:
+    """Return the CSV log path for a configured middleware log path.
+
+    Only a ``.log`` at the very end of the path is replaced with ``.csv``.
+    A ``.log`` elsewhere in the path (for example inside a folder name) and
+    paths already ending in ``.csv`` are returned unchanged.
+    """
+    if path.endswith(".log"):
+        return path[: -len(".log")] + ".csv"
+    return path
+
+
 _LOG_RX_PATTERNS = [
     # Combined log format with response time (IPv4 + IPv6)
     re.compile(

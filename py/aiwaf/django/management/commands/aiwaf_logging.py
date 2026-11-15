@@ -1,5 +1,6 @@
 from django.core.management.base import BaseCommand
 from django.conf import settings
+from aiwaf.core.logs import csv_log_path
 import os
 
 class Command(BaseCommand):
@@ -46,7 +47,7 @@ class Command(BaseCommand):
         logging_enabled = getattr(settings, 'AIWAF_MIDDLEWARE_LOGGING', False)
         log_file = getattr(settings, 'AIWAF_MIDDLEWARE_LOG', 'aiwaf_requests.log')
         csv_format = getattr(settings, 'AIWAF_MIDDLEWARE_CSV', True)
-        csv_file = log_file.replace('.log', '.csv') if csv_format else None
+        csv_file = csv_log_path(log_file) if csv_format else None
         
         # Status
         status_color = self.style.SUCCESS if logging_enabled else self.style.WARNING
@@ -130,7 +131,7 @@ class Command(BaseCommand):
         """Clear/delete middleware log files"""
         log_file = getattr(settings, 'AIWAF_MIDDLEWARE_LOG', 'aiwaf_requests.log')
         csv_format = getattr(settings, 'AIWAF_MIDDLEWARE_CSV', True)
-        csv_file = log_file.replace('.log', '.csv') if csv_format else None
+        csv_file = csv_log_path(log_file) if csv_format else None
         
         files_deleted = 0
         
