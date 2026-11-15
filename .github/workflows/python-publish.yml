@@ -23,7 +23,7 @@ jobs:
       - name: Install build tools with aiwaf-rust from source
         uses: ./.github/actions/setup-python-from-source
         with:
-          packages: '".[django,flask,fastapi]" build twine pytest pytest-cov coverage httpx pip-audit redis'
+          packages: '".[django,flask,fastapi]" build twine pytest pytest-cov coverage httpx pip-audit redis djangorestframework python-multipart'
 
       - name: Verify Python release tests and coverage
         run: python aiwaf_test.py --python-only --coverage --no-rust-build

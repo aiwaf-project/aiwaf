@@ -36,7 +36,7 @@
         "@babel/parser": "^7.29.2",
         "aiwaf-wasm": "^0.2.6",
         "express": "^4.21.2",
-        "glob": "^13.0.6",
+        "glob": "^14.0.6",
         "knex": "^2.4.2",
         "node-cache": "^5.1.2",
         "redis": "^4.6.5",

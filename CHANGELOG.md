@@ -16,6 +16,12 @@
 - **Security:** Java stops reading `X-Forwarded-For` at a malformed entry instead of
   skipping it, so entries left of it can't be taken as the client address. It then
   falls back to `X-Real-IP` or the peer address.
+- **Security:** Node.js dependency updates for advisories published since 1.1.5:
+  `body-parser` 1.20.9 and `express` 4.22.3 (denial of service through trailing bytes
+  after a compressed body), `qs` 6.17.1, and `glob` 14.0.6. `npm audit --omit=dev`
+  reports no vulnerabilities. Releases now fail on any known vulnerability in packages
+  users install, and on high-severity ones in test-only packages; Jest's `deepmerge`
+  has a low-severity advisory with no fixed version yet.
 - Python, Node.js and Java: when a peer that isn't trusted sends `X-Forwarded-For` or
   `X-Real-IP`, AIWAF logs one warning per process naming that peer, so a proxy or CDN
   missing from `AIWAF_TRUSTED_PROXIES` shows up in the logs. `AIWAF_TRUSTED_PROXIES` also
