@@ -322,3 +322,19 @@ def test_fastapi_logs_natively_where_its_trainer_reads():
                                                       logging_middleware__log_dir="/var/log/app"), environ={})
     assert conversion.config["log_path"] == "/var/log/app/aiwaf_native_access.csv"
     assert outcomes(conversion)["logging_middleware"] == "carried"
+
+
+
+@pytest.mark.parametrize("value, store, expected", [
+    (True, True, "carried"), (False, True, "carried"), ("yes", True, "carried"),
+    (True, False, "carried"), (False, False, "changed"), ("maybe", False, "carried"),
+])
+def test_flask_use_csv_follows_where_flask_keeps_its_stores(monkeypatch, value, store, expected):
+    from aiwaf.core import native_settings
+
+    monkeypatch.setattr(native_settings, "_engine_supports", lambda feature: store)
+    conversion = convert({"AIWAF_USE_CSV": value}, "flask")
+    assert outcomes(conversion)["AIWAF_USE_CSV"] == expected
+    assert ("store" in conversion.config) == store
+    # Django has no such setting, so it isn't reported there as unknown.
+    assert "AIWAF_USE_CSV" not in outcomes(convert({}, "flask"))

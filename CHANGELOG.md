@@ -1,5 +1,14 @@
 # Changelog
 
+## Python 1.2.1 / Node.js 1.2.1 — prepared release
+
+- Flask's `AIWAF_USE_CSV` carries over to the native pipeline. It was reported as a setting
+  with no native equivalent, so a Flask app that set it stayed on the regular middleware.
+  The native pipeline uses Flask's own stores, which follow it; without store support, only
+  `AIWAF_USE_CSV = False` (database storage) is reported as a difference.
+- npm `aiwaf` declares `aiwaf-wasm ^0.2.7`. The published 1.2.0 still declared `^0.2.6`,
+  which resolves to 0.2.7 on a fresh install but lets a lockfile keep 0.2.6.
+
 ## Python 1.2.0 / aiwaf-rust 0.2.9 / Node.js 1.2.0 / WASM 0.2.7 — prepared release
 
 - The native pipelines read their stores less. Python reads only what the request's stages

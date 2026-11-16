@@ -55,6 +55,7 @@ _ENVIRONMENT = ("AIWAF_SQL_INJECTION_MODE", "AIWAF_PAYLOAD_MAX_BYTES", "AIWAF_IN
 _HANDLED = {"AIWAF_CSV_DATA_DIR", "AIWAF_DATA_DIR", "AIWAF_STORAGE_MODE", "AIWAF_EXEMPT_PATHS",
             "AIWAF_EXEMPT_IPS", "AIWAF_MALICIOUS_KEYWORDS", "AIWAF_MIDDLEWARE_LOGGING",
             "AIWAF_CSV_PIPELINE", "AIWAF_GEO_BLOCK_ENABLED", "AIWAF_RATE_CACHE_BACKEND", "AIWAF_REDIS_URL",
+            "AIWAF_USE_CSV",
             # Django's legacy nested settings, applied to the flat AIWAF_* settings before conversion.
             "AIWAF_SETTINGS",
             # Chooses between the pipelines; not a pipeline setting.
@@ -242,16 +243,27 @@ def native_config(settings: Mapping[str, Any], framework: str, *, middleware: It
         or (environ.get("AIWAF_DATA_DIR") if framework == "flask" else None) or "aiwaf_data"
     result.config["data_dir"] = str(data_dir)
     storage = str(settings.get("AIWAF_STORAGE_MODE", "models" if framework == "django" else "csv")).lower()
+    # Flask chooses its storage with AIWAF_USE_CSV: CSV by default, otherwise its database.
+    storage_setting = "AIWAF_STORAGE_MODE"
+    if framework == "flask":
+        storage_setting = "AIWAF_USE_CSV"
+        try:
+            storage = "csv" if _value(bool, settings.get("AIWAF_USE_CSV", True)) else "database"
+        except ValueError:
+            storage = "csv"  # Any other value is truthy to Flask, which then uses CSV.
     store = _engine_supports("host_store")
     if store:
         # The native pipeline reads and writes the regular stores, so stored entries carry over.
         result.config["store"] = framework
-        if "AIWAF_STORAGE_MODE" in settings:
-            result.note("AIWAF_STORAGE_MODE", "carried")
+        if storage_setting in settings:
+            result.note(storage_setting, "carried")
     elif storage != "csv":
-        result.note("AIWAF_STORAGE_MODE", "changed",
+        result.note(storage_setting, "changed",
                     f"The native pipeline keeps blocks, exemptions and keywords in CSV files in {data_dir}. "
                     f"Entries stored in {storage} aren't copied there.")
+    elif storage_setting in settings:
+        # Flask's CSV mode and the native pipeline use the same files in the data directory.
+        result.note(storage_setting, "carried")
 
     _exempt_paths(result, framework, settings, store)
     _exempt_ips(result, settings)

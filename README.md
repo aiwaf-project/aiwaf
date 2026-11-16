@@ -39,12 +39,12 @@ the supported Redis backends when sharing limits across workers.
 
 Each package is versioned and released independently.
 
-Python 1.2.0, Rust/Python 0.2.9, Node.js 1.2.0, WASM 0.2.7, and Java 1.3.6 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
+Python 1.2.1, Rust/Python 0.2.9, Node.js 1.2.1, WASM 0.2.7, and Java 1.3.6 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
 
 | Runtime | Package | Repository version | Primary use |
 | --- | --- | ---: | --- |
-| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.2.0` | Django, Flask, and FastAPI protection |
-| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.2.0` | Express and Node framework middleware |
+| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.2.1` | Django, Flask, and FastAPI protection |
+| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.2.1` | Express and Node framework middleware |
 | Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.9` | Native Python acceleration and JSON model inference |
 | WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.7` | Rust detection and model primitives for JavaScript |
 | Java | `io.github.aiwaf-project:aiwaf-java` | `1.3.6` | Spring MVC and Jakarta Servlet protection |
@@ -87,7 +87,7 @@ When a peer that isn't trusted sends `X-Forwarded-For` or `X-Real-IP`, all three
 > [!IMPORTANT]
 > If your proxy or CDN connects from a public address (Cloudflare or Google Cloud load balancers, for example), add its ranges to `AIWAF_TRUSTED_PROXIES`. Otherwise every visitor appears to come from the proxy, and rate limiting or a block can then affect all of them. The `cloudflare` name trusts every Cloudflare address, and anyone can send requests through Cloudflare. If clients could also send requests through Cloudflare to your origin from outside your zone, restrict the origin to your zone, for example with authenticated origin pulls.
 
-If untrusted hosts can reach the application directly from your private network, narrow the list to your proxy's addresses. Addresses already resolved by Flask's `ProxyFix`, Uvicorn's `--proxy-headers`, or Express `trust proxy` are respected, except that AIWAF still walks the headers when the resolved address is itself in a trusted range. The Rust-owned Node pipeline uses `req.ip` only, so configure `trust proxy` there.
+If untrusted hosts can reach the application directly from your private network, narrow the list to your proxy's addresses. Addresses already resolved by Flask's `ProxyFix`, Uvicorn's `--proxy-headers`, or Express `trust proxy` are respected, except that AIWAF still walks the headers when the resolved address is itself in a trusted range. The Rust-owned Node pipeline resolves the address the same way when it runs from the regular options (the default, or `from_settings`); configured on its own, it uses `req.ip` unless its `trustedProxies` option is set.
 
 ## Injection audit
 
@@ -256,7 +256,7 @@ pip install "aiwaf[django]"
 pip install "aiwaf[flask]"
 pip install "aiwaf[fastapi]"
 
-# Backward-compatible alias; Python 1.2.0 already installs aiwaf-rust
+# Backward-compatible alias; Python 1.2.1 already installs aiwaf-rust
 pip install "aiwaf[rust]"
 
 # Node.js middleware
@@ -280,7 +280,7 @@ Java 1.3.6, after it is published to Maven Central:
 
 The Python package requires Python 3.10 or newer. Framework dependencies are optional, so install only the extra needed by the application.
 
-Python 1.2.0 requires `aiwaf-rust>=0.2.9`; the `rust` extra remains an installation
+Python 1.2.1 requires `aiwaf-rust>=0.2.9`; the `rust` extra remains an installation
 alias. Publish the matching Rust wheel with `NativeCSVPipeline` support before
 the Python release. The Rust release workflow builds Linux x86_64/aarch64,
 musl x86_64, macOS x86_64/arm64 and Windows x86_64 wheels and checks the native
@@ -1666,8 +1666,8 @@ Release versions and tags must match the relevant manifest.
 
 | Package | Manifest | Tag | Workflow |
 | --- | --- | --- | --- |
-| Python `aiwaf` | `pyproject.toml` | `python-v1.2.0` | `python-publish.yml` |
-| npm `aiwaf` | `js/package.json` | `js-v1.2.0` | `npm-publish.yml` |
+| Python `aiwaf` | `pyproject.toml` | `python-v1.2.1` | `python-publish.yml` |
+| npm `aiwaf` | `js/package.json` | `js-v1.2.1` | `npm-publish.yml` |
 | PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.9` | `rust-publish.yml` |
 | npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.7` | `wasm-publish.yml` |
 | Maven `aiwaf-java` | `java/pom.xml` | `java-v1.3.6` | `java-publish.yml` |
@@ -1678,13 +1678,10 @@ Java publishing uses the protected `maven-publish` environment plus `GPG_PRIVATE
 
 Registry releases are immutable. Increment the relevant manifest version before publishing another release.
 
-For this release, publish `aiwaf-rust 0.2.9` before Python `aiwaf 1.2.0`, and
-`aiwaf-wasm 0.2.7` before npm `aiwaf 1.2.0`. Python `aiwaf` 1.2.0 requires
-`aiwaf-rust>=0.2.9`, so its CI installs need 0.2.9 published first. npm `aiwaf` 1.2.0
-needs `aiwaf-wasm` 0.2.7, but its dependency and lockfile still name 0.2.6 so that
-`npm ci` keeps working until 0.2.7 is published. After WASM publication, run
-`npm install aiwaf-wasm@^0.2.7` in `js/` to update both, commit that, run `npm ci`
-and the release checks, and only then publish npm `aiwaf`. Java has no changes since
+This release is Python `aiwaf 1.2.1` and npm `aiwaf 1.2.1`. Their engines, `aiwaf-rust
+0.2.9` and `aiwaf-wasm 0.2.7`, are already published and unchanged, so the two packages
+can be published directly. npm `aiwaf` 1.2.1 declares `aiwaf-wasm ^0.2.7`; the published
+1.2.0 still declared `^0.2.6`. Java has no changes since
 1.3.6, which is already published.
 
 ## Security and limitations
