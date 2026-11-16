@@ -78,6 +78,11 @@ impl NativeRequestPipeline {
         self.inner.set_model(model.inner.clone()).map_err(|e| JsValue::from_str(&e))
     }
     pub fn clear_model(&mut self) { self.inner.model = None; }
+    /// Whether this build supports an optional request fact. Adapters check before relying on one,
+    /// so they keep working with older published builds: "rate_overrides" is path-rule rate limits.
+    pub fn supports(&self, feature: &str) -> bool {
+        request_pipeline::FEATURES.contains(&feature)
+    }
     pub fn diagnostics(&self) -> String { self.inner.diagnostics() }
 }
 

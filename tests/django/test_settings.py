@@ -4,6 +4,9 @@ This file provides the necessary Django configuration for running unit tests.
 """
 
 import os
+
+# The regular middleware's tests run the regular chain. Tests of the native default unset this.
+os.environ.setdefault("AIWAF_NATIVE_PIPELINE", "false")
 import sys
 import tempfile
 from pathlib import Path

@@ -23,6 +23,14 @@ pub const STAGES: [&str; 8] = [
     "logging",
 ];
 static NEXT_CONTEXT: AtomicU64 = AtomicU64::new(1);
+/// Optional request facts this engine accepts, for `NativeRequestPipeline::supports`.
+pub const FEATURES: [&str; 5] = [
+    "rate_overrides",
+    "sql_monitor",
+    "uuid_resolver",
+    "host_store",
+    "rate_count",
+];
 
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -59,6 +67,9 @@ struct Profile {
     max_clients: usize,
     max_history: usize,
     max_pending: usize,
+    /// "memory" keeps blocks and learned keywords in the engine. "host" takes them as request
+    /// facts and returns blocks and keywords from finish for the host's stores.
+    policy_store: String,
 }
 impl Default for Profile {
     fn default() -> Self {
@@ -113,6 +124,7 @@ impl Default for Profile {
             max_clients: 100000,
             max_history: 1000,
             max_pending: 10000,
+            policy_store: "memory".into(),
         }
     }
 }
@@ -137,6 +149,33 @@ struct Request {
     payload_exhausted: bool,
     #[serde(default)]
     defer_body: bool,
+    /// Rate limits from the request's path rule, replacing the profile's where set.
+    #[serde(default)]
+    rate: Option<RateLimits>,
+    /// Whether the record named by a well-formed path UUID exists, from the adapter's resolver.
+    #[serde(default)]
+    uuid_exists: Option<bool>,
+    /// With policy_store "host": the host's blocklist and exemptions for this request, and its
+    /// learned keywords and blocked countries.
+    #[serde(default)]
+    blocked: Option<bool>,
+    #[serde(default)]
+    exempt: Option<bool>,
+    #[serde(default)]
+    dynamic_keywords: Option<Vec<String>>,
+    #[serde(default)]
+    geo_countries: Option<Vec<String>>,
+    /// Requests in this request's rate window, this one included, from a shared counter
+    /// such as Redis. Replaces the engine's own per-worker count.
+    #[serde(default)]
+    rate_count: Option<usize>,
+}
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RateLimits {
+    window: Option<f64>,
+    max: Option<usize>,
+    flood: Option<usize>,
 }
 struct Pending {
     request: Request,
@@ -157,6 +196,9 @@ struct Begin {
     context: String,
     status: u16,
     reason: String,
+    /// A SQL finding allowed through because sql_mode is "monitor", for the adapter to log.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    monitor: Option<String>,
 }
 pub struct Engine {
     profile: Profile,
@@ -165,6 +207,8 @@ pub struct Engine {
     blocks: HashMap<String, f64>,
     learned: HashSet<String>,
     last_cleanup: f64,
+    /// The largest rate window used so far, so overrides with longer windows aren't pruned early.
+    rate_window: f64,
     processed: usize,
     predictions: usize,
     pub model: Option<IsolationForest>,
@@ -175,7 +219,8 @@ impl Engine {
         if p.enabled.iter().any(|s| !STAGES.contains(&s.as_str())) {
             return Err("Unknown stage".into());
         }
-        if !["off", "block"].contains(&p.sql_mode.as_str())
+        if !["off", "block", "monitor"].contains(&p.sql_mode.as_str())
+            || !["memory", "host"].contains(&p.policy_store.as_str())
             || !["ip", "ip_path"].contains(&p.rate_key_mode.as_str())
         {
             return Err("Unsupported native policy".into());
@@ -241,6 +286,7 @@ impl Engine {
             blocks,
             learned,
             last_cleanup: 0.0,
+            rate_window: 0.0,
             processed: 0,
             predictions: 0,
             model: None,
@@ -258,16 +304,15 @@ impl Engine {
         if now - self.last_cleanup < 30.0 {
             return;
         }
-        let keep = self
-            .profile
-            .rate_window
+        let rate_window = self.profile.rate_window.max(self.rate_window);
+        let keep = rate_window
             .max(self.profile.anomaly_window)
             .max(self.profile.uuid_window)
             .max(self.profile.max_page_time + 300.0);
         self.clients.retain(|_, c| now - c.last <= keep);
         for c in self.clients.values_mut() {
             c.rates.retain(|_, times| {
-                times.retain(|t| now - *t < self.profile.rate_window);
+                times.retain(|t| now - *t < rate_window);
                 !times.is_empty()
             });
             c.uuid.retain(|(t, _)| now - *t < self.profile.uuid_window);
@@ -295,8 +340,15 @@ impl Engine {
         } else {
             inspect(&value, self.profile.max_bytes)
         };
+        let monitor = self.profile.sql_mode == "monitor";
         Ok(result
-            .map(|(status, rule)| json!({"status":status,"rule":rule}))
+            .map(|(status, rule)| {
+                if monitor {
+                    json!({"status":status,"rule":rule,"mode":"monitor"})
+                } else {
+                    json!({"status":status,"rule":rule})
+                }
+            })
             .unwrap_or(Value::Null)
             .to_string())
     }
@@ -317,6 +369,21 @@ impl Engine {
         if r.disabled.iter().any(|s| !STAGES.contains(&s.as_str())) {
             return Err("Unknown disabled stage".into());
         }
+        let limits = r.rate.unwrap_or_default();
+        let (rate_window, rate_max, rate_flood) = (
+            limits.window.unwrap_or(self.profile.rate_window),
+            limits.max.unwrap_or(self.profile.rate_max),
+            limits.flood.unwrap_or(self.profile.rate_flood),
+        );
+        if !rate_window.is_finite()
+            || rate_window <= 0.0
+            || rate_max == 0
+            || rate_flood < rate_max
+            || rate_flood > 100000
+        {
+            return Err("Invalid path-rule rate limit".into());
+        }
+        self.rate_window = self.rate_window.max(rate_window);
         r.path = r.path.to_lowercase();
         r.method = r.method.to_uppercase();
         self.cleanup(r.now);
@@ -333,6 +400,7 @@ impl Engine {
             .cloned()
             .collect();
         if self.profile.exempt_ips.contains(&r.ip)
+            || r.exempt == Some(true)
             || self
                 .profile
                 .exempt_paths
@@ -341,14 +409,43 @@ impl Engine {
         {
             apply.retain(|s| s == "logging");
         }
+        let host = self.profile.policy_store == "host";
+        let stored_countries: HashSet<String> = r
+            .geo_countries
+            .take()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| c.trim().to_uppercase())
+            .collect();
+        let host_keywords: Vec<String> = r
+            .dynamic_keywords
+            .take()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|k| k.to_lowercase())
+            .filter(|k| !k.is_empty())
+            .collect();
+        let learned: Vec<&String> = if host {
+            host_keywords.iter().collect()
+        } else {
+            self.learned.iter().collect()
+        };
+        let blocklisted = if host {
+            r.blocked == Some(true)
+        } else {
+            self.blocks
+                .get(&r.ip)
+                .is_some_and(|expiry| *expiry == 0.0 || *expiry > r.now)
+        };
         let mut status = 0u16;
         let mut reason = String::new();
+        let mut monitor = None;
         let p = &self.profile;
         let country = r.country.to_uppercase();
         if apply.contains("geo_block")
             && !country.is_empty()
             && (if p.geo_allow.is_empty() {
-                p.geo_block.contains(&country)
+                p.geo_block.contains(&country) || stored_countries.contains(&country)
             } else {
                 !p.geo_allow.contains(&country)
             })
@@ -357,35 +454,38 @@ impl Engine {
             reason = "geo_block".into();
         }
         if status == 0 && apply.contains("ip_keyword_block") {
-            if self
-                .blocks
-                .get(&r.ip)
-                .is_some_and(|expiry| *expiry == 0.0 || *expiry > r.now)
-            {
+            if blocklisted {
                 status = 403;
                 reason = "blocklist".into();
             } else if let Some(k) = validate_url(&r.path).or_else(|| validate_url(&r.query)) {
                 status = 403;
                 reason = k.into();
-            } else if r.payload_exhausted && p.sql_mode != "off" {
-                status = 413;
-                reason = "payload_inspection_limit".into();
             } else if p.sql_mode != "off" {
-                if let Some((s, k)) =
+                let finding: Option<(u16, String)> = if r.payload_exhausted {
+                    Some((413, "payload_inspection_limit".into()))
+                } else if let Some((s, k)) =
                     inspect(&json!([r.query, r.body, r.parsed_query]), p.max_bytes)
                 {
-                    status = s;
-                    reason = k.into();
+                    Some((s, k.into()))
                 } else if let Some((k, s)) = aiwaf_core::payload::inspect_sql_headers(
-                    r.headers.iter().map(|(name, value)| (name.as_str(), value.as_str())),
+                    r.headers
+                        .iter()
+                        .map(|(name, value)| (name.as_str(), value.as_str())),
                     p.max_bytes,
                 ) {
                     // Cookies, the Referer and other headers, as in Python and Node.js.
-                    status = s as _;
-                    reason = k;
-                } else if let Some((k, s)) = aiwaf_core::payload::inspect_sql_path(&r.path, p.max_bytes) {
-                    status = s as _;
-                    reason = k;
+                    Some((s as _, k))
+                } else {
+                    aiwaf_core::payload::inspect_sql_path(&r.path, p.max_bytes)
+                        .map(|(k, s)| (s as _, k))
+                };
+                match finding {
+                    Some((_, rule)) if p.sql_mode == "monitor" => monitor = Some(rule),
+                    Some((s, rule)) => {
+                        status = s;
+                        reason = rule;
+                    }
+                    None => {}
                 }
             }
             if status == 0
@@ -395,8 +495,8 @@ impl Engine {
                     .any(|s| r.path.trim_matches('/') == s)
                 && p.static_keywords
                     .iter()
-                    .chain(self.learned.iter())
-                    .any(|s| r.path.contains(s))
+                    .chain(learned.iter().copied())
+                    .any(|s| r.path.contains(s.as_str()))
             {
                 status = 403;
                 reason = "keyword".into();
@@ -410,36 +510,38 @@ impl Engine {
             } else {
                 r.path.clone()
             };
+            if let Some(burst) = r.rate_count {
+                if burst > rate_flood {
+                    status = 403;
+                    reason = "flood".into();
+                } else if burst > rate_max {
+                    status = 429;
+                    reason = "rate_limit".into();
+                }
             // Bound path buckets even for a single hostile client.
-            if c.rates.len() >= p.max_history && !c.rates.contains_key(&key) {
+            } else if c.rates.len() >= p.max_history && !c.rates.contains_key(&key) {
                 status = 429;
                 reason = "rate_bucket_limit".into();
             } else {
                 let times = c.rates.entry(key).or_default();
-                while times.front().is_some_and(|t| r.now - *t >= p.rate_window) {
+                while times.front().is_some_and(|t| r.now - *t >= rate_window) {
                     times.pop_front();
                 }
                 // A denied flood cannot grow an unbounded timestamp list.
-                if times.len() <= p.rate_flood {
+                if times.len() <= rate_flood {
                     times.push_back(r.now);
                 }
                 let burst = times.len();
-                if burst > p.rate_flood {
+                if burst > rate_flood {
                     status = 403;
                     reason = "flood".into();
-                } else if burst > p.rate_max {
+                } else if burst > rate_max {
                     status = 429;
                     reason = "rate_limit".into();
                 }
             }
         }
-        if status == 0
-            && apply.contains("ai_anomaly")
-            && self
-                .blocks
-                .get(&r.ip)
-                .is_some_and(|e| *e == 0.0 || *e > r.now)
-        {
+        if status == 0 && apply.contains("ai_anomaly") && blocklisted {
             status = 403;
             reason = "blocklist".into();
         }
@@ -489,6 +591,10 @@ impl Engine {
             if !uid.contains('/') && !valid.is_match(uid) {
                 status = 403;
                 reason = "uuid_malformed".into();
+            } else if !uid.contains('/') && r.uuid_exists == Some(false) {
+                // The record doesn't exist: blocked, as the regular middleware's resolver check does.
+                status = 403;
+                reason = "uuid_not_found".into();
             }
         }
         if status == 0 && apply.contains("header_validation") {
@@ -522,6 +628,7 @@ impl Engine {
             context,
             status,
             reason,
+            monitor,
         })
         .map_err(|e| e.to_string())
     }
@@ -559,12 +666,16 @@ impl Engine {
             serde_json::from_str(payload).map_err(|e| e.to_string())?
         };
         let mut finding = None;
+        let mut monitored = None;
         if item.apply.contains("ip_keyword_block") && self.profile.sql_mode != "off" {
             finding = if limit || exhausted {
                 Some((413, "payload_inspection_limit"))
             } else {
                 inspect(&body, self.profile.max_bytes)
             };
+            if self.profile.sql_mode == "monitor" {
+                monitored = finding.take();
+            }
         }
         if finding.is_none() && item.apply.contains("honeypot") {
             let r = &item.request;
@@ -609,6 +720,9 @@ impl Engine {
             }
             return Ok(json!({"status":status,"rule":rule}).to_string());
         }
+        if let Some((status, rule)) = monitored {
+            return Ok(json!({"status":status,"rule":rule,"mode":"monitor"}).to_string());
+        }
         Ok("null".into())
     }
     pub fn finish(
@@ -630,6 +744,7 @@ impl Engine {
             .remove(context)
             .ok_or("Unknown, foreign or completed context")?;
         let r = &item.request;
+        let host = self.profile.policy_store == "host";
         let c = self.clients.entry(r.ip.clone()).or_default();
         c.last = now;
         let mut block = if item.status == 403 && item.reason != "blocklist" {
@@ -728,7 +843,7 @@ impl Engine {
                 && status == 404
                 && !r.exists
                 && hits > 0
-                && self.learned.len() < 4096
+                && (host || self.learned.len() < 4096)
             {
                 // Only learn a probe segment, never arbitrary application vocabulary.
                 if let Some(segment) = r.path.split('/').find(|s| {
@@ -739,7 +854,7 @@ impl Engine {
                         .legitimate_keywords
                         .iter()
                         .any(|s| segment.contains(s))
-                        && self.learned.insert(segment.to_owned())
+                        && (host || self.learned.insert(segment.to_owned()))
                     {
                         learned = Some(segment.to_owned());
                     }
@@ -773,7 +888,11 @@ impl Engine {
             .as_ref()
             .map(|(reason, expiry)| csv_row(&[r.ip.clone(), expiry.to_string(), reason.clone()]));
         let keyword_csv = learned.as_ref().map(|keyword| csv_row(&[keyword.clone()]));
-        Ok(json!({"log_csv":log,"block_csv":block_csv,"keyword_csv":keyword_csv}).to_string())
+        // Structured effects for host stores, alongside the CSV rows.
+        let block_effect = block
+            .as_ref()
+            .map(|(reason, expiry)| json!({"ip":r.ip,"reason":reason,"expires_at":expiry}));
+        Ok(json!({"log_csv":log,"block_csv":block_csv,"keyword_csv":keyword_csv,"block":block_effect,"keyword":learned}).to_string())
     }
     pub fn diagnostics(&self) -> String {
         json!({"native":true,"model":self.model.is_some(),"processed_requests":self.processed,"model_predictions":self.predictions,"clients":self.clients.len(),"pending":self.pending.len(),"blocked":self.blocks.len(),"learned_keywords":self.learned.len()}).to_string()
@@ -895,12 +1014,153 @@ mod tests {
         for p in [
             r#"{"unknown":true}"#,
             r#"{"rate_backend":"redis"}"#,
-            r#"{"sql_mode":"monitor"}"#,
+            r#"{"sql_mode":"loud"}"#,
             r#"{"rate_flood":1}"#,
             r#"{"max_history":0}"#,
         ] {
             assert!(Engine::new(p).is_err());
         }
+    }
+    #[test]
+    fn host_store_facts_drive_policy_and_effects_report_writes() {
+        let profile = json!({"enabled":["ip_keyword_block","geo_block","logging"], "exempt_paths":[], "policy_store":"host", "blocklist":{"203.0.113.90": 0.0}});
+        let mut e = Engine::new(&profile.to_string()).unwrap();
+        let with = |ip: &str, path: &str, facts: Value| {
+            let mut r: Value =
+                serde_json::from_str(&request(ip, path, "GET", 1.0, Value::Null)).unwrap();
+            for (k, v) in facts.as_object().unwrap() {
+                r[k] = v.clone();
+            }
+            r.to_string()
+        };
+        // In host mode the host's blocked fact replaces the engine's own blocklist.
+        assert_eq!(
+            begin(&mut e, with("203.0.113.90", "/a", json!({})))["status"],
+            0
+        );
+        assert_eq!(
+            begin(&mut e, with("203.0.113.91", "/a", json!({"blocked": true})))["reason"],
+            "blocklist"
+        );
+        assert_eq!(
+            begin(
+                &mut e,
+                with(
+                    "203.0.113.92",
+                    "/x/zzprobe",
+                    json!({"dynamic_keywords":["ZZPROBE"]})
+                )
+            )["reason"],
+            "keyword"
+        );
+        assert_eq!(
+            begin(&mut e, with("203.0.113.93", "/x/zzprobe", json!({})))["status"],
+            0
+        );
+        let mut geo: Value = serde_json::from_str(&with(
+            "203.0.113.94",
+            "/a",
+            json!({"geo_countries":["xx "]}),
+        ))
+        .unwrap();
+        geo["country"] = json!("XX");
+        assert_eq!(begin(&mut e, geo.to_string())["reason"], "geo_block");
+        // An exempt fact keeps logging only.
+        let d = begin(
+            &mut e,
+            with(
+                "203.0.113.91",
+                "/a",
+                json!({"blocked": true, "exempt": true}),
+            ),
+        );
+        assert_eq!(d["status"], 0);
+        // A non-blocklist 403 reports a structured block for the host to write.
+        let d = begin(
+            &mut e,
+            with(
+                "203.0.113.95",
+                "/x/zzprobe",
+                json!({"dynamic_keywords":["zzprobe"]}),
+            ),
+        );
+        let effects = finish(&mut e, &d, 403, 2.0);
+        assert_eq!(effects["block"]["ip"], "203.0.113.95");
+        assert_eq!(effects["block"]["reason"], "keyword");
+        assert!(effects["block"]["expires_at"].as_f64().unwrap() > 2.0);
+        assert!(effects["keyword"].is_null());
+        assert!(Engine::new(r#"{"policy_store":"redis"}"#).is_err());
+    }
+    #[test]
+    fn a_shared_rate_count_replaces_the_local_count() {
+        let profile =
+            json!({"enabled":["rate_limit"], "exempt_paths":[], "rate_max": 2, "rate_flood": 4});
+        let mut e = Engine::new(&profile.to_string()).unwrap();
+        let with = |count: usize| {
+            let mut r: Value =
+                serde_json::from_str(&request("203.0.113.60", "/a", "GET", 1.0, Value::Null))
+                    .unwrap();
+            r["rate_count"] = json!(count);
+            r.to_string()
+        };
+        assert_eq!(begin(&mut e, with(2))["status"], 0);
+        assert_eq!(begin(&mut e, with(3))["reason"], "rate_limit");
+        assert_eq!(begin(&mut e, with(5))["reason"], "flood");
+        // Shared counts don't touch the local buckets.
+        assert_eq!(begin(&mut e, with(1))["status"], 0);
+        for _ in 0..2 {
+            assert_eq!(
+                begin(
+                    &mut e,
+                    request("203.0.113.60", "/a", "GET", 1.0, Value::Null)
+                )["status"],
+                0
+            );
+        }
+    }
+    #[test]
+    fn a_resolver_miss_blocks_and_a_hit_or_no_resolver_passes() {
+        let profile = json!({"enabled":["uuid_tamper"], "exempt_paths":[]});
+        let mut e = Engine::new(&profile.to_string()).unwrap();
+        let path = "/user/550e8400-e29b-41d4-a716-446655440000";
+        let with = |exists: Option<bool>, ip: &str| {
+            let mut r: Value =
+                serde_json::from_str(&request(ip, path, "GET", 1.0, Value::Null)).unwrap();
+            if let Some(exists) = exists {
+                r["uuid_exists"] = json!(exists);
+            }
+            r.to_string()
+        };
+        assert_eq!(
+            begin(&mut e, with(Some(false), "203.0.113.80"))["reason"],
+            "uuid_not_found"
+        );
+        assert_eq!(begin(&mut e, with(Some(true), "203.0.113.81"))["status"], 0);
+        assert_eq!(begin(&mut e, with(None, "203.0.113.82"))["status"], 0);
+    }
+    #[test]
+    fn monitor_mode_reports_sql_findings_without_blocking() {
+        let profile =
+            json!({"enabled":["ip_keyword_block"], "exempt_paths":[], "sql_mode":"monitor"});
+        let mut e = Engine::new(&profile.to_string()).unwrap();
+        let attack = json!({"q": "' OR 1=1--"});
+        let d = begin(
+            &mut e,
+            request("203.0.113.70", "/api", "POST", 1.0, attack.clone()),
+        );
+        assert_eq!(d["status"], 0);
+        assert_eq!(d["monitor"], "sql_breakout_single_quote");
+        // A clean request carries no monitor field, and nothing was blocklisted.
+        let d = begin(
+            &mut e,
+            request("203.0.113.70", "/api", "GET", 2.0, Value::Null),
+        );
+        assert!(d.get("monitor").is_none());
+        assert_eq!(d["status"], 0);
+        let payload =
+            serde_json::from_str::<Value>(&e.inspect_payload(&attack.to_string()).unwrap())
+                .unwrap();
+        assert_eq!(payload["mode"], "monitor");
     }
     #[test]
     fn blocklist_and_previous_wire_key_enforce_identically() {

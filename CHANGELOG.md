@@ -1,6 +1,109 @@
 # Changelog
 
-## Unreleased
+## Python 1.2.0 / aiwaf-rust 0.2.9 / Node.js 1.2.0 / WASM 0.2.7 — prepared release
+
+- The native pipelines read their stores less. Python reads only what the request's stages
+  use (nothing on routes where path rules turn them off, and only the exemption for an
+  exempt request), and caches blocklist and exemption answers per IP and path for
+  `store_cache_seconds` (default 5), as it already cached keywords and countries. Node.js
+  does the same with `storeCacheSeconds`, and its anomaly stage now sees stored blocks. A block
+  or exemption made elsewhere can take that long to apply; this worker's own blocks apply
+  at once. `store_cache_seconds: 0` turns the caching off. In a local benchmark with
+  repeat clients, AIWAF's own cost per request fell from about 1.1 ms to 0.2 ms on Django
+  with the ORM, against about 3.2 ms for the regular middleware.
+- **Behavior change:** Node.js's `aiwaf(options)` runs the native pipeline by default when
+  the installed `aiwaf-wasm` is 0.2.7 or newer and every option carries over exactly.
+  Otherwise it runs the regular middleware as before. It logs a line when it picks the
+  native pipeline, and `AIWAF_NATIVE_PIPELINE: false` (or the environment variable) keeps
+  the regular middleware. For this, the native pipeline now resolves client addresses
+  through `AIWAF_TRUSTED_PROXIES` as the regular middleware does (`trustedProxies`), and
+  loads a model saved by `aiwaf train` (`modelFile`). The sample model shipped in the
+  package isn't used natively.
+- **Behavior change:** Python's regular setup runs as the native pipeline by default when
+  the installed `aiwaf-rust` has every native feature (0.2.9 or newer) and every
+  setting carries over exactly. In Django the regular classes in `MIDDLEWARE` run as one
+  native middleware at the place of the last of them; in Flask and FastAPI, `AIWAF(app)`
+  installs the native pipeline with the stages its plan would register. Request logs go
+  to `aiwaf_native_access.csv` in the regular log directory, which the Flask and FastAPI
+  trainers read, and a loaded aiwaf-rust model carries over. AIWAF logs a line when it
+  switches. `AIWAF_NATIVE_PIPELINE = False` (Django settings, Flask config, or the
+  environment variable) or `native_pipeline=False` (Flask and FastAPI `AIWAF`) keeps the
+  regular middleware. With aiwaf-rust 0.2.8 nothing switches.
+- Python's `aiwaf init` now prints the native setup for the detected framework, with the
+  conversion report for the project's settings and whether it switches automatically;
+  `--no-native` skips it. Django's native middleware now applies `AIWAF_SETTINGS`, the
+  legacy nested settings, before reading the flat ones, as the regular middleware does.
+  FastAPI's converter now carries `storage.data_dir` (`AIWAF_DATA_DIR`), and logs where
+  the trainer reads instead of reporting logging as changed.
+- Node.js's `aiwaf.native()` no longer rejects uploads. Unparsed bodies are handled as
+  in Python: multipart, binary and other bodies that aren't JSON, form or XML pass
+  through unread, so upload middleware after AIWAF gets the whole stream. An unparsed
+  JSON, form or XML body is read up to `max_bytes`, inspected and put back on the stream,
+  so AIWAF can be mounted before the app's body parsers. Previously any unparsed body
+  was refused with 413. This works with the published `aiwaf-wasm` 0.2.6.
+- Rust-owned pipelines can share rate limits across workers. Redis (or another shared
+  counter) records each request atomically and returns the window's count; aiwaf-rust and
+  aiwaf-wasm still decide throttle and flood from it, including path-rule limits. Python
+  takes `rate_backend: "redis"` with `rate_redis_url`, `"django_cache"` in Django, or
+  `rate_counter=` with `rate_backend: "counter"`. Node.js's `aiwaf.native()` takes
+  `rateCounter`, with `aiwaf.redisRateCounter(client)` for node-redis or ioredis, and
+  `rateFailureMode`. Both use the same script and keys. A failing counter answers 503, as
+  the regular limiter does. `from_settings` carries each framework's Redis rate settings and
+  Node's `cache` option over. It needs `aiwaf-rust` 0.2.9 and `aiwaf-wasm` 0.2.7; older
+  builds refuse a counter at startup, and `from_settings` keeps per-worker counts and says so.
+- Node.js's `aiwaf.native()` can use Node's regular stores instead of its own CSV files.
+  `stores: 'regular'` reads blocks, IP and path exemptions, learned keywords (past
+  `dynamicTopN`, as in the regular middleware) and blocked countries from the regular
+  blocklist, exemption, keyword and geo stores, from the database when configured, and
+  writes new blocks and learned keywords back. `stores` also takes any object with the six
+  store methods, sync or async. `from_settings` turns this on. Facts are read before the
+  engine decides, with keywords and countries cached for `storeCacheSeconds`; a failing
+  store read is reported and fails open, and writes run after the response. It needs
+  `aiwaf-wasm` 0.2.7. With 0.2.6, `stores` fails at startup and `from_settings` keeps the
+  native CSV files with a warning.
+- The Python Rust-owned pipeline can use the app's own stores instead of its CSV files.
+  `"store": "django"`, `"flask"` or `"fastapi"` uses that framework's regular stores, following
+  its storage settings, so blocks, exemptions and learned keywords are shared with the regular
+  middleware and its management commands. Through them Flask's `*.css`-style path exemptions
+  and FastAPI's private-range IP exemptions work natively too. `"from_settings"` turns this on.
+  Elsewhere `CSVPipeline(stores=...)` takes any object with the six store methods. The
+  adapter reads the facts a decision needs before it, caching keywords and countries for
+  `store_cache_seconds`, and writes the engine's blocks and keywords after it; the decision
+  itself stays in aiwaf-rust. It needs `aiwaf-rust` 0.2.9. With 0.2.8, `"from_settings"`
+  keeps the native CSV files and says so, and an explicit store fails at startup.
+- UUID checks in the Rust-owned pipelines match the regular middleware. Node.js's
+  `aiwaf.native()` takes `uuidResolver(uid, req)`, sync or async: a well-formed UUID under
+  `uuid_prefix` whose record doesn't exist is blocked with `uuid_not_found`, and a failing
+  resolver lets the request through. Django's native middleware now checks the route's
+  `uuid` URL parameter, as the regular UUID middleware does, instead of only `?uuid=`. The
+  Node.js settings converter carries `uuidResolver` and `uuidRoutePrefix` over. Both need
+  `aiwaf-rust` 0.2.9 and `aiwaf-wasm` 0.2.7; older builds refuse `uuidResolver` at startup,
+  and Django logs once that route UUIDs aren't checked.
+- The Rust-owned pipelines can start from the settings the regular middleware already
+  uses: `AIWAF_CSV_PIPELINE = "from_settings"` in Django, `NativeAIWAF(app, "from_settings")`
+  in Flask, `NativeAIWAFMiddleware(app, config="from_settings")` in FastAPI (from its
+  `AIWAFConfig`), and `aiwaf({ ..., AIWAF_NATIVE_PIPELINE: 'from_settings' })` in Node.js.
+  Settings are read with the regular middleware's own defaults, which differ from the
+  native ones in places (Django's login exemptions, Node's 60-second rate windows and
+  disabled header validation), and a startup report lists every setting that didn't carry
+  over exactly and why. `native_config()`, `native_config_fastapi()` and
+  `aiwaf.nativeOptionsFromSettings()` return the converted options and report on their own.
+- The Rust-owned request pipelines support `sql_mode: "monitor"`. SQL findings, including
+  over-size bodies, are logged without blocking, as in the regular middleware: on the
+  `aiwaf.payload` logger in Python, and as `{event: 'aiwaf.payload', rule, mode}` through
+  the new `logger` option in Node.js, where `inspectPayload` and `inspectBody` return `null`
+  for a monitored finding. It needs `aiwaf-rust` 0.2.9 and `aiwaf-wasm` 0.2.7; older
+  builds fail at startup with an upgrade message.
+- The Rust-owned request pipelines now support path rules and the route manifest. In
+  Python (`NativeAIWAF`, `NativeAIWAFMiddleware`, `AIWAF_CSV_PIPELINE`) the new adapter keys
+  are `path_rules`, `manifest_path` and `injection_risk_mode`; in Node.js (`aiwaf.native()`)
+  they're `pathRules`, `manifestPath` and `injectionRiskMode`. `DISABLE` turns stages off for
+  a prefix, `RATE_LIMIT` replaces the rate limits there, and the route-specific checks saved
+  by `init` now run in Python's native pipeline too, as they already did in Node's. Python's
+  native pipeline now reads `.aiwaf/paths.json` by default, as the regular middleware does,
+  so an existing manifest with saved risks turns those checks on. `RATE_LIMIT` and Python's
+  route checks need `aiwaf-rust` 0.2.9 and `aiwaf-wasm` 0.2.7; with the published
+  0.2.8 and 0.2.6 they fail at startup with an upgrade message, and everything else works.
 
 ## Python 1.1.9 / aiwaf-rust 0.2.8 / Node.js 1.1.6 / WASM 0.2.6 / Java 1.3.6 — prepared release
 
@@ -87,8 +190,8 @@
 - **Node.js requires `aiwaf-wasm` 0.2.6 for request checks.** The SQL check and route checks
   run in `aiwaf-wasm`, from the same Rust code as Python, with no JavaScript copy.
   `aiwaf-wasm` adds `sql_inspect`, `RouteRiskChecker`, `route_rule` and `sql_tokenizer`.
-  `package.json` keeps `^0.2.5` until 0.2.6 is published; bump it then. Tests and CI build
-  `aiwaf-wasm` from this repository with `scripts/build_wasm_from_source.py`.
+  Tests and CI build `aiwaf-wasm` from this repository with
+  `scripts/build_wasm_from_source.py`.
 - **Security:** SQL detection was measured against the OWASP Core Rule Set and libinjection
   test data, and the gaps found were closed. libinjection detection rose from 69.8% to
   94.9%, and its false-positive list from 9 to 1 flagged value. Payloads now caught include

@@ -4,7 +4,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Match
-from aiwaf.core.csv_pipeline import CSVPipeline, environ_headers, validate_fact_callback, fact_value
+from aiwaf.core.csv_pipeline import CSVPipeline, environ_headers, validate_fact_callback, fact_value, PipelineStores
 from aiwaf.core.request_context import resolve_ip_from_fastapi_request
 from .geoip import get_country_for_ip
 
@@ -30,12 +30,71 @@ def route_facts(router, scope):
     return None, exists, methods if exists else _ANY_METHOD
 
 
+class FastAPIStores(PipelineStores):
+    """The regular FastAPI middleware's stores, set up from its AIWAFConfig as it sets them up."""
+
+    def __init__(self, aiwaf_config=None):
+        from aiwaf.core.runtime_config import get_config
+        from aiwaf.core.runtime_storage import get_exemption_store, initialize_storage
+
+        config = aiwaf_config if aiwaf_config is not None else get_config()
+        initialize_storage(**config.get_storage_config())
+        exemptions = config.get("exemptions", {})
+        if exemptions.get("private_ips_exempted", True):
+            # The regular middleware exempts these private and local patterns at startup.
+            store = get_exemption_store()
+            for pattern in exemptions.get("auto_exempt_patterns", []):
+                store.add_pattern(pattern, "Auto-exempt private IPs")
+
+    def is_blocked(self, ip):
+        from aiwaf.core.runtime_blocklist import BlocklistManager
+
+        return BlocklistManager.is_blocked(ip)
+
+    def is_exempted(self, ip, path):
+        from aiwaf.core.runtime_storage import get_exemption_store
+
+        return bool(get_exemption_store().is_exempted(ip))
+
+    def top_keywords(self, n):
+        from aiwaf.core.runtime_storage import get_keyword_store
+
+        return get_keyword_store().get_top_keywords(n)
+
+    def blocked_countries(self):
+        from aiwaf.core.runtime_storage import get_geo_block_store
+
+        return list(get_geo_block_store().get_countries())
+
+    def block(self, ip, reason):
+        from aiwaf.core.runtime_blocklist import BlocklistManager
+
+        BlocklistManager.block(ip, reason)
+
+    def learn(self, keywords):
+        from aiwaf.core.runtime_storage import get_keyword_store
+
+        store = get_keyword_store()
+        for keyword in keywords:
+            store.add_keyword(keyword)
+
+
 class NativeAIWAFMiddleware:
-    def __init__(self, app, config=None, *, model=None, country_lookup=None, authenticated=None, honeypot_cache=None):
+    def __init__(self, app, config=None, *, model=None, country_lookup=None, authenticated=None, honeypot_cache=None,
+                 aiwaf_config=None):
+        """``config="from_settings"`` converts ``aiwaf_config``, or the AIWAFConfig the regular middleware uses."""
+        from aiwaf.core.native_settings import resolve
+
         validate_fact_callback(country_lookup)
         validate_fact_callback(authenticated)
         self.app = app
-        self.pipeline = CSVPipeline(config, model=model, honeypot_cache=honeypot_cache)
+        config = dict(resolve(config, "fastapi", aiwaf_config))
+        # "fastapi" reads and writes the regular middleware's stores instead of native CSV files.
+        store = config.pop("store", "csv")
+        if store not in ("csv", "fastapi"):
+            raise ValueError('The native "store" must be "csv" or "fastapi"')
+        self.pipeline = CSVPipeline(config, model=model, honeypot_cache=honeypot_cache,
+                                    stores=FastAPIStores(aiwaf_config) if store == "fastapi" else None)
         self.cache_io = self.pipeline.profile.get("honeypot_backend") == "cache"
         self.country_lookup = country_lookup
         self.authenticated = authenticated

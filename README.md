@@ -39,14 +39,14 @@ the supported Redis backends when sharing limits across workers.
 
 Each package is versioned and released independently.
 
-Python 1.1.9, Rust/Python 0.2.8, Node.js 1.1.6, WASM 0.2.6, and Java 1.3.6 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
+Python 1.2.0, Rust/Python 0.2.9, Node.js 1.2.0, WASM 0.2.7, and Java 1.3.6 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
 
 | Runtime | Package | Repository version | Primary use |
 | --- | --- | ---: | --- |
-| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.1.9` | Django, Flask, and FastAPI protection |
-| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.1.6` | Express and Node framework middleware |
-| Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.8` | Native Python acceleration and JSON model inference |
-| WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.6` | Rust detection and model primitives for JavaScript |
+| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.2.0` | Django, Flask, and FastAPI protection |
+| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.2.0` | Express and Node framework middleware |
+| Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.9` | Native Python acceleration and JSON model inference |
+| WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.7` | Rust detection and model primitives for JavaScript |
 | Java | `io.github.aiwaf-project:aiwaf-java` | `1.3.6` | Spring MVC and Jakarta Servlet protection |
 
 Supported framework integrations include Django, Flask, FastAPI, Express, Fastify, Hapi, Koa, NestJS, Next.js API routes, AdonisJS, Sails.js, Spring MVC, and Jakarta Servlet.
@@ -256,7 +256,7 @@ pip install "aiwaf[django]"
 pip install "aiwaf[flask]"
 pip install "aiwaf[fastapi]"
 
-# Backward-compatible alias; Python 1.1.9 already installs aiwaf-rust
+# Backward-compatible alias; Python 1.2.0 already installs aiwaf-rust
 pip install "aiwaf[rust]"
 
 # Node.js middleware
@@ -280,7 +280,7 @@ Java 1.3.6, after it is published to Maven Central:
 
 The Python package requires Python 3.10 or newer. Framework dependencies are optional, so install only the extra needed by the application.
 
-Python 1.1.9 requires `aiwaf-rust>=0.2.8`; the `rust` extra remains an installation
+Python 1.2.0 requires `aiwaf-rust>=0.2.9`; the `rust` extra remains an installation
 alias. Publish the matching Rust wheel with `NativeCSVPipeline` support before
 the Python release. The Rust release workflow builds Linux x86_64/aarch64,
 musl x86_64, macOS x86_64/arm64 and Windows x86_64 wheels and checks the native
@@ -332,12 +332,80 @@ MIDDLEWARE = [
 ```
 
 The configuration uses a dedicated lowercase profile; existing uppercase
-framework settings, `AIWAFConfig` dictionaries, PATH_RULES, manifests, custom
-stores and policy callbacks are not imported into it. Unknown keys are rejected.
+framework settings, `AIWAFConfig` dictionaries, custom stores and policy callbacks
+are not imported into it. Unknown keys are rejected. Path rules and the route
+manifest work as in the regular chain, through three adapter keys:
+
+- `path_rules`: the same rules as `AIWAF_PATH_RULES`. `DISABLE` turns stages off for
+  a prefix, and `RATE_LIMIT` (`WINDOW`, `MAX`, `FLOOD`) replaces the profile's rate
+  limits there. Invalid limits fail at startup.
+- `manifest_path`: default `.aiwaf/paths.json`. Its route rules are added after
+  `path_rules`, and the route-specific checks saved by `init` run on matching requests.
+- `injection_risk_mode`: `block` (default), `log` or `off`, defaulting to
+  `AIWAF_INJECTION_RISK_MODE`. A blocked request is logged with the matched rule.
 Route decorators for full/partial exemptions and required middleware are read
 once. Required decorators override decorator exemptions; profile-level path/IP
 exemptions remain global. The profile is immutable: construct a new engine and
 reload workers to change it.
+
+**The regular setup runs as the native pipeline by default** when the installed aiwaf-rust
+has every native feature (0.2.9 or newer) and every setting carries over exactly,
+so the report below lists no differences. Nothing in the app changes:
+- **Django:** the regular AIWAF classes in `MIDDLEWARE` run as one native middleware, at
+  the place of the last of them, so sessions and authentication have run before it. The
+  others step aside with `MiddlewareNotUsed`.
+- **Flask and FastAPI:** `AIWAF(app)` installs the native pipeline instead of the regular
+  middleware, with the same stages its plan would register.
+
+Request logs go to `aiwaf_native_access.csv` in the regular log directory, which the Flask
+and FastAPI trainers read. A model the regular middleware has loaded carries over if
+aiwaf-rust made it; an sklearn model, or a Flask model still held back for lack of logs,
+is a difference. AIWAF logs one line on the `aiwaf.native` logger when it switches. To keep
+the regular middleware, set `AIWAF_NATIVE_PIPELINE = False` in Django settings or Flask
+config, pass `native_pipeline=False` to Flask's or FastAPI's `AIWAF(...)`, or set the
+`AIWAF_NATIVE_PIPELINE=false` environment variable. `aiwaf init` says whether a project
+switches and, if not, why.
+
+To start from the settings the regular middleware already uses explicitly, pass
+`"from_settings"`: `NativeAIWAF(app, "from_settings")` in Flask,
+`AIWAF_CSV_PIPELINE = "from_settings"` in Django, or
+`app.add_middleware(NativeAIWAFMiddleware, config="from_settings")` in FastAPI, which
+converts the `AIWAFConfig` the regular middleware uses (or one passed as `aiwaf_config`). `{"from_settings": True, ...}` converts
+and then applies the other keys on top. The same `AIWAF_*` names are read with the same
+defaults, including Django's built-in login and admin exemptions and keyword list, and
+Django's stages follow the regular classes in `MIDDLEWARE`. At startup AIWAF logs, on the
+`aiwaf.native` logger, how many settings carried over unchanged and every one that didn't,
+with the reason: for example, Flask's `*.css`-style exemptions and IP ranges in
+`AIWAF_EXEMPT_IPS`, which the native pipeline can't match. It also uses the regular
+stores (below), so blocks, exemptions and keywords already stored carry over, and Flask's
+pattern exemptions and FastAPI's private-range exemptions keep working. FastAPI's header-only `exempt_paths` become path rules
+that turn off header validation alone, and its private-range auto-exemptions are reported
+because only exact addresses carry over. `aiwaf.core.native_settings.native_config()` and
+`native_config_fastapi()` return the same profile and report without starting anything.
+
+By default the native pipeline keeps its blocklist, exemptions, learned keywords and
+blocked countries in CSV files in `data_dir`. To use the stores the rest of the app
+already uses, set `"store"` in the native config: `"django"`, `"flask"` or `"fastapi"` use
+that framework's regular stores, following its storage settings (`AIWAF_STORAGE_MODE`,
+`AIWAF_USE_CSV` or `AIWAF_DATA_DIR`, or `AIWAFConfig`'s `storage`), so the native and regular
+middleware and the management commands share one blocklist. Flask's store also matches its
+`*.css`-style exemptions, and FastAPI's its private-range IP exemptions, which native
+profiles can't. `"from_settings"` turns this on when the installed aiwaf-rust supports it.
+Elsewhere, pass `stores=` to `CSVPipeline`. Before
+each decision AIWAF reads what that request's stages use: whether it's exempt, then, if
+not, whether the IP is blocked (IP/keyword and anomaly stages), the learned keywords
+(IP/keyword stage) and blocked countries (geo stage). A route whose path rules turn those
+stages off reads nothing. Answers are cached for `store_cache_seconds` (default 5):
+keywords and countries, and the blocklist and exemption answers per IP and path, up to
+10,000 of each. So a block or exemption made in another worker, the admin or the CLI can
+take that long to apply; blocks this worker makes apply at once. `store_cache_seconds: 0`
+reads the stores on every request. It then
+writes the blocks and keywords the decision produced back through the stores. The
+decision itself still runs in aiwaf-rust. A custom store is any object with
+`is_blocked(ip)`, `is_exempted(ip, path)`, `top_keywords(n)`, `blocked_countries()`,
+`block(ip, reason)` and `learn(keywords)`; `aiwaf.core.csv_pipeline.PipelineStores`
+documents them. Rate limits, honeypot timing, UUID scores and anomaly history stay in
+the engine.
 
 Common profile keys and defaults:
 
@@ -346,11 +414,12 @@ Common profile keys and defaults:
 | `enabled` | All eight names: `geo_block`, `ip_keyword_block`, `rate_limit`, `ai_anomaly`, `honeypot`, `uuid_tamper`, `header_validation`, `logging` |
 | `data_dir` | `aiwaf_data`; policy CSVs use the shared allowlist/blocklist/keyword/geo/path schemas |
 | `exempt_paths`, `exempt_ips` | `/health`, `/robots.txt`, `/sitemap.xml`; empty IP list. Paths are literal, case-insensitive prefixes, not globs. Stored path exemptions use the same literal-prefix rule |
-| `sql_mode`, `max_bytes` | `block`, `65536`; `off` supported, `monitor` rejected. Structured JSON/form bodies and nested escaped strings are inspected with bounded traversal |
+| `sql_mode`, `max_bytes` | `block`, `65536`; also `monitor`, which logs findings on the `aiwaf.payload` logger without blocking, and `off`. Structured JSON/form bodies and nested escaped strings are inspected with bounded traversal |
 | `learning`, `top_n` | `True`, `10`; presence keywords use a sorted, stable subset instead of Python set iteration order |
 | `static_keywords`, `legitimate_keywords`, `exempt_keywords`, `safe_prefixes` | Native policy defaults or explicit arrays; set route-specific safe vocabulary in the profile |
 | `geo_allow`, `geo_block` | Empty lists; includes stored blocked countries. Unknown country remains allowed |
-| `rate_backend`, `rate_key_mode` | `memory`, `ip_path`; `csv` shares buckets across workers; `ip` aggregates paths. Redis is rejected |
+| `rate_backend`, `rate_key_mode` | `memory`, `ip_path`; `csv` shares buckets across workers; `redis` and `django_cache` (Django) share counts through a cache, below; `ip` aggregates paths |
+| `rate_redis_url`, `rate_cache_namespace`, `rate_cache_alias` | Required for `rate_backend="redis"`; key prefix, default `aiwaf:native:rate:v1`; Django cache alias for `django_cache`, default `default` |
 | `rate_window`, `rate_max`, `rate_flood` | `10`, `20`, `40`; throttle at 429, flood at 403 with blocklist persistence |
 | `soft_block_blocklist`, `ip_blocking`, `block_duration` | `False`, `True`, reputation-based duration; explicit seconds or nonpositive permanent duration |
 | `honeypot_backend` | Django defaults to `django_cache`; Flask/FastAPI and direct construction default to `csv`. Optional `memory` is local to one engine; `redis` and `cache` delegate timestamp I/O while Rust enforces timing |
@@ -378,6 +447,22 @@ is not shared across workers and resets on restart. Backend switches do not
 transfer timestamps automatically. Keep `csv` for shared or persistent timing;
 CSV writes remain immediately synced. Blocklist, keyword, geo and allowlist
 policy files and immediate request logging keep their configured CSV behavior.
+
+### Shared native rate limits
+
+With `rate_backend: "memory"` each worker counts on its own, so N workers allow N times
+the limit. `rate_backend: "redis"` with `rate_redis_url` counts in Redis instead, with the
+regular limiter's atomic sliding-window script, and in Django `"django_cache"` counts in a
+Django cache (`rate_cache_alias`), as the regular rate limiter does. Only the count is
+shared: aiwaf-rust still applies `rate_max`, `rate_flood` and path-rule limits to it.
+`CSVPipeline(config, rate_counter=...)` with `rate_backend: "counter"` takes any object
+with a synchronous, atomic `count(key, now, window_seconds)` that records the request and
+returns the window's count. A failing counter answers 503, as the regular limiter does.
+`from_settings` carries this over: Django counts in its default cache, and Flask
+(`AIWAF_RATE_CACHE_BACKEND="redis"` with `AIWAF_REDIS_URL`) and FastAPI
+(`rate_limiting.cache_backend`, `rate_limiting.redis_url`) count in the same Redis. It
+needs `aiwaf-rust` 0.2.9 or newer; with 0.2.8 a counter fails at startup and `from_settings`
+reports that rate limits stay per worker.
 
 ### Flask and FastAPI native honeypot cache
 
@@ -585,6 +670,12 @@ aiwaf init --framework django --settings project.settings
 # Custom output
 aiwaf init --framework flask --app app:app --output .aiwaf/paths.json
 ```
+
+`aiwaf init` then prints how to run the native pipeline for that framework, the
+recommended setup for new installs, with the conversion report for the project's own
+settings: what carries over and what wouldn't. In a Django project already using the
+regular middleware, it says how to switch; nothing changes until you do. `--no-native`
+skips this part.
 
 Run the command in the same environment and checkout used to start the application. If it discovers only `/` and Flask's static route, verify the imported file and live route table:
 
@@ -990,22 +1081,91 @@ serializes the request envelope, emits responses, and appends the returned rows
 using cached file descriptors. Logging is immediate, not queued or batched.
 
 The dedicated lowercase `profile` rejects unknown keys. It does not import legacy
-settings, PATH_RULES/manifests, Redis, custom stores, UUID resolver callbacks or
-ORM state. Missing native support fails startup with no JavaScript policy fallback.
-Install this adapter instead of the existing chain, not alongside it. Bounded body
-parsers must run first; an unparsed body with a declared length/chunked encoding
-is rejected with 413 when inspection is enabled. Upload streams require another
-integration path. `countryLookup(req)`, `authenticated(req)` and `routeExists(req)`
+settings or Redis state on its own; see `from_settings` and `stores` below. Missing native support fails startup with no JavaScript policy fallback.
+Install this adapter instead of the existing chain, not alongside it. Body parsers
+can run before or after it. A parsed `req.body` is inspected as it is. An unparsed body
+is handled as in Python: uploads and other bodies that aren't JSON, form or XML
+(multipart, binary) pass through unread, so upload middleware such as multer still
+gets the whole stream. An unparsed JSON, form or XML body is read up to `max_bytes`,
+inspected, and put back on the stream for the parsers after it. A larger one is
+refused with 413 (`payload_inspection_limit`), or logged in monitor mode. A compressed
+or already-consumed inspectable body can't be read, and is refused with 413 as
+before. `uuidResolver(uid, req)`, as in the regular middleware, is asked
+whether the record named by a well-formed UUID under `uuid_prefix` exists. It can be
+async; only those requests wait for it, `false` blocks with `uuid_not_found`, and a
+failing resolver lets the request through. `countryLookup(req)`, `authenticated(req)` and `routeExists(req)`
 are optional synchronous fact callbacks; country defaults to unknown and route
 existence to `Boolean(req.route)`. Supply accurate facts when the firewall runs
 before Express resolves routes. Country headers are not implicitly trusted.
+
+**`aiwaf(options)` runs the native pipeline by default** when two things hold: the
+installed aiwaf-wasm is 0.2.7 or newer (it has every native feature), and every option
+carries over exactly, so the conversion report below lists no differences. Otherwise it
+runs the regular middleware, as before. It logs one line when it picks the native
+pipeline. To keep the regular middleware, set `AIWAF_NATIVE_PIPELINE: false` in the
+options or `AIWAF_NATIVE_PIPELINE=false` in the environment. A model saved by
+`aiwaf train` carries over; the sample model shipped in `resources/model.json` doesn't,
+since it's in the old format and only a sample. Another model in the old format, or one
+kept in the database or cache, is a difference, so those apps stay on the regular
+middleware. The client address is resolved as the regular middleware resolves it,
+through `AIWAF_TRUSTED_PROXIES` (the native adapter's `trustedProxies` option).
+
+To start from the options the regular middleware already takes explicitly, add
+`AIWAF_NATIVE_PIPELINE: 'from_settings'` to them, as in Python: `aiwaf({ MAX_REQ: 50, ...,
+AIWAF_NATIVE_PIPELINE: 'from_settings' })`. Options are read through the same
+normalization, defaults and environment variables, so the regular defaults (60-second
+windows, no static keywords, header validation off) carry over rather than the native
+ones. `{ fromSettings: true, dataDir, logger, profile: {...} }` also passes native options,
+and its `profile` keys win. The startup report has the same form as Python's: how many
+options carried over unchanged, then every one that didn't, with the reason, written to
+`logger.warn` (or `logger.info` when nothing differs). `aiwaf.nativeOptionsFromSettings(options)`
+returns the converted `config`, ready for `aiwaf.native()`, with its `report()`, `notes` and
+`differences()`, without starting anything.
+
+By default blocks and learned keywords stay in the adapter's own files (below). To share
+them with the regular middleware and its CLI, pass `stores: 'regular'`. The adapter
+then uses Node's regular blocklist, exemption, dynamic keyword and geo stores, from the
+database when one is configured or otherwise their CSV files. Their blocks apply,
+their IP and path exemptions keep logging only, a learned keyword applies once its count
+passes `dynamicTopN`, and blocked countries add to `geo_block`. `from_settings` turns
+this on, carrying `dynamicTopN` and `AIWAF_EXEMPTIONS_DB`. `stores` also takes any object
+with six methods, each sync or async:
+`isBlocked(ip)`, `isExempted(ip, path)`, `topKeywords(limit)`, `blockedCountries()`,
+`block(ip, reason, expiresAt)` and `learn(keyword)`. The adapter reads them before the
+engine decides, only for the stages the request runs, and keywords, countries and the
+blocklist and exemption answers are cached for `storeCacheSeconds` (default 5), so a block
+or exemption made elsewhere can take that long to apply; this worker's own blocks apply at
+once. A failed read goes to `onError` and counts as not blocked, not exempt and nothing
+learned. Blocks and keywords are written after the response, so a block applies from
+the client's next request once the write lands. The decision itself stays in aiwaf-wasm.
+Stores need `aiwaf-wasm` 0.2.7 or newer. With an older build, `stores` fails at startup, and
+`from_settings` (which adds `storesFallback: 'csv'`) keeps the adapter's own files and
+warns.
+
+Rate limits are counted in each worker unless `rateCounter` is set. `aiwaf.redisRateCounter(client)`
+takes a node-redis v4 or ioredis client and counts in Redis atomically, with the same
+script and key format as Python's native Redis backend, so every worker shares one
+limit. Any object with `count(key, now, windowSeconds)`, sync or async, also works. The
+count is read before the engine decides, and the engine still applies the profile's and
+path rules' limits to it; exempt requests aren't counted. A failing counter answers 503,
+or lets the request through with `rateFailureMode: 'open'`. `from_settings` uses the
+regular middleware's `cache` option when it's a Redis client, and carries
+`AIWAF_RATE_CACHE_FAILURE_MODE`; with an older aiwaf-wasm it counts per worker and warns.
+
+Path rules and the route manifest work as in the regular middleware, through three
+adapter options. `pathRules` takes the same rules as `AIWAF_PATH_RULES`: `DISABLE`
+turns stages off for a prefix, and `RATE_LIMIT` replaces the profile's rate limits
+there, with invalid limits failing at startup. `manifestPath` (default
+`AIWAF_PATH_MANIFEST`, then `.aiwaf/paths.json`) adds the manifest's route rules and
+the route-specific checks saved by `init`. `injectionRiskMode` is `block` (default),
+`log` or `off`, defaulting to `AIWAF_INJECTION_RISK_MODE`.
 
 All eight stages are enabled by default. Native defaults include:
 
 | Profile setting | Default / scope |
 | --- | --- |
 | `exempt_paths`, `exempt_ips` | `/health`, `/robots.txt`, `/sitemap.xml`; no IPs; literal case-insensitive path prefixes |
-| `sql_mode`, `max_bytes` | `block`, `65536`; `off` supported, monitor rejected; bounded nested JSON/form values and double URL decoding |
+| `sql_mode`, `max_bytes` | `block`, `65536`; also `monitor`, which logs `{event: 'aiwaf.payload', rule, mode}` through the `logger` option (default `console`) without blocking, and `off`; bounded nested JSON/form values and double URL decoding |
 | `static_keywords`, `dynamic_keywords`, `legitimate_keywords`, `learning` | Native vocabulary, empty dynamic set, legitimate exact route names, `true`; learned probe segments capped at 4096 |
 | `geo_allow`, `geo_block`, `blocklist` | Empty; blocklist maps IP to Unix expiry seconds (`0` permanent) |
 | `rate_window`, `rate_max`, `rate_flood`, `rate_key_mode` | `10` seconds, `20`, `40`, `ip_path`; `ip` also supported |
@@ -1015,8 +1175,8 @@ All eight stages are enabled by default. Native defaults include:
 | `anomaly_window`, `max_history`, `max_clients`, `max_pending` | `60` seconds, `1000`, `100000`, `10000`; periodic cleanup and bounded state |
 | `block_duration` | `86400` seconds for newly generated blocks |
 
-Rate counters, honeypot timestamps, UUID scores, anomaly history and loaded policy
-snapshots are local to each engine/worker and reset on restart. Blocks and learned
+Rate counters (without `rateCounter`), honeypot timestamps, UUID scores, anomaly history and loaded policy
+snapshots are local to each engine/worker and reset on restart. Without `stores`, blocks and learned
 keywords append to dedicated `native_blocks.csv`/`native_keywords.csv`, synced
 immediately, and replay at startup (`persistBlocks: false` disables this disk
 history). Policy files are **not live synchronized across workers**; do not share
@@ -1506,10 +1666,10 @@ Release versions and tags must match the relevant manifest.
 
 | Package | Manifest | Tag | Workflow |
 | --- | --- | --- | --- |
-| Python `aiwaf` | `pyproject.toml` | `python-v1.1.9` | `python-publish.yml` |
-| npm `aiwaf` | `js/package.json` | `js-v1.1.6` | `npm-publish.yml` |
-| PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.8` | `rust-publish.yml` |
-| npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.6` | `wasm-publish.yml` |
+| Python `aiwaf` | `pyproject.toml` | `python-v1.2.0` | `python-publish.yml` |
+| npm `aiwaf` | `js/package.json` | `js-v1.2.0` | `npm-publish.yml` |
+| PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.9` | `rust-publish.yml` |
+| npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.7` | `wasm-publish.yml` |
 | Maven `aiwaf-java` | `java/pom.xml` | `java-v1.3.6` | `java-publish.yml` |
 
 Python and Rust publish to PyPI with trusted publishing. The npm workflows use npm trusted publishing and stage packages for approval. Configure the trusted publisher with organization `aiwaf-project`, repository `aiwaf`, the exact workflow filename, and the environment used by that workflow.
@@ -1518,12 +1678,14 @@ Java publishing uses the protected `maven-publish` environment plus `GPG_PRIVATE
 
 Registry releases are immutable. Increment the relevant manifest version before publishing another release.
 
-For this release, publish `aiwaf-rust 0.2.8` before Python `aiwaf 1.1.9`, and
-`aiwaf-wasm 0.2.6` before npm `aiwaf 1.1.6`. npm `aiwaf` 1.1.6 needs `aiwaf-wasm`
-0.2.6, but its dependency and lockfile still name 0.2.5 so that `npm ci` keeps
-working until 0.2.6 is published. After WASM publication, run
-`npm install aiwaf-wasm@^0.2.6` in `js/` to update both, commit that, run `npm ci`
-and the release checks, and only then publish npm `aiwaf`.
+For this release, publish `aiwaf-rust 0.2.9` before Python `aiwaf 1.2.0`, and
+`aiwaf-wasm 0.2.7` before npm `aiwaf 1.2.0`. Python `aiwaf` 1.2.0 requires
+`aiwaf-rust>=0.2.9`, so its CI installs need 0.2.9 published first. npm `aiwaf` 1.2.0
+needs `aiwaf-wasm` 0.2.7, but its dependency and lockfile still name 0.2.6 so that
+`npm ci` keeps working until 0.2.7 is published. After WASM publication, run
+`npm install aiwaf-wasm@^0.2.7` in `js/` to update both, commit that, run `npm ci`
+and the release checks, and only then publish npm `aiwaf`. Java has no changes since
+1.3.6, which is already published.
 
 ## Security and limitations
 

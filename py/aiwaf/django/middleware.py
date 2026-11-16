@@ -43,6 +43,7 @@ from .utils import (
 )
 from .storage import get_keyword_store
 from .settings_compat import apply_legacy_settings
+from .native_default import NativeDefault
 from .model_store import load_model_data, _normalize_storage_mode
 from ..core.rust_backend import (
     rust_available,
@@ -291,7 +292,7 @@ def _get_blocklist_extended_info(request):
     setattr(request, cache_attr, info)
     return info
 
-class IPAndKeywordBlockMiddleware:
+class IPAndKeywordBlockMiddleware(NativeDefault):
     def __init__(self, get_response):
         from aiwaf.core.sql_injection import SQLInjectionPolicy
         self.sql_policy = SQLInjectionPolicy(getattr(settings, "AIWAF_SQL_INJECTION_MODE", None), getattr(settings, "AIWAF_PAYLOAD_MAX_BYTES", None))
@@ -590,7 +591,7 @@ class IPAndKeywordBlockMiddleware:
 
 _DEFAULT_ENGINE_CONTEXT = IPAndKeywordBlockMiddleware._is_malicious_context
 
-class RateLimitMiddleware:
+class RateLimitMiddleware(NativeDefault):
     def __init__(self, get_response):
         self.get_response = get_response
         # Make rate limiting configurable via Django settings
@@ -661,7 +662,7 @@ class RateLimitMiddleware:
         return self.get_response(request)
 
 
-class GeoBlockMiddleware(MiddlewareMixin):
+class GeoBlockMiddleware(NativeDefault, MiddlewareMixin):
     def __init__(self, get_response=None):
         super().__init__(get_response)
         self.enabled = getattr(settings, "AIWAF_GEO_BLOCK_ENABLED", False)
@@ -728,7 +729,7 @@ class GeoBlockMiddleware(MiddlewareMixin):
         return None
 
 
-class AIAnomalyMiddleware(MiddlewareMixin):
+class AIAnomalyMiddleware(NativeDefault, MiddlewareMixin):
     WINDOW = getattr(settings, "AIWAF_WINDOW_SECONDS", 60)
     TOP_N  = getattr(settings, "AIWAF_DYNAMIC_TOP_N", 10)
 
@@ -975,7 +976,7 @@ class AIAnomalyMiddleware(MiddlewareMixin):
         return response
 
 
-class HoneypotTimingMiddleware(MiddlewareMixin):
+class HoneypotTimingMiddleware(NativeDefault, MiddlewareMixin):
     MIN_FORM_TIME = getattr(settings, "AIWAF_MIN_FORM_TIME", 1.0)  # seconds
     MAX_PAGE_TIME = getattr(settings, "AIWAF_MAX_PAGE_TIME", 240)  # 4 minutes default
 
@@ -1174,7 +1175,7 @@ class HoneypotTimingMiddleware(MiddlewareMixin):
         return None
 
 
-class UUIDTamperMiddleware(MiddlewareMixin):
+class UUIDTamperMiddleware(NativeDefault, MiddlewareMixin):
     def _score_config(self):
         return {
             "enabled": bool(getattr(settings, "AIWAF_UUID_SCORE_ENABLED", True)),
@@ -1245,7 +1246,7 @@ class UUIDTamperMiddleware(MiddlewareMixin):
         return response
 
 
-class HeaderValidationMiddleware(MiddlewareMixin):
+class HeaderValidationMiddleware(NativeDefault, MiddlewareMixin):
     """
     Validates HTTP headers to detect bots and malicious requests
     """

@@ -17,14 +17,22 @@ pub fn policy_rate(
         .collect();
     trimmed.push(now);
     let count = trimmed.len();
-    let action = if count as i64 > flood {
+    (
+        rate_action(count, max_requests, flood).to_owned(),
+        count,
+        trimmed,
+    )
+}
+
+/// The rate decision for a window that holds `count` requests, this one included.
+pub fn rate_action(count: usize, max_requests: i64, flood: i64) -> &'static str {
+    if count as i64 > flood {
         "flood_block"
     } else if count as i64 > max_requests {
         "throttle"
     } else {
         "allow"
-    };
-    (action.to_owned(), count, trimmed)
+    }
 }
 
 #[pyfunction]

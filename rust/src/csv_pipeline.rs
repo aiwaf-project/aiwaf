@@ -99,6 +99,9 @@ struct Profile {
     anomaly_keywords: Vec<String>,
     log_path: String,
     log_fsync: bool,
+    /// "csv" keeps the blocklist, exemptions, keywords and countries in data_dir. "host" takes them
+    /// as request facts and returns blocks and learned keywords as effects for the host's stores.
+    policy_store: String,
 }
 
 impl Default for Profile {
@@ -221,6 +224,7 @@ impl Default for Profile {
             .to_vec(),
             log_path: String::new(),
             log_fsync: false,
+            policy_store: "csv".into(),
         }
     }
 }
@@ -244,6 +248,17 @@ struct Facts {
     uuid: Option<String>,
     exempt: bool,
     query: String,
+    /// The rule a route-specific check matched, found by the adapter with the shared checker.
+    route_rule: Option<String>,
+    /// Rate window, limit and flood threshold for this path, after any path-rule override.
+    rate: (f64, i64, i64),
+    /// With policy_store "host": whether the host's blocklist has this IP, its learned keywords
+    /// and its blocked countries.
+    blocked: Option<bool>,
+    dynamic_keywords: Option<Vec<String>>,
+    geo_countries: Option<HashSet<String>>,
+    /// Writes for the host's stores, shared with the request context.
+    effects: Arc<Mutex<Vec<(String, Vec<String>)>>>,
 }
 #[pyclass]
 pub struct NativePipelineRequest {
@@ -253,6 +268,24 @@ pub struct NativePipelineRequest {
     reason: String,
     finished: AtomicBool,
     started: std::time::Instant,
+    /// A SQL finding allowed through because sql_mode is "monitor", for the adapter to log.
+    sql_monitor: Option<String>,
+}
+
+#[pymethods]
+impl NativePipelineRequest {
+    #[getter]
+    fn sql_monitor(&self) -> Option<String> {
+        self.sql_monitor.clone()
+    }
+
+    /// With policy_store "host": the blocks and learned keywords to write, as ("block", [ip, reason])
+    /// and ("keywords", [...]). Each call returns what's new since the last one.
+    fn take_effects(&self) -> PyResult<Vec<(String, Vec<String>)>> {
+        Ok(std::mem::take(
+            &mut *self.facts.effects.lock().map_err(err)?,
+        ))
+    }
 }
 #[derive(Default)]
 struct State {
@@ -261,6 +294,8 @@ struct State {
     uuid: HashMap<String, Vec<(f64, i64)>>,
     histories: HashMap<String, Vec<(RecentEntryInput, f64)>>,
     cleanup_at: f64,
+    /// The largest rate window used so far, so overrides with longer windows aren't pruned early.
+    rate_window: f64,
     model: Option<Arc<IsolationForest>>,
 }
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -271,9 +306,43 @@ pub struct NativeCSVPipeline {
     id: u64,
     processed: AtomicU64,
     honeypot_cache: Option<PyObject>,
+    /// With rate_backend "counter": shared window counts, such as Redis, from the adapter.
+    rate_counter: Option<PyObject>,
 }
 
 impl NativeCSVPipeline {
+    fn host(&self) -> bool {
+        self.profile.policy_store == "host"
+    }
+    fn effect(&self, f: &Facts, kind: &str, values: Vec<String>) -> PyResult<()> {
+        f.effects.lock().map_err(err)?.push((kind.into(), values));
+        Ok(())
+    }
+    fn is_blocklisted(&self, py: Python<'_>, f: &Facts) -> PyResult<bool> {
+        if self.host() {
+            return Ok(f.blocked.unwrap_or(false));
+        }
+        csv::csv_blocklist_check(
+            py,
+            self.file("blacklist.csv"),
+            strings(&BLOCKLIST_HEADERS),
+            f.ip.clone(),
+            f.now,
+        )
+    }
+    fn learn(&self, py: Python<'_>, f: &Facts, keywords: Vec<String>) -> PyResult<()> {
+        if self.host() {
+            return self.effect(f, "keywords", keywords);
+        }
+        csv::csv_keywords_update(
+            py,
+            self.file("keywords.csv"),
+            f.date.clone(),
+            keywords,
+            HashSet::new(),
+        )?;
+        Ok(())
+    }
     fn cached_honeypot_time(&self, py: Python<'_>, ip: &str, now: f64) -> PyResult<Option<f64>> {
         let cache = self
             .honeypot_cache
@@ -297,6 +366,9 @@ impl NativeCSVPipeline {
             .into_owned()
     }
     fn blocklist(&self, py: Python<'_>, f: &Facts, reason: &str) -> PyResult<()> {
+        if self.profile.ip_blocking && !f.exempt && self.host() {
+            return self.effect(f, "block", vec![f.ip.clone(), reason.into()]);
+        }
         if self.profile.ip_blocking && !f.exempt {
             csv::csv_blocklist_block(
                 py,
@@ -314,11 +386,16 @@ impl NativeCSVPipeline {
     }
     fn exempt(&self, py: Python<'_>, ip: &str, path: &str) -> PyResult<bool> {
         if self.profile.exempt_ips.contains(ip)
-            || csv::csv_contains(py, self.file("whitelist.csv"), "ip".into(), ip.into(), true)?
+            || (!self.host()
+                && csv::csv_contains(py, self.file("whitelist.csv"), "ip".into(), ip.into(), true)?)
         {
             return Ok(true);
         }
-        let paths = csv::csv_read_set(py, self.file("path_exemptions.csv"), "path".into(), true)?;
+        let paths = if self.host() {
+            HashSet::new()
+        } else {
+            csv::csv_read_set(py, self.file("path_exemptions.csv"), "path".into(), true)?
+        };
         Ok(self
             .profile
             .exempt_paths
@@ -353,6 +430,7 @@ impl NativeCSVPipeline {
         accepts_post: bool,
         accepts_method: bool,
         authenticated: bool,
+        monitored: &mut Option<String>,
     ) -> PyResult<(i32, Value, String)> {
         let p = &self.profile;
         let block = |reason: String, status: i32, message: Option<String>| -> PyResult<_> {
@@ -364,32 +442,32 @@ impl NativeCSVPipeline {
         };
         if f.active.contains("geo_block") {
             let country = f.headers.get("AIWAF_COUNTRY").cloned().unwrap_or_default();
-            let decision = csv::csv_geo_policy(
-                py,
-                self.file("geo_blocked_countries.csv"),
-                country,
-                p.geo_allow.clone(),
-                p.geo_block.clone(),
-            )?;
+            let decision = if self.host() {
+                let dynamic = f.geo_countries.clone().unwrap_or_default();
+                policy::policy_geo(country, p.geo_allow.clone(), p.geo_block.clone(), dynamic)
+            } else {
+                csv::csv_geo_policy(
+                    py,
+                    self.file("geo_blocked_countries.csv"),
+                    country,
+                    p.geo_allow.clone(),
+                    p.geo_block.clone(),
+                )?
+            };
             if decision.0 {
                 return block(decision.2, 403, None);
             }
         }
         if f.active.contains("ip_keyword_block") {
-            if p.ip_blocking
-                && csv::csv_blocklist_check(
-                    py,
-                    self.file("blacklist.csv"),
-                    strings(&BLOCKLIST_HEADERS),
-                    f.ip.clone(),
-                    f.now,
-                )?
-            {
+            if p.ip_blocking && self.is_blocklisted(py, f)? {
                 return Ok((
                     403,
                     json!({"error":"blocked"}),
                     format!("IP blocklisted: {}", f.ip),
                 ));
+            }
+            if let Some(rule) = &f.route_rule {
+                return Ok((403, json!({"error":rule}), rule.clone()));
             }
             if p.sql_mode != "off" {
                 if let Some((rule, status)) = py.allow_threads(|| {
@@ -401,15 +479,21 @@ impl NativeCSVPipeline {
                         .or_else(|| aiwaf_core::payload::inspect_sql_path(&f.path, p.max_bytes))
                     })
                 }) {
-                    return Ok((status, json!({"error":rule}), rule));
+                    if p.sql_mode == "monitor" {
+                        *monitored = Some(rule);
+                    } else {
+                        return Ok((status, json!({"error":rule}), rule));
+                    }
                 }
             }
-            let mut dynamic = if p.learning {
+            let mut dynamic = if !p.learning {
+                vec![]
+            } else if self.host() {
+                f.dynamic_keywords.clone().unwrap_or_default()
+            } else {
                 csv::csv_read_set(py, self.file("keywords.csv"), "keyword".into(), true)?
                     .into_iter()
                     .collect::<Vec<_>>()
-            } else {
-                vec![]
             };
             // A stable subset replaces the old process-dependent Python set order.
             dynamic.sort();
@@ -436,13 +520,7 @@ impl NativeCSVPipeline {
                 p.static_keywords.clone(),
             );
             if p.learning && !decision.1.is_empty() {
-                csv::csv_keywords_update(
-                    py,
-                    self.file("keywords.csv"),
-                    f.date.clone(),
-                    decision.1,
-                    HashSet::new(),
-                )?;
+                self.learn(py, f, decision.1)?;
             }
             if let Some(reason) = decision.0 {
                 return block(reason, 403, None);
@@ -454,15 +532,33 @@ impl NativeCSVPipeline {
             } else {
                 format!("ratelimit:{}:{}", f.ip, f.path)
             };
-            let action = if p.rate_backend == "csv" {
+            let action = if p.rate_backend == "counter" {
+                // The counter records this request atomically and returns the window's count;
+                // the decision stays here.
+                let counted = self.rate_counter.as_ref().unwrap().call_method1(
+                    py,
+                    "count",
+                    (key, f.now, f.rate.0.max(1.0)),
+                );
+                match counted.and_then(|v| v.extract::<usize>(py)) {
+                    Ok(count) => policy::rate_action(count, f.rate.1, f.rate.2).to_owned(),
+                    Err(_) => {
+                        return Ok((
+                            503,
+                            json!({"error":"temporarily_unavailable"}),
+                            "Rate cache unavailable".into(),
+                        ));
+                    }
+                }
+            } else if p.rate_backend == "csv" {
                 match csv::csv_rate_consume(
                     py,
                     self.file("rate_buckets.csv"),
                     key,
                     f.now,
-                    p.rate_window,
-                    p.rate_max,
-                    p.rate_flood,
+                    f.rate.0,
+                    f.rate.1,
+                    f.rate.2,
                 ) {
                     Ok(d) => d.0,
                     Err(_) => {
@@ -477,8 +573,7 @@ impl NativeCSVPipeline {
                 py.allow_threads(|| -> PyResult<_> {
                     let mut state = self.state.lock().map_err(err)?;
                     let old = state.rates.remove(&key).unwrap_or_default();
-                    let d =
-                        policy::policy_rate(old, f.now, p.rate_window, p.rate_max, p.rate_flood);
+                    let d = policy::policy_rate(old, f.now, f.rate.0, f.rate.1, f.rate.2);
                     state.rates.insert(key, d.2);
                     Ok(d.0)
                 })?
@@ -497,16 +592,7 @@ impl NativeCSVPipeline {
                 ));
             }
         }
-        if f.active.contains("ai_anomaly")
-            && p.ip_blocking
-            && csv::csv_blocklist_check(
-                py,
-                self.file("blacklist.csv"),
-                strings(&BLOCKLIST_HEADERS),
-                f.ip.clone(),
-                f.now,
-            )?
-        {
+        if f.active.contains("ai_anomaly") && p.ip_blocking && self.is_blocklisted(py, f)? {
             return Ok((403, json!({"error":"blocked"}), "IP blocklisted".into()));
         }
         if f.active.contains("honeypot") && !(p.skip_authenticated && authenticated) {
@@ -677,18 +763,20 @@ impl NativeCSVPipeline {
 #[pymethods]
 impl NativeCSVPipeline {
     #[new]
-    #[pyo3(signature = (profile_json, honeypot_cache=None))]
+    #[pyo3(signature = (profile_json, honeypot_cache=None, rate_counter=None))]
     fn new(
         py: Python<'_>,
         profile_json: String,
         honeypot_cache: Option<PyObject>,
+        rate_counter: Option<PyObject>,
     ) -> PyResult<Self> {
         let mut p: Profile = serde_json::from_str(&profile_json)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         if p.data_dir.is_empty()
-            || !["block", "off"].contains(&p.sql_mode.as_str())
+            || !["block", "monitor", "off"].contains(&p.sql_mode.as_str())
+            || !["csv", "host"].contains(&p.policy_store.as_str())
             || !(1..=1048576).contains(&p.max_bytes)
-            || !["memory", "csv"].contains(&p.rate_backend.as_str())
+            || !["memory", "csv", "counter"].contains(&p.rate_backend.as_str())
             || !["memory", "csv", "django_cache", "cache"].contains(&p.honeypot_backend.as_str())
             || !["ip", "ip_path"].contains(&p.rate_key_mode.as_str())
             || p.enabled.iter().any(|s| !STAGES.contains(&s.as_str()))
@@ -725,6 +813,18 @@ impl NativeCSVPipeline {
                 "Cache adapter requires honeypot_backend=cache or django_cache",
             ));
         }
+        if p.rate_backend == "counter" {
+            let counter = rate_counter.as_ref().ok_or_else(|| {
+                PyValueError::new_err("rate_backend=counter requires a rate counter")
+            })?;
+            if !counter.bind(py).getattr("count")?.is_callable() {
+                return Err(PyValueError::new_err("Invalid rate counter"));
+            }
+        } else if rate_counter.is_some() {
+            return Err(PyValueError::new_err(
+                "A rate counter requires rate_backend=counter",
+            ));
+        }
         if p.exempt_paths
             .iter()
             .any(|s| s.contains('*') || s.contains('?') || s.contains('['))
@@ -751,6 +851,7 @@ impl NativeCSVPipeline {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             processed: AtomicU64::new(0),
             honeypot_cache,
+            rate_counter,
         };
         for (name, fields) in [
             ("whitelist.csv", strings(&["ip", "added_date"])),
@@ -771,6 +872,10 @@ impl NativeCSVPipeline {
             ("rate_buckets.csv", strings(&["key", "value", "expires_at"])),
         ] {
             if name == "pipeline_state.csv" && pipeline.profile.honeypot_backend != "csv" {
+                continue;
+            }
+            if pipeline.host() && !["pipeline_state.csv", "rate_buckets.csv"].contains(&name) {
+                // The host's stores hold the blocklist, exemptions, keywords and countries.
                 continue;
             }
             let path = pipeline.file(name);
@@ -796,6 +901,22 @@ impl NativeCSVPipeline {
         }
         Ok(pipeline)
     }
+    /// Whether this build supports an optional request fact. Adapters check before relying on one,
+    /// so they keep working with older published builds: "route_rule", "rate_overrides",
+    /// "sql_monitor", "uuid_fact" and "host_store".
+    #[staticmethod]
+    fn supports(feature: &str) -> bool {
+        [
+            "route_rule",
+            "rate_overrides",
+            "sql_monitor",
+            "uuid_fact",
+            "host_store",
+            "rate_counter",
+        ]
+        .contains(&feature)
+    }
+
     #[getter]
     fn processed_requests(&self) -> u64 {
         self.processed.load(Ordering::Relaxed)
@@ -857,7 +978,7 @@ impl NativeCSVPipeline {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (ip, path, method, headers, query, body, exists, accepts_get, accepts_post, accepts_method, authenticated, disabled, exempt, now, date, exhausted=false))]
+    #[pyo3(signature = (ip, path, method, headers, query, body, exists, accepts_get, accepts_post, accepts_method, authenticated, disabled, exempt, now, date, exhausted=false, route_rule=None, rate_window=None, rate_max=None, rate_flood=None, uuid=None, blocked=None, dynamic_keywords=None, geo_countries=None))]
     fn begin(
         &self,
         py: Python<'_>,
@@ -877,9 +998,25 @@ impl NativeCSVPipeline {
         now: f64,
         date: String,
         exhausted: bool,
+        route_rule: Option<String>,
+        rate_window: Option<f64>,
+        rate_max: Option<i64>,
+        rate_flood: Option<i64>,
+        uuid: Option<String>,
+        blocked: Option<bool>,
+        dynamic_keywords: Option<Vec<String>>,
+        geo_countries: Option<HashSet<String>>,
     ) -> PyResult<(NativePipelineRequest, i32, String)> {
         if !now.is_finite() {
             return Err(PyValueError::new_err("Request time must be finite"));
+        }
+        let rate = (
+            rate_window.unwrap_or(self.profile.rate_window),
+            rate_max.unwrap_or(self.profile.rate_max),
+            rate_flood.unwrap_or(self.profile.rate_flood),
+        );
+        if !rate.0.is_finite() || rate.0 < 1.0 || rate.1 < 0 || rate.2 < rate.1 {
+            return Err(PyValueError::new_err("Invalid path-rule rate limit"));
         }
         let started = std::time::Instant::now();
         let exempt = exempt || self.exempt(py, &ip, &path.to_lowercase())?;
@@ -890,10 +1027,13 @@ impl NativeCSVPipeline {
             .filter(|s| !disabled.contains(*s) && (!exempt || s.as_str() == "logging"))
             .cloned()
             .collect();
-        let uuid = query.split(|b| *b == b'&').find_map(|part| {
-            let mut pair = part.splitn(2, |b| *b == b'=');
-            (decode(pair.next().unwrap_or_default()) == "uuid")
-                .then(|| decode(pair.next().unwrap_or_default()))
+        // A route's UUID parameter, as Django routes carry it, or else the ?uuid= query parameter.
+        let uuid = uuid.or_else(|| {
+            query.split(|b| *b == b'&').find_map(|part| {
+                let mut pair = part.splitn(2, |b| *b == b'=');
+                (decode(pair.next().unwrap_or_default()) == "uuid")
+                    .then(|| decode(pair.next().unwrap_or_default()))
+            })
         });
         let f = Facts {
             ip,
@@ -907,14 +1047,27 @@ impl NativeCSVPipeline {
             uuid,
             exempt,
             query: String::from_utf8_lossy(&query).to_lowercase(),
+            route_rule: route_rule.filter(|rule| !rule.is_empty()),
+            rate,
+            blocked,
+            dynamic_keywords,
+            geo_countries: geo_countries.map(|set| {
+                set.into_iter()
+                    .map(|c| c.trim().to_uppercase())
+                    .filter(|c| !c.is_empty())
+                    .collect()
+            }),
+            effects: Arc::new(Mutex::new(Vec::new())),
         };
         // Bound state maps without evicting active subjects or changing thresholds.
         py.allow_threads(|| -> PyResult<()> {
             let mut state = self.state.lock().map_err(err)?;
+            state.rate_window = state.rate_window.max(rate.0).max(self.profile.rate_window);
             if now >= state.cleanup_at || now < state.cleanup_at - 30.0 {
-                state.rates.retain(|_, entries| {
-                    entries.iter().any(|t| now - t < self.profile.rate_window)
-                });
+                let window = state.rate_window;
+                state
+                    .rates
+                    .retain(|_, entries| entries.iter().any(|t| now - t < window));
                 state.honeypot.retain(|_, (_, expiry)| now <= *expiry);
                 state.uuid.retain(|_, entries| {
                     entries
@@ -930,6 +1083,7 @@ impl NativeCSVPipeline {
             }
             Ok(())
         })?;
+        let mut sql_monitor = None;
         let (status, payload, reason) = self.evaluate(
             py,
             &f,
@@ -940,6 +1094,7 @@ impl NativeCSVPipeline {
             accepts_post,
             accepts_method,
             authenticated,
+            &mut sql_monitor,
         )?;
         self.processed.fetch_add(1, Ordering::Relaxed);
         let ctx = NativePipelineRequest {
@@ -949,6 +1104,7 @@ impl NativeCSVPipeline {
             reason,
             finished: AtomicBool::new(false),
             started,
+            sql_monitor,
         };
         Ok((ctx, status, payload.to_string()))
     }
@@ -1102,13 +1258,7 @@ impl NativeCSVPipeline {
                         .map(str::to_owned)
                         .collect::<Vec<_>>();
                     if !learned.is_empty() {
-                        csv::csv_keywords_update(
-                            py,
-                            self.file("keywords.csv"),
-                            f.date.clone(),
-                            learned,
-                            HashSet::new(),
-                        )?;
+                        self.learn(py, &f, learned)?;
                     }
                 }
             }

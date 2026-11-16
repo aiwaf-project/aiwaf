@@ -58,3 +58,28 @@ def _consume_django_rate_limit(cache, key, **options):
                 continue
             except RedisError:
                 raise RateCacheUnavailable('Rate cache unavailable') from None
+
+
+class DjangoRateCounter:
+    """Native rate counts in a Django cache, updated as the regular rate limiter updates them.
+
+    Shared across workers when the cache is (Redis, Memcached, database); LocMemCache counts
+    per process, as it does for the regular middleware.
+    """
+
+    def __init__(self, alias="default", *, namespace="aiwaf:native:rate:v1"):
+        from django.core.cache import caches
+        from django.core.exceptions import ImproperlyConfigured
+
+        if not isinstance(alias, str) or not alias.strip() or alias not in caches:
+            raise ImproperlyConfigured("rate_cache_alias must name a configured Django cache")
+        self.alias = alias
+        self.namespace = namespace
+
+    def count(self, key, now, window_seconds):
+        from django.core.cache import caches
+        from ..core.rate_counter import bounded_key
+
+        decision = consume_django_rate_limit(caches[self.alias], bounded_key(self.namespace, key), now=now,
+                                             window_seconds=window_seconds, max_requests=0, flood_threshold=0)
+        return int(decision.count)

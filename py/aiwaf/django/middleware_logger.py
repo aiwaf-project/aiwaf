@@ -10,6 +10,7 @@ from django.utils.deprecation import MiddlewareMixin
 from django.utils import timezone
 from .utils import get_ip
 from ..core.request_context import extract_logging_context_from_django_request
+from .native_default import NativeDefault
 
 # Defer model imports to avoid AppRegistryNotReady during Django app loading
 RequestLog = None
@@ -31,7 +32,7 @@ def _import_models():
         # Keep models as None if can't import
         pass
 
-class AIWAFLoggerMiddleware(MiddlewareMixin):
+class AIWAFLoggerMiddleware(NativeDefault, MiddlewareMixin):
     """
     Middleware that logs requests to Django models for AI-WAF training.
     Acts as a fallback when main access logs are unavailable.

@@ -68,3 +68,39 @@ def test_native_fastapi_logs_handler_errors(tmp_path):
         assert client.get('/boom').status_code == 500
     with (tmp_path / 'requests.csv').open(newline='') as file:
         assert list(csv.DictReader(file))[-1]['status_code'] == '500'
+
+
+_rust = __import__("aiwaf_rust")
+needs_host_store = pytest.mark.skipif(
+    not getattr(getattr(_rust, "NativeCSVPipeline", None), "supports", None)
+    or not _rust.NativeCSVPipeline.supports("host_store"), reason="aiwaf-rust without host stores")
+
+
+@needs_host_store
+def test_native_fastapi_uses_the_regular_stores(tmp_path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from aiwaf.core.runtime_blocklist import BlocklistManager
+    from aiwaf.core.runtime_config import AIWAFConfig
+    from aiwaf.fast.csv_pipeline import NativeAIWAFMiddleware
+
+    app = FastAPI()
+    app.add_api_route('/page', lambda: {'ok': True})
+    config = AIWAFConfig(load_from_env=False)
+    app.add_middleware(NativeAIWAFMiddleware, config={'data_dir': str(tmp_path / 'native'), 'store': 'fastapi',
+                       'exempt_paths': [], 'enabled': ['ip_keyword_block', 'geo_block', 'ai_anomaly'],
+                       'manifest_path': str(tmp_path / 'none.json')},
+                       aiwaf_config=config)
+    client = lambda ip: TestClient(app, client=(ip, 50000))
+    # Starlette builds the middleware, and so sets up the stores, on the first request.
+    assert client('203.0.113.89').get('/page').status_code == 200
+    BlocklistManager.block('203.0.113.90', 'stored block')
+    assert client('203.0.113.90').get('/page').status_code == 403
+    assert client('203.0.113.91').get('/wp-admin/shell.php').status_code == 403
+    assert BlocklistManager.is_blocked('203.0.113.91')
+    # The regular private-range exemptions apply again, through the exemption store.
+    assert client('10.0.0.5').get('/wp-admin/shell.php').status_code == 404
+    # Keywords learned natively are saved in the regular keyword store.
+    from aiwaf.core.runtime_storage import get_keyword_store
+    assert client('203.0.113.92').get('/old/phpmyadmin-panelx').status_code == 404
+    assert 'panelx' in get_keyword_store().get_top_keywords(50)

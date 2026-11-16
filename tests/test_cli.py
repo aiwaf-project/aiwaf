@@ -171,3 +171,49 @@ def test_init_saves_injection_checks_unless_asked_not_to(monkeypatch, tmp_path, 
         assert routes["/search"]["injection_risks"] == [{"confidence": "high", "input": "q", "sink": "sql"}]
         assert "injection_risks" not in routes["/health"]
         assert "Injection checks: 1 routes from 1 files" in output
+
+
+@pytest.mark.parametrize("framework, snippet", [("flask", 'NativeAIWAF(app, "from_settings")'),
+                                                ("fastapi", 'config="from_settings"')])
+def test_init_prints_the_native_setup_unless_asked_not_to(monkeypatch, tmp_path, capsys, framework, snippet):
+    pytest.importorskip(framework)
+    _drop_app_module()
+    monkeypatch.chdir(tmp_path)
+    source = ("from flask import Flask\napp = Flask(__name__)\napp.config['AIWAF_RATE_MAX'] = 7\n" if framework == "flask"
+              else "from fastapi import FastAPI\napp = FastAPI()\n")
+    (tmp_path / "app.py").write_text(source, encoding="utf-8")
+
+    _handle_init(["--framework", framework, "--app", "app:app"])
+    output = capsys.readouterr().out
+    assert "Native pipeline (recommended for new installs)" in output and snippet in output
+    assert "Native pipeline settings:" in output
+    if framework == "flask":
+        assert "AIWAF_RATE_MAX:" not in output  # Carried over, so not listed as a difference.
+
+    _drop_app_module()
+    _handle_init(["--framework", framework, "--app", "app:app", "--no-native"])
+    assert "Native pipeline" not in capsys.readouterr().out
+
+
+def test_native_setup_tells_an_existing_django_install_how_to_switch(monkeypatch):
+    from aiwaf.core import native_settings
+    from aiwaf.core.native_settings import describe_native_setup, native_config
+
+    regular = ["aiwaf.django.middleware.IPAndKeywordBlockMiddleware"]
+    text = describe_native_setup(native_config({}, "django", middleware=regular, environ={}), "django", middleware=regular)
+    assert "uses the regular middleware, which keeps working" in text or "runs as the native pipeline automatically" in text
+    assert "aiwaf.django.csv_pipeline.NativeAIWAFMiddleware" in text and 'AIWAF_CSV_PIPELINE = "from_settings"' in text
+    monkeypatch.setattr(native_settings, "_engine_supports", lambda feature: False)
+    new = describe_native_setup(native_config({}, "django", middleware=[], environ={}), "fast", middleware=[])
+    assert "regular middleware" not in new and "pip install -U aiwaf-rust" in new
+    assert 'config="from_settings"' in new
+
+
+def test_native_setup_says_when_the_switch_is_automatic(monkeypatch):
+    from aiwaf.core import native_settings
+    from aiwaf.core.native_settings import NativeConversion, describe_native_setup
+
+    monkeypatch.setattr(native_settings, "_engine_supports", lambda feature: True)
+    monkeypatch.delenv("AIWAF_NATIVE_PIPELINE", raising=False)
+    text = describe_native_setup(NativeConversion(config={}), "flask")
+    assert "runs as the native pipeline automatically" in text and "AIWAF_NATIVE_PIPELINE = False" in text

@@ -29,6 +29,9 @@ function withMiddlewares(selection) {
 module.exports = createExpressMiddleware;
 // Await startup once; this path requires native support and has no JS policy fallback.
 module.exports.native = require('./lib/nativePipeline');
+// Native options built from regular aiwaf(options), with a report of what didn't carry over.
+module.exports.nativeOptionsFromSettings = require('./lib/nativeSettings').nativeOptionsFromSettings;
+module.exports.redisRateCounter = require('./lib/nativeRateCounter').redisRateCounter;
 module.exports.fastify = createFastifyPlugin;
 module.exports.hapi = createHapiPlugin;
 module.exports.koa = createKoaMiddleware;

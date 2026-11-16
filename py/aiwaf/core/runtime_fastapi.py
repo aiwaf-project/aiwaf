@@ -56,6 +56,7 @@ class AIWAF:
         config_file: Optional[str] = None,
         middlewares: Optional[List[str]] = None,
         disable_middlewares: Optional[List[str]] = None,
+        native_pipeline: Optional[bool] = None,
         **config_overrides
     ):
         """
@@ -82,6 +83,9 @@ class AIWAF:
         
         self._requested_middlewares = middlewares
         self._disabled_middlewares = disable_middlewares
+        # False keeps the regular middleware when the native pipeline would be the default.
+        self.native_pipeline = native_pipeline
+        self.native = False
 
         # Initialize middleware
         if app is not None:
@@ -154,6 +158,10 @@ class AIWAF:
             dynamic_block_countries=get_geo_block_store().get_countries(),
             has_uuid_routes=detect_uuid_routes_in_fastapi_app(self.app),
         )
+
+        self.native = self._native_default(enabled)
+        if self.native:
+            return
 
         # FastAPI executes middleware in reverse registration order.
         # Register in inverse of Django-equivalent chain:
@@ -259,6 +267,38 @@ class AIWAF:
                 use_rust=bool(self.config.get('AIWAF_USE_RUST', True) and self.config.get('AIWAF_RUST_CSV', True)),
             )
     
+    def _native_default(self, enabled) -> bool:
+        """Run the native pipeline instead, when it can run these exact settings."""
+        from aiwaf.core.native_settings import (log_native_default, native_access_log, native_by_default,
+                                                native_config_fastapi)
+
+        conversion = native_config_fastapi(self.config)
+        geo_cfg = self.config.get("geo_block", {}) or {}
+        geo = should_enable_geo(
+            geo_enabled_flag=bool(geo_cfg.get("enabled", False)),
+            static_block_countries=geo_cfg.get("block_countries", []) or [],
+            dynamic_block_countries=get_geo_block_store().get_countries(),
+        )
+        # The stages the regular middleware would register below, under their native names.
+        sections = [("geo_block", "geo_block"), ("ip_keyword_block", "ip_keyword_block"), ("rate_limiting", "rate_limit"),
+                    ("ai_anomaly", "ai_anomaly"), ("honeypot", "honeypot"), ("uuid_tamper", "uuid_tamper"),
+                    ("header_validation", "header_validation"), ("logging_middleware", "logging")]
+        stages = [stage for section, stage in sections
+                  if section in enabled and (geo if section == "geo_block" else self.config.is_enabled(section))]
+        conversion.config["enabled"] = stages
+        conversion.notes = [note for note in conversion.notes if note.setting != "logging_middleware"]
+        conversion.config.pop("log_path", None)
+        if "logging" in stages:
+            log_dir = (self.config.get("logging_middleware", {}) or {}).get("log_dir", "aiwaf_logs")
+            native_access_log(conversion, "logging_middleware", log_dir)
+        if not native_by_default(conversion, choice=self.native_pipeline):
+            return False
+        from aiwaf.fast.csv_pipeline import NativeAIWAFMiddleware
+
+        log_native_default("FastAPI")
+        self.app.add_middleware(NativeAIWAFMiddleware, config=dict(conversion.config), aiwaf_config=self.config)
+        return True
+
     def _add_lifecycle_events(self, app: FastAPI):
         """Add startup and shutdown events."""
         if app.router.lifespan_context is not None:

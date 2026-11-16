@@ -53,14 +53,17 @@ module.exports = {
     if (middleware.ready) {
       const native = await middleware.ready;
       const { DEFER_BODY } = require('./nativePipeline');
-      server.ext('onRequest', (request, h) => {
+      server.ext('onRequest', async (request, h) => {
         const req = request.raw.req;
         req.ip = request.info.remoteAddress; req.path = request.path;
         req.url = request.url.pathname + request.url.search;
         req[DEFER_BODY] = true;
         req.body = undefined; req.query = undefined;
         const res = createExpressLikeResponse(h, request.raw.res);
-        native(req, res, error => { if (error) throw error; });
+        let failure = null;
+        // An async uuidResolver makes the native middleware return a promise.
+        await native(req, res, error => { if (error) failure = error; });
+        if (failure) throw failure;
         return res._handled ? res.toResponse().takeover() : h.continue;
       });
       server.ext('onPreHandler', (request,h) => {

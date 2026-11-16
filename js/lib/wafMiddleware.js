@@ -130,12 +130,65 @@ function applyAutoMiddlewareDefaults(opts, enabled, rawOpts = {}) {
 }
 
 
+// The first aiwaf-wasm with every engine feature from_settings relies on: stores, shared rate
+// counts, path-rule limits, monitor mode and UUID resolvers.
+const NATIVE_DEFAULT_WASM = '0.2.7';
+
+function installedWasmVersion() {
+  const fs = require('fs');
+  const path = require('path');
+  for (const file of [path.join(__dirname, '..', 'node_modules', 'aiwaf-wasm', 'package.json'),
+    () => require.resolve('aiwaf-wasm/package.json')]) {
+    try { return JSON.parse(fs.readFileSync(typeof file === 'function' ? file() : file, 'utf8')).version; } catch (_) { /* next */ }
+  }
+  return null;
+}
+function atLeast(version, minimum) {
+  const parse = v => String(v).split('-')[0].split('.').map(Number);
+  const [a, b] = [parse(version), parse(minimum)];
+  for (let i = 0; i < 3; i++) if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0);
+  return true;
+}
+const OFF = new Set(['false', '0', 'off', 'no']);
+
+/**
+ * Whether aiwaf(options) runs the native pipeline when AIWAF_NATIVE_PIPELINE isn't set: when
+ * the installed aiwaf-wasm has every native feature and every option carries over exactly.
+ */
+function automaticNative(rawOpts) {
+  if (OFF.has(String(process.env.AIWAF_NATIVE_PIPELINE ?? '').trim().toLowerCase())) return null;
+  const version = installedWasmVersion();
+  if (!version || !atLeast(version, NATIVE_DEFAULT_WASM)) return null;
+  const conversion = require('./nativeSettings').nativeOptionsFromSettings(rawOpts);
+  return conversion.differences().length ? null : conversion;
+}
+
 module.exports = function aiwaf(rawOpts = {}) {
+  if (rawOpts.AIWAF_NATIVE_PIPELINE === false) {
+    const { AIWAF_NATIVE_PIPELINE: _off, ...regularOpts } = rawOpts;
+    rawOpts = regularOpts;
+  } else if (rawOpts.AIWAF_NATIVE_PIPELINE === undefined) {
+    const conversion = automaticNative(rawOpts);
+    if (conversion) {
+      console.info('AIWAF: using the native pipeline, since every option carries over to it. '
+        + 'Set AIWAF_NATIVE_PIPELINE: false (or the environment variable) to keep the regular middleware.');
+      rawOpts = { ...rawOpts, AIWAF_NATIVE_PIPELINE: { fromSettings: true, conversion } };
+    }
+  }
   if (rawOpts.AIWAF_NATIVE_PIPELINE !== undefined) {
-    if (Object.keys(rawOpts).some(key => key !== 'AIWAF_NATIVE_PIPELINE')) {
+    let native = rawOpts.AIWAF_NATIVE_PIPELINE;
+    const fromSettings = native === 'from_settings' || (native && typeof native === 'object' && native.fromSettings);
+    if (fromSettings) {
+      // Convert the regular options passed alongside; native options given here win, as in Python.
+      const { AIWAF_NATIVE_PIPELINE: _ignored, ...regular } = rawOpts;
+      const { fromSettings: _flag, profile: overrides, conversion: converted, ...nativeOptions } = typeof native === 'object' ? native : {};
+      const conversion = converted || require('./nativeSettings').nativeOptionsFromSettings(regular);
+      conversion.log(nativeOptions.logger || console);
+      native = { ...conversion.options, ...nativeOptions, profile: { ...conversion.profile, ...(overrides || {}) } };
+    } else if (Object.keys(rawOpts).some(key => key !== 'AIWAF_NATIVE_PIPELINE')) {
       throw new Error('Native pipeline uses a dedicated profile; do not mix legacy options');
     }
-    const ready = require('./nativePipeline')(rawOpts.AIWAF_NATIVE_PIPELINE);
+    const ready = require('./nativePipeline')(native);
     // Compatibility wrapper for framework adapters. Await ready during application startup.
     // No legacy modules are initialized and no fallback is selected on this branch.
     const middleware = async (req, res, next) => (await ready)(req, res, next);
@@ -514,3 +567,5 @@ module.exports = function aiwaf(rawOpts = {}) {
   middleware.inspectPayload = inspectPayload;
   return middleware;
 };
+
+module.exports.NATIVE_DEFAULT_WASM = NATIVE_DEFAULT_WASM;

@@ -10,6 +10,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+# The regular middleware's tests run the regular chain. Tests of the native default unset this.
+os.environ.setdefault("AIWAF_NATIVE_PIPELINE", "false")
+
 # Ensure local repo imports win over any globally installed `tests` package.
 repo_root_str = str(REPO_ROOT)
 try:

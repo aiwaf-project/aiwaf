@@ -51,8 +51,10 @@ venv/
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
-aiwaf_requests.csv
-aiwaf_requests.csv.lock
+# CSV logs and stores written at runtime (request logs, blocklists, rate buckets)
+*.csv
+*.csv.lock
+*.csv.gz
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt

@@ -10,6 +10,7 @@ const nativeRequireEsm = typeof vm.SourceTextModule?.prototype.hasAsyncGraph ===
 
 module.exports = {
     globalTeardown: '<rootDir>/test/jest.teardown.js',
+    setupFiles: ['<rootDir>/test/jest.setup.js'],
     forceExit: true,
     coverageProvider: 'v8',
     transform: {

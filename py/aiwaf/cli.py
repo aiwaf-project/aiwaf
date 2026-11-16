@@ -165,6 +165,7 @@ def _handle_init(argv) -> None:
     parser.add_argument("--output", default=".aiwaf/paths.json", help="Output manifest path")
     parser.add_argument("--source", default=".", help="Source to audit for injection checks (default: current folder)")
     parser.add_argument("--no-audit", action="store_true", help="Don't audit source or save injection checks")
+    parser.add_argument("--no-native", action="store_true", help="Don't print the native pipeline setup")
     args = parser.parse_args(argv)
     audit_source = None if args.no_audit else args.source
 
@@ -214,6 +215,26 @@ def _handle_init(argv) -> None:
     print(f"Routes: {len(manifest.get('routes', {}))}")
     print(f"Context hash: {manifest['context_hash']}")
     print(describe_audit(manifest))
+    if not args.no_native:
+        print(_native_setup(framework, app))
+
+
+def _native_setup(framework, app) -> str:
+    """The native pipeline setup for this project, with what its settings carry over."""
+    from aiwaf.core.native_settings import describe_native_setup, native_config, native_config_fastapi
+
+    if framework == "django":
+        from django.conf import settings
+        from aiwaf.django.settings_compat import apply_legacy_settings
+
+        apply_legacy_settings()
+        names = {name: getattr(settings, name) for name in dir(settings) if name.startswith("AIWAF_")}
+        middleware = getattr(settings, "MIDDLEWARE", None)
+        return describe_native_setup(native_config(names, "django", middleware=middleware), "django", middleware=middleware)
+    if framework == "flask":
+        names = {name: value for name, value in app.config.items() if name.startswith("AIWAF_")}
+        return describe_native_setup(native_config(names, "flask"), "flask")
+    return describe_native_setup(native_config_fastapi(), "fastapi")
 
 
 def aiwaf_detect() -> None:
