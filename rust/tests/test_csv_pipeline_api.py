@@ -61,3 +61,24 @@ def test_csv_pipeline_checks_sql_in_the_path(tmp_path):
     assert (status, json.loads(payload)['error']) == (403, 'sql_breakout_numeric')
     _, status, _ = begin("/users/o'reilly")
     assert status != 403
+
+
+@pytest.mark.skipif(not __import__("os").path.exists("/dev/full"), reason="needs /dev/full")
+def test_a_request_log_that_cant_be_written_doesnt_fail_requests(tmp_path, caplog):
+    import logging
+    import os
+
+    log = tmp_path / "requests.csv"
+    engine = aiwaf_rust.NativeCSVPipeline(json.dumps({
+        'data_dir': str(tmp_path), 'enabled': ['logging'], 'exempt_paths': [], 'log_path': str(log)}))
+    def request():
+        context, status, _ = engine.begin('8.8.8.8', '/docs', 'GET', {}, b'', b'', True, True, True, True, False,
+                                          set(), False, 100., '2026-10-12T00:00:00+00:00')
+        return engine.finish(context, 200, 100.1, '0')
+    assert request()[0] == 200
+    # The disk fills up: writes now fail with "no space left on device".
+    log.unlink()
+    os.symlink("/dev/full", log)
+    with caplog.at_level(logging.WARNING, "aiwaf.native"):
+        assert [request()[0] for _ in range(3)] == [200, 200, 200]
+    assert caplog.text.count("couldn't write the request log") <= 1

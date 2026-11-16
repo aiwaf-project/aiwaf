@@ -541,7 +541,13 @@ async function createRequestPipeline(profile = {}, model = null) {
     wireProfile.blacklist = wireProfile.blocklist;
     delete wireProfile.blocklist;
   }
-  const native = new mod.NativeRequestPipeline(JSON.stringify(wireProfile));
+  let native;
+  try {
+    native = new mod.NativeRequestPipeline(JSON.stringify(wireProfile));
+  } catch (error) {
+    // The engine reports its startup errors as strings; give them an Error's message and stack.
+    throw error instanceof Error ? error : new Error(`Native pipeline: ${String(error)}`);
+  }
   if (['begin','finish','inspect_payload','inspect_body','set_model','clear_model','diagnostics'].some(name => typeof native[name] !== 'function')) {
     native.free();
     throw new Error('Incompatible NativeRequestPipeline API; install the matching WASM build');

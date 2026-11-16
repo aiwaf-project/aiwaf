@@ -118,3 +118,33 @@ class NativeDefaultTests(SimpleTestCase):
                 self.assertIs(native_plan()[2], forest)
             with patch.object(regular, "MODEL", object()):
                 self.assertIsNone(native_plan())
+
+    def test_a_rule_limit_above_the_flood_threshold_starts_and_blocks_where_the_regular_one_does(self):
+        # Took sites down on 1.2.0: a '/' rule raising MAX above the default flood threshold of 40.
+        rules = [{"PREFIX": "/", "RATE_LIMIT": {"WINDOW": 60, "MAX": 100}}]
+        with TemporaryDirectory() as directory, settings_for(directory, AIWAF_PATH_RULES=rules, AIWAF_RATE_MAX=20,
+                                                             AIWAF_RATE_FLOOD=40):
+            client = Client(REMOTE_ADDR="198.51.100.36")
+            self.assertIn("NativeAIWAFMiddleware", middleware_types(client))
+            # middleware_types made the first request, so these are requests 2 to 41.
+            statuses = [client.get("/items").status_code for _ in range(40)]
+            self.assertEqual(statuses[-2:], [200, 403])
+
+    def test_a_cache_native_honeypot_timing_cant_use_keeps_the_regular_middleware(self):
+        stages = REGULAR + ["aiwaf.django.middleware.HoneypotTimingMiddleware"]
+        for options in ({"BACKEND": "django.core.cache.backends.dummy.DummyCache"},
+                        {"BACKEND": "django.core.cache.backends.locmem.LocMemCache", "OPTIONS": {"IGNORE_EXCEPTIONS": True}}):
+            with TemporaryDirectory() as directory, settings_for(directory, MIDDLEWARE=stages, CACHES={"default": options}):
+                names = middleware_types(Client(REMOTE_ADDR="198.51.100.37"))
+                self.assertIn("HoneypotTimingMiddleware", names)
+                self.assertNotIn("NativeAIWAFMiddleware", names)
+        with TemporaryDirectory() as directory, settings_for(directory, MIDDLEWARE=stages, CACHES={
+                "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}):
+            self.assertIn("NativeAIWAFMiddleware", middleware_types(Client(REMOTE_ADDR="198.51.100.38")))
+
+    def test_a_data_directory_native_cant_create_keeps_the_regular_middleware(self):
+        # The regular middleware with model storage writes no files; native keeps files there.
+        with TemporaryDirectory() as directory, settings_for(directory, AIWAF_CSV_DATA_DIR="/proc/aiwaf-cant-create"):
+            names = middleware_types(Client(REMOTE_ADDR="198.51.100.39"))
+            self.assertIn("IPAndKeywordBlockMiddleware", names)
+            self.assertNotIn("NativeAIWAFMiddleware", names)

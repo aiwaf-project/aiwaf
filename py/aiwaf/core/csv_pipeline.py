@@ -194,13 +194,25 @@ class CSVPipeline:
         # Validates the mode now, so a typo fails at startup rather than on a request.
         observer_for(self.injection_risk_mode, self.manifest_path, "/")
         self.path_rules = get_effective_path_rules(list(explicit), manifest_path=self.manifest_path)
-        defaults = {"rate_window": config.get("rate_window", 10), "rate_max": config.get("rate_max", 20),
-                    "rate_flood": config.get("rate_flood", 40)}
+        # The regular rate limiter flood-blocks above the flood threshold before a higher limit is
+        # reached, so a limit above it acts as the threshold: the engine is given that.
+        if "rate_max" in config and config.get("rate_flood", 40) < config["rate_max"]:
+            config["rate_max"] = config.get("rate_flood", 40)
+        self._rate_defaults = {"rate_window": config.get("rate_window", 10), "rate_max": config.get("rate_max", 20),
+                               "rate_flood": config.get("rate_flood", 40)}
         for rule in self.path_rules:
-            limits = _rate_overrides(rule.get("RATE_LIMIT", rule.get("rate_limit")) if isinstance(rule, dict) else None)
-            window, maximum, flood = (limits.get(key, defaults[key]) for key in ("rate_window", "rate_max", "rate_flood"))
-            if window < 1 or maximum < 0 or flood < maximum:
+            limits = self._effective_rate(_rate_overrides(rule.get("RATE_LIMIT", rule.get("rate_limit"))
+                                                          if isinstance(rule, dict) else None))
+            if limits and (limits["rate_window"] < 1 or limits["rate_max"] < 0):
                 raise ValueError(f"Invalid RATE_LIMIT for path rule {rule.get('PREFIX')!r}")
+
+    def _effective_rate(self, overrides):
+        """A path rule's limits over the profile's, with a limit above the flood threshold acting as it."""
+        if not overrides:
+            return {}
+        limits = {**self._rate_defaults, **overrides}
+        limits["rate_max"] = min(limits["rate_max"], limits["rate_flood"])
+        return limits
 
     @staticmethod
     def _configure_rate_counter(config, rate_counter):
@@ -261,7 +273,7 @@ class CSVPipeline:
             observe = observer_for(self.injection_risk_mode, self.manifest_path, path, method)
             finding = observe(query, body) if observe else None
             rule = finding.rule if finding else None
-        return disabled, _rate_overrides(plan.get_rate_limit_overrides()), rule
+        return disabled, self._effective_rate(_rate_overrides(plan.get_rate_limit_overrides())), rule
 
     def begin(self, *, ip, path, method, headers, query, body, exists, methods,
               authenticated=False, endpoint=None, country="", exhausted=False, uuid=None):
@@ -276,17 +288,22 @@ class CSVPipeline:
         if self.stores is not None:
             # Only what this request's stages use: an exempt request runs logging alone.
             active = set(self.profile.get("enabled", STAGES)) - set(disabled)
+            # A store that fails is logged and read as not exempt, not blocked and nothing learned,
+            # so a storage outage doesn't turn every request into an error.
             if active - {"logging"}:
-                exempt = self._exempted.get((ip, path), lambda: self.stores.is_exempted(ip, path))
+                exempt = self._read("exemptions", False, lambda: self._exempted.get(
+                    (ip, path), lambda: self.stores.is_exempted(ip, path)))
             if exempt:
                 active = set()
             if active & {"ip_keyword_block", "ai_anomaly"} and self.profile.get("ip_blocking", True):
-                extra["blocked"] = self._blocked.get(ip, lambda: self.stores.is_blocked(ip))
+                extra["blocked"] = self._read("blocklist", False, lambda: self._blocked.get(ip, lambda: self.stores.is_blocked(ip)))
             if "ip_keyword_block" in active and self.profile.get("learning", True):
                 top_n = int(self.profile.get("top_n", 10))
-                extra["dynamic_keywords"] = list(self._cached("keywords", lambda: self.stores.top_keywords(top_n)))
+                extra["dynamic_keywords"] = list(self._read("keywords", (), lambda: self._cached(
+                    "keywords", lambda: self.stores.top_keywords(top_n))))
             if "geo_block" in active:
-                extra["geo_countries"] = set(self._cached("countries", self.stores.blocked_countries))
+                extra["geo_countries"] = set(self._read("countries", (), lambda: self._cached(
+                    "countries", self.stores.blocked_countries)))
         args = (ip, path, method, headers, query or b"", body or b"",
                 bool(exists), "GET" in methods, "POST" in methods, method.upper() in methods,
                 bool(authenticated), disabled, exempt, now, now_iso(), bool(exhausted))
@@ -326,18 +343,30 @@ class CSVPipeline:
             cached = self._store_cache[name] = (now + self._store_cache_seconds, list(load() or ()))
         return cached[1]
 
+    @staticmethod
+    def _read(store, fallback, load):
+        try:
+            return load()
+        except Exception as error:
+            LOGGER.warning("AIWAF store read failed (%s): %s; continuing without it", store, error)
+            return fallback
+
     def _apply_effects(self, context):
         """Write the engine's blocks and learned keywords to the host's stores."""
         if self.stores is None:
             return
         for kind, values in context.take_effects():
-            if kind == "block":
-                self.stores.block(values[0], values[1])
-                # This worker's own blocks apply at once, whatever was cached.
-                self._blocked.set(values[0], True)
-            elif kind == "keywords" and values:
-                self.stores.learn(list(values))
-                self._store_cache.pop("keywords", None)
+            try:
+                if kind == "block":
+                    # This worker's own blocks apply at once, whatever was cached or written.
+                    self._blocked.set(values[0], True)
+                    self.stores.block(values[0], values[1])
+                elif kind == "keywords" and values:
+                    self.stores.learn(list(values))
+                    self._store_cache.pop("keywords", None)
+            except Exception as error:
+                # The decision stands; a failed write is logged rather than failing the response.
+                LOGGER.warning("AIWAF store write failed (%s): %s", kind, error)
 
     def capture_wsgi(self, request, *, django=False):
         captured = [b"", None]

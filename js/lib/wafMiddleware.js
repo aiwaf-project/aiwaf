@@ -42,6 +42,24 @@ function knownRoutes(app) {
     .map(layer => layer.route.path);
 }
 
+// An Express route path (a string, an array of them, or a RegExp) matched against a request
+// path: :name is one segment (:name? optional) and * is anything. Other characters are literal.
+function routeMatches(route, path) {
+  if (route instanceof RegExp) return route.test(path);
+  if (Array.isArray(route)) return route.some(item => routeMatches(item, path));
+  const pattern = String(route).split(/(\/?:\w+\??|\*)/).map(part => {
+    if (part === '*') return '.*';
+    const param = part.match(/^(\/?):\w+(\?)?$/);
+    if (param) return param[2] ? `(?:${param[1] ? '/' : ''}[^/]+)?` : `${param[1] ? '/' : ''}[^/]+`;
+    return part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }).join('');
+  try {
+    return new RegExp(`^${pattern}/?$`).test(path);
+  } catch (_) {
+    return false;
+  }
+}
+
 function matchesKnownRoute(app, path) {
   // In proxy setups, req.app may be undefined or not have routes
   // Return true (treat as known) to skip anomaly detection on proxies
@@ -62,10 +80,7 @@ function matchesKnownRoute(app, path) {
     return true;
   }
   
-  const result = routes.some(route => {
-    const regex = new RegExp(`^${String(route).replace(/:\\w+/g, '[^/]+')}$`);
-    return regex.test(path);
-  });
+  const result = routes.some(route => routeMatches(route, path));
   
   if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
     console.error(`[AIWAF-ROUTE-CHECK] path=${path} matched=${result}`);
@@ -159,9 +174,27 @@ function automaticNative(rawOpts) {
   if (OFF.has(String(process.env.AIWAF_NATIVE_PIPELINE ?? '').trim().toLowerCase())) return null;
   const version = installedWasmVersion();
   if (!version || !atLeast(version, NATIVE_DEFAULT_WASM)) return null;
-  const conversion = require('./nativeSettings').nativeOptionsFromSettings(rawOpts);
+  let conversion;
+  try {
+    conversion = require('./nativeSettings').nativeOptionsFromSettings(rawOpts);
+  } catch (_) {
+    return null; // Options the converter can't read stay with the regular middleware.
+  }
   return conversion.differences().length ? null : conversion;
 }
+
+// Store reads fail open, as exemption checks already do: a storage outage is reported once per
+// kind and requests carry on unblocked, rather than every request failing.
+const reportedStoreFailures = new Set();
+function storeFailed(what, error) {
+  if (reportedStoreFailures.has(what)) return;
+  reportedStoreFailures.add(what);
+  console.warn(`AIWAF: ${what} failed (${error && error.message}); continuing without it. This is reported once.`);
+}
+const isBlocked = ip => Promise.resolve().then(() => blocklistManager.isBlocked(ip))
+  .catch(error => { storeFailed('blocklist read', error); return false; });
+const recentRequests = limit => Promise.resolve().then(() => requestLogStore.recent(limit))
+  .catch(error => { storeFailed('request log read', error); return []; });
 
 module.exports = function aiwaf(rawOpts = {}) {
   if (rawOpts.AIWAF_NATIVE_PIPELINE === false) {
@@ -172,7 +205,7 @@ module.exports = function aiwaf(rawOpts = {}) {
     if (conversion) {
       console.info('AIWAF: using the native pipeline, since every option carries over to it. '
         + 'Set AIWAF_NATIVE_PIPELINE: false (or the environment variable) to keep the regular middleware.');
-      rawOpts = { ...rawOpts, AIWAF_NATIVE_PIPELINE: { fromSettings: true, conversion } };
+      rawOpts = { ...rawOpts, AIWAF_NATIVE_PIPELINE: { fromSettings: true, conversion, automatic: rawOpts } };
     }
   }
   if (rawOpts.AIWAF_NATIVE_PIPELINE !== undefined) {
@@ -181,17 +214,30 @@ module.exports = function aiwaf(rawOpts = {}) {
     if (fromSettings) {
       // Convert the regular options passed alongside; native options given here win, as in Python.
       const { AIWAF_NATIVE_PIPELINE: _ignored, ...regular } = rawOpts;
-      const { fromSettings: _flag, profile: overrides, conversion: converted, ...nativeOptions } = typeof native === 'object' ? native : {};
+      const { fromSettings: _flag, profile: overrides, conversion: converted, automatic: _automatic, ...nativeOptions } = typeof native === 'object' ? native : {};
       const conversion = converted || require('./nativeSettings').nativeOptionsFromSettings(regular);
       conversion.log(nativeOptions.logger || console);
       native = { ...conversion.options, ...nativeOptions, profile: { ...conversion.profile, ...(overrides || {}) } };
     } else if (Object.keys(rawOpts).some(key => key !== 'AIWAF_NATIVE_PIPELINE')) {
       throw new Error('Native pipeline uses a dedicated profile; do not mix legacy options');
     }
-    const ready = require('./nativePipeline')(native);
+    const automatic = rawOpts.AIWAF_NATIVE_PIPELINE?.automatic;
+    let ready = require('./nativePipeline')(native);
+    if (automatic) {
+      // Chosen automatically: if it can't start, the regular middleware runs instead, as it
+      // would have without the switch. A native pipeline chosen explicitly keeps its error.
+      ready = ready.catch(error => {
+        console.warn(`AIWAF: the native pipeline couldn't start (${error.message}), so the regular middleware runs instead.`);
+        const regular = aiwaf({ ...automatic, AIWAF_NATIVE_PIPELINE: false });
+        // The native methods framework adapters call.
+        Object.assign(regular, { inspectBody: () => null, close: () => {}, setModel: () => {},
+          diagnostics: () => ({ native: false, fallback: error.message }) });
+        return regular;
+      });
+    }
     // Compatibility wrapper for framework adapters. Await ready during application startup.
-    // No legacy modules are initialized and no fallback is selected on this branch.
-    const middleware = async (req, res, next) => (await ready)(req, res, next);
+    // A startup failure goes to next(error) for each request instead of an unhandled rejection.
+    const middleware = (req, res, next) => ready.then(handler => handler(req, res, next)).catch(next);
     middleware.ready = ready;
     middleware.inspectPayload = async req => (await ready).inspectPayload(req);
     return middleware;
@@ -263,7 +309,7 @@ module.exports = function aiwaf(rawOpts = {}) {
     }
     return finding;
   };
-  const middleware = async (req, res, next) => {
+  const handle = async (req, res, next) => {
     const ip = getRequestIp(req, opts.AIWAF_TRUSTED_PROXIES);
     // Geo checks and logging must judge the same address as this middleware.
     req.aiwafClientIp = ip;
@@ -292,13 +338,14 @@ module.exports = function aiwaf(rawOpts = {}) {
     }
     const routePlan = createRoutePlan(path, pathRules, req.aiwafRoute || {});
     const shouldApply = name => enabledMiddlewares.has(normalizeMiddlewareName(name)) && routePlan.shouldApply(name);
-    const blockIp = reason => blocklistManager.block(ip, reason, {
+    // A block that can't be written is reported; the request is still denied.
+    const blockIp = reason => Promise.resolve().then(() => blocklistManager.block(ip, reason, {
       extendedRequestInfo: extractExtendedRequestInfo(req, {
         enabled: opts.AIWAF_CAPTURE_EXTENDED_REQUEST_INFO,
         maxHeaders: opts.AIWAF_EXTENDED_INFO_MAX_HEADERS,
         maxValueLength: opts.AIWAF_EXTENDED_INFO_MAX_VALUE_LENGTH
       }) || {}
-    });
+    })).catch(error => { storeFailed('blocklist write', error); return false; });
     
     // Debug: Log first character of path to ensure it's being captured
     if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
@@ -341,7 +388,7 @@ module.exports = function aiwaf(rawOpts = {}) {
       return next();
     }
 
-    if (shouldApply('ip_keyword_block') && await blocklistManager.isBlocked(ip)) {
+    if (shouldApply('ip_keyword_block') && await isBlocked(ip)) {
       if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
         console.error(`[AIWAF-BLOCK-BLOCKLIST] ip=${ip}`);
       }
@@ -423,7 +470,7 @@ module.exports = function aiwaf(rawOpts = {}) {
       }
 
       if (opts.AIWAF_WASM_VALIDATE_RECENT && shouldApply('ai_anomaly')) {
-        const recentRows = await requestLogStore.recent(200);
+        const recentRows = await recentRequests(200);
         const recent = recentRows
           .filter(row => row.ip_address === ip)
           .map(row => ({ path: row.path, status: Number(row.status || 0) }));
@@ -473,7 +520,7 @@ module.exports = function aiwaf(rawOpts = {}) {
           if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
             console.error(`[AIWAF-BLOCK-RATE] ip=${ip}`);
           }
-          if (await blocklistManager.isBlocked(ip)) {
+          if (await isBlocked(ip)) {
             return deny(403, 'blocked', 'flood_or_blocklist');
           }
           return deny(429, 'too_many_requests', 'rate_limit');
@@ -526,7 +573,7 @@ module.exports = function aiwaf(rawOpts = {}) {
       if (isAnomaly && anomalyDetector.isModelSufficientlyTrained()) {
         // Analyze recent behavior before blocking.
         const now = Date.now();
-        const recentData = (await requestLogStore.recent(5000))
+        const recentData = (await recentRequests(5000))
           .filter(row => row.ip_address === ip)
           .map(row => ({
             timestamp: row.created_at ? new Date(row.created_at).getTime() : now,
@@ -564,6 +611,11 @@ module.exports = function aiwaf(rawOpts = {}) {
 
     next();
   };
+  // Express 4 doesn't await middleware, so an error here would otherwise be an unhandled
+  // rejection, which ends the process, and the request would hang. It goes to next(error).
+  const middleware = (req, res, next) => handle(req, res, next).catch(error => {
+    if (!res.headersSent) next(error);
+  });
   middleware.inspectPayload = inspectPayload;
   return middleware;
 };

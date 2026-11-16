@@ -148,6 +148,79 @@ def _redis_rates(result, setting, url, shared):
                     "Run: pip install -U aiwaf-rust")
 
 
+def _at_least(minimum, what):
+    def check(value):
+        if value < minimum:
+            raise ValueError(f"the native pipeline needs {what} of at least {minimum}")
+        return value
+    return check
+
+
+def _one_of(choices, normalize=lambda v: str(v).strip().lower()):
+    def check(value):
+        value = normalize(value)
+        if value not in choices:
+            raise ValueError(f"expected one of {', '.join(sorted(choices))}")
+        return value
+    return check
+
+
+def _payload_size(value):
+    if not 1 <= value <= 1048576:
+        raise ValueError("expected 1 to 1048576 bytes, as the regular middleware requires")
+    return value
+
+
+# Native profile values, normalized as the regular middleware reads them, or refused with the
+# reason when the native engine can't represent them. A refused value is reported as not carried.
+_NATIVE_VALUES = {
+    "rate_window": _at_least(1, "a window"),
+    "uuid_window": _at_least(1, "a window"),
+    "rate_max": _at_least(0, "a limit"),
+    "rate_flood": _at_least(0, "a threshold"),
+    "min_form_time": _at_least(0, "a time"),
+    "max_page_time": _at_least(0, "a time"),
+    "top_n": _at_least(0, "a count"),
+    "uuid_threshold": _at_least(1, "a threshold"),
+    "uuid_malformed_weight": _at_least(0, "a weight"),
+    "uuid_not_found_weight": _at_least(0, "a weight"),
+    "uuid_success_decay": _at_least(0, "a decay"),
+    "max_bytes": _payload_size,
+    "sql_mode": _one_of({"block", "monitor", "off"}),
+    "injection_risk_mode": _one_of({"block", "log", "off"}),
+    # The regular rate limiter reads ip or ip_only as per-IP, and anything else as per IP and path.
+    "rate_key_mode": lambda v: "ip" if str(v or "").strip().lower() in {"ip", "ip_only"} else "ip_path",
+}
+
+
+def _native_value(key, kind, raw):
+    value = _value(kind, raw)
+    check = _NATIVE_VALUES.get(key)
+    return check(value) if check else value
+
+
+def _check_path_rules(result, setting):
+    """Keep the path rules' rate limits the native engine can apply; report the others."""
+    from .csv_pipeline import _rate_overrides
+
+    rules = []
+    for rule in result.config.get("path_rules") or []:
+        if not isinstance(rule, dict):
+            result.note(setting, "not carried", f"A path rule must be a dictionary, not {rule!r}.")
+            continue
+        limit = rule.get("RATE_LIMIT", rule.get("rate_limit"))
+        try:
+            limits = _rate_overrides(limit if isinstance(limit, dict) else None)
+            if limits.get("rate_window", 1) < 1 or limits.get("rate_max", 0) < 0 or limits.get("rate_flood", 0) < 0:
+                raise ValueError("the native pipeline needs a window of at least 1 second and limits of 0 or more")
+        except ValueError as error:
+            result.note(setting, "not carried", f"The RATE_LIMIT for {rule.get('PREFIX')!r} isn't used natively: {error}.")
+            rule = {k: v for k, v in rule.items() if k not in ("RATE_LIMIT", "rate_limit")}
+        rules.append(rule)
+    if "path_rules" in result.config:
+        result.config["path_rules"] = rules
+
+
 def _value(kind, raw):
     if kind is list:
         if isinstance(raw, str):
@@ -280,7 +353,7 @@ def native_config(settings: Mapping[str, Any], framework: str, *, middleware: It
         if settings.get(name) is None:
             continue
         try:
-            result.config[key] = _value(kind, settings[name])
+            result.config[key] = _native_value(key, kind, settings[name])
         except (TypeError, ValueError) as error:
             result.note(name, "not carried", f"Its value couldn't be read ({error}), so the native default applies.")
             continue
@@ -291,8 +364,8 @@ def native_config(settings: Mapping[str, Any], framework: str, *, middleware: It
         # the native engine needs the limit at or below it, which behaves the same.
         result.config["rate_max"] = flood
         result.notes = [note for note in result.notes if note.setting != "AIWAF_RATE_MAX"]
-        result.note("AIWAF_RATE_MAX", "changed",
-                    f"It's above AIWAF_RATE_FLOOD ({flood}), so requests were flood-blocked before reaching it. "
+        result.note("AIWAF_RATE_MAX", "carried",
+                    f"It's above AIWAF_RATE_FLOOD ({flood}), so requests are flood-blocked before reaching it. "
                     f"The native limit is set to {flood}, which blocks at the same point.")
     if "required_headers" in result.config:
         result.config["required_headers"] = [h if h.startswith("HTTP_") else "HTTP_" + h.upper().replace("-", "_")
@@ -306,6 +379,7 @@ def native_config(settings: Mapping[str, Any], framework: str, *, middleware: It
     for name in sorted(settings):
         if name.startswith("AIWAF_") and name not in _DIRECT and name not in _HANDLED:
             result.note(name, "not carried", "The native pipeline has no equivalent setting.")
+    _check_path_rules(result, "AIWAF_PATH_RULES")
     return result
 
 
@@ -371,14 +445,17 @@ def native_config_fastapi(config=None, *, environ: Mapping[str, str] | None = No
         if values.get(key) is None:
             continue
         try:
-            result.config[native] = _value(kind, values[key])
+            result.config[native] = _native_value(native, kind, values[key])
         except (TypeError, ValueError) as error:
             result.note(key, "not carried", f"Its value couldn't be read ({error}), so the native default applies.")
             continue
         if key in changed:
             result.note(key, "carried")
     if "sql_mode" not in result.config and environ.get("AIWAF_SQL_INJECTION_MODE"):
-        result.config["sql_mode"] = environ["AIWAF_SQL_INJECTION_MODE"]
+        try:
+            result.config["sql_mode"] = _native_value("sql_mode", str, environ["AIWAF_SQL_INJECTION_MODE"])
+        except ValueError as error:
+            result.note("AIWAF_SQL_INJECTION_MODE", "not carried", f"Its value couldn't be used ({error}).")
 
     stages = sorted(native for section, native in _FASTAPI_STAGES.items()
                     if values.get(f"{section}.enabled", False) or (section == "geo_block" and values.get("geo_block.block_countries")))
@@ -397,6 +474,7 @@ def native_config_fastapi(config=None, *, environ: Mapping[str, str] | None = No
                     f"Patterns can't be path rules, so header validation applies to: {', '.join(patterns)}.")
     if rules:
         result.config["path_rules"] = rules
+        _check_path_rules(result, "path_rules")
     manifest = values.get("path_manifest") or values.get("PATH_MANIFEST")
     if manifest:
         result.config["manifest_path"] = str(manifest)
@@ -430,8 +508,9 @@ def native_config_fastapi(config=None, *, environ: Mapping[str, str] | None = No
     maximum, flood = result.config.get("rate_max", 20), result.config.get("rate_flood", 40)
     if flood < maximum:
         result.config["rate_max"] = flood
-        result.note("rate_limiting.max_requests", "changed",
-                    f"It's above flood_threshold ({flood}), so requests were flood-blocked first. The native limit is {flood}.")
+        result.note("rate_limiting.max_requests", "carried",
+                    f"It's above flood_threshold ({flood}), so requests are flood-blocked first. The native limit is "
+                    f"{flood}, which blocks at the same point.")
     return result
 
 
@@ -519,7 +598,25 @@ def native_by_default(conversion: NativeConversion, *, choice=None, environ: Map
         return False
     if not all(_engine_supports(feature) for feature in DEFAULT_FEATURES):
         return False
-    return not conversion.differences()
+    if conversion.differences():
+        return False
+    # The native engine keeps files in its data directory (and request logs at log_path); the
+    # regular middleware may never write there, so a directory it can't create keeps it.
+    for directory in {str(conversion.config.get("data_dir") or "aiwaf_data"),
+                      os.path.dirname(str(conversion.config.get("log_path") or "")) or None} - {None}:
+        if not _writable_directory(directory):
+            conversion.note("data_dir", "changed", f"The native pipeline keeps files in {os.path.abspath(directory)}, "
+                                                   "which can't be created or written here.")
+            return False
+    return True
+
+
+def _writable_directory(directory) -> bool:
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except OSError:
+        return False
+    return os.access(directory, os.W_OK | os.X_OK)
 
 
 def is_rust_model(model) -> bool:

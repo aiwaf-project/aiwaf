@@ -58,7 +58,7 @@ test('RATE_LIMIT overrides the limits for a path prefix', async () => {
 
 test('invalid path rules fail at startup', async () => {
   await expect(createNative({ dataDir: temp(), pathRules: { PREFIX: '/x/' } })).rejects.toThrow(/array/);
-  await expect(createNative({ dataDir: temp(), pathRules: [{ PREFIX: '/x/', RATE_LIMIT: { MAX: 9, FLOOD: 3 } }] }))
+  await expect(createNative({ dataDir: temp(), pathRules: [{ PREFIX: '/x/', RATE_LIMIT: { WINDOW: 0 } }] }))
     .rejects.toThrow(/Invalid RATE_LIMIT/);
   await expect(createNative({ dataDir: temp(), pathRules: [{ PREFIX: '/x/', RATE_LIMIT: { MAX: 'many' } }] }))
     .rejects.toThrow(/must be a number/);
@@ -83,4 +83,18 @@ test('manifestPath and injectionRiskMode control route checks', async () => {
     warn.mockRestore();
   }
   await expect(createNative({ dataDir: temp(), manifestPath, injectionRiskMode: 'loud' })).rejects.toThrow(/block, log, or off/);
+});
+
+test('a limit above the flood threshold acts as the threshold, as in the regular middleware', async () => {
+  // MAX above FLOOD in a rule, and a rule MAX above the profile's default flood of 40.
+  for (const [rule, flood] of [[{ MAX: 9, FLOOD: 3 }, 3], [{ WINDOW: 60, MAX: 100 }, 40]]) {
+    const app = await appWith({ enabled: ['rate_limit'] }, { pathRules: [{ PREFIX: '/', RATE_LIMIT: rule }] });
+    const statuses = [];
+    for (let i = 0; i <= flood; i++) statuses.push((await browser(request(app).get('/home'))).status);
+    expect(statuses.slice(-2)).toEqual([200, 403]);
+  }
+  const app = await appWith({ enabled: ['rate_limit'], rate_max: 100 }, {});
+  const statuses = [];
+  for (let i = 0; i <= 40; i++) statuses.push((await browser(request(app).get('/home'))).status);
+  expect(statuses.slice(-2)).toEqual([200, 403]);
 });

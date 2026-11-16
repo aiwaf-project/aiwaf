@@ -151,7 +151,7 @@ def test_flask_native_pipeline_from_app_config(tmp_path, caplog):
 def test_a_limit_above_the_flood_threshold_becomes_the_threshold(tmp_path):
     conversion = convert({"AIWAF_RATE_MAX": 50})
     assert (conversion.config["rate_max"], conversion.config.get("rate_flood", 40)) == (40, 40)
-    assert [n.outcome for n in conversion.notes if n.setting == "AIWAF_RATE_MAX"] == ["changed"]
+    assert [n.outcome for n in conversion.notes if n.setting == "AIWAF_RATE_MAX"] == ["carried"]
     assert_engine_accepts(tmp_path, conversion)
 
 
@@ -338,3 +338,101 @@ def test_flask_use_csv_follows_where_flask_keeps_its_stores(monkeypatch, value, 
     assert ("store" in conversion.config) == store
     # Django has no such setting, so it isn't reported there as unknown.
     assert "AIWAF_USE_CSV" not in outcomes(convert({}, "flask"))
+
+
+# Whenever the converter reports no differences, the native pipeline must start: the automatic
+# switch relies on it. Edge values the regular middleware tolerates are tried one by one and in
+# random combinations.
+
+_EDGE = {float: [0, 0.5, -1, 1e9, "10", "abc", 3], int: [0, -1, 10 ** 7, "5", 2.5, True],
+         str: ["BLOCK", "Monitor", "observe", "", "IP", "ip", "off"], bool: [0, 1, "yes", "maybe"],
+         list: ["", "a, b", [], ["*.css"], [123], "X-Custom"]}
+_SPECIAL = {
+    "AIWAF_PATH_RULES": [[{"PREFIX": "/", "RATE_LIMIT": {"WINDOW": 0}}], [{"PREFIX": "/", "RATE_LIMIT": {"MAX": -1}}],
+                         [{"PREFIX": "/", "RATE_LIMIT": {"MAX": "5"}}], [{"PREFIX": "/", "RATE_LIMIT": {"MAX": 100}}],
+                         [{"PREFIX": "/", "RATE_LIMIT": {"FLOOD": 10 ** 6}}], ["not a dict"]],
+    "AIWAF_INJECTION_RISK_MODE": ["LOG", "warn"],
+}
+
+
+def _native_starts(tmp_path, conversion):
+    from aiwaf.core.csv_pipeline import CSVPipeline
+
+    config = dict(conversion.config)
+    config.pop("store", None)
+    if config.get("rate_backend") == "django_cache":
+        config["rate_backend"] = "memory"
+    config["data_dir"] = str(tmp_path / f"d{len(list(tmp_path.iterdir()))}")
+    config.setdefault("manifest_path", str(tmp_path / "none.json"))
+    CSVPipeline(config)
+
+
+@pytest.mark.parametrize("framework", ["django", "flask"])
+def test_settings_without_differences_always_start_natively(tmp_path, monkeypatch, framework):
+    import random
+    from aiwaf.core import native_settings
+
+    monkeypatch.setattr(native_settings, "_engine_supports", lambda feature: True)
+    cases = [{name: value} for name, (key, kind) in native_settings._DIRECT.items()
+             for value in _SPECIAL.get(name, _EDGE[kind])]
+    names, rng = list(native_settings._DIRECT.items()), random.Random(7)
+    cases += [{name: rng.choice(_SPECIAL.get(name, _EDGE[kind]) + [1, 10, 100]) for name, (key, kind) in rng.sample(names, 4)}
+              for _ in range(300)]
+    for settings in cases:
+        conversion = convert(settings, framework)
+        if not conversion.differences():
+            try:
+                _native_starts(tmp_path, conversion)
+            except Exception as error:  # pragma: no cover - the failure message names the case
+                pytest.fail(f"{settings} has no differences but native failed: {error}")
+
+
+def test_values_native_cant_take_are_reported_and_normalized_ones_carry():
+    conversion = convert({"AIWAF_SQL_INJECTION_MODE": "BLOCK", "AIWAF_RATE_KEY_MODE": "IP_ONLY",
+                          "AIWAF_INJECTION_RISK_MODE": "LOG", "AIWAF_RATE_WINDOW": 0.5, "AIWAF_PAYLOAD_MAX_BYTES": 0,
+                          "AIWAF_PATH_RULES": [{"PREFIX": "/a", "RATE_LIMIT": {"WINDOW": 0}, "DISABLE": ["geo_block"]},
+                                               "nope"]}, "flask")
+    assert conversion.config["sql_mode"] == "block" and conversion.config["rate_key_mode"] == "ip"
+    assert conversion.config["injection_risk_mode"] == "log"
+    assert "rate_window" not in conversion.config and "max_bytes" not in conversion.config
+    assert {"PREFIX": "/a", "DISABLE": ["geo_block"]} in conversion.config["path_rules"]
+    reported = {n.setting for n in conversion.differences()}
+    assert {"AIWAF_RATE_WINDOW", "AIWAF_PAYLOAD_MAX_BYTES", "AIWAF_PATH_RULES"} <= reported
+    assert {"AIWAF_SQL_INJECTION_MODE", "AIWAF_RATE_KEY_MODE"}.isdisjoint(reported)
+    environ = convert({}, "flask", environ={"AIWAF_SQL_INJECTION_MODE": "observe"})
+    assert "AIWAF_SQL_INJECTION_MODE" in {n.setting for n in environ.differences()}
+
+
+def test_fastapi_settings_without_differences_always_start_natively(tmp_path, monkeypatch):
+    import random
+    from aiwaf.core import native_settings
+    from aiwaf.core.native_settings import native_config_fastapi
+
+    monkeypatch.setattr(native_settings, "_engine_supports", lambda feature: True)
+    rng, names = random.Random(11), list(native_settings._FASTAPI_DIRECT.items())
+    for _ in range(300):
+        chosen = {path.replace(".", "__"): rng.choice(_EDGE[kind] + [1, 10, 100]) for path, (key, kind) in rng.sample(names, 3)}
+        conversion = native_config_fastapi(fastapi_config(**chosen), environ={})
+        if not conversion.differences():
+            try:
+                _native_starts(tmp_path, conversion)
+            except Exception as error:  # pragma: no cover
+                pytest.fail(f"{chosen} has no differences but native failed: {error}")
+    sql = native_config_fastapi(fastapi_config(ip_keyword_block__sql_injection_mode="Monitor"), environ={})
+    assert sql.config["sql_mode"] == "monitor"
+
+
+def test_native_by_default_needs_a_data_directory_it_can_write(tmp_path, monkeypatch):
+    from aiwaf.core import native_settings
+    from aiwaf.core.native_settings import NativeConversion, native_by_default
+
+    monkeypatch.setattr(native_settings, "_engine_supports", lambda feature: True)
+    ok = NativeConversion(config={"data_dir": str(tmp_path / "data"), "log_path": str(tmp_path / "logs" / "a.csv")})
+    assert native_by_default(ok, environ={}) and (tmp_path / "logs").is_dir()
+    blocked = NativeConversion(config={"data_dir": "/proc/aiwaf-cant-create"})
+    assert not native_by_default(blocked, environ={})
+    assert [n.setting for n in blocked.differences()] == ["data_dir"]
+    read_only = tmp_path / "read-only"
+    read_only.mkdir()
+    monkeypatch.setattr(native_settings.os, "access", lambda path, mode: False)
+    assert not native_by_default(NativeConversion(config={"data_dir": str(read_only)}), environ={})

@@ -19,6 +19,32 @@ const SHIPPED_MODEL_SHA256 = '56254f9bdeba0f96bed3c72ce88ed9f1e5ad552d7510c84742
 const SHIPPED_MODEL = path.join(__dirname, '..', 'resources', 'model.json');
 
 /** What the regular middleware would load as its anomaly model, read without loading it. */
+/** Path rules whose rate limits the native engine can apply; the others are reported. */
+function nativePathRules(rules, note) {
+  if (rules == null) return [];
+  if (!Array.isArray(rules)) {
+    note('AIWAF_PATH_RULES', 'not carried', 'It isn\'t a list of rules.');
+    return [];
+  }
+  const { rateOverrides } = require('./nativePipeline');
+  return rules.flatMap(rule => {
+    if (!rule || typeof rule !== 'object' || Array.isArray(rule)) {
+      note('AIWAF_PATH_RULES', 'not carried', `A path rule must be an object, not ${JSON.stringify(rule)}.`);
+      return [];
+    }
+    let reason = null;
+    try {
+      const limits = rateOverrides(rule.RATE_LIMIT || rule.rate_limit || {});
+      if ((limits.window !== undefined && !(limits.window > 0)) || (limits.max !== undefined && !(limits.max > 0))
+          || (limits.flood !== undefined && !(limits.flood > 0))) reason = 'the native pipeline needs a positive window and limits';
+    } catch (error) { reason = error.message; }
+    if (!reason) return [rule];
+    note('AIWAF_PATH_RULES', 'not carried', `The RATE_LIMIT for ${JSON.stringify(rule.PREFIX ?? rule.prefix)} isn't used natively: ${reason}.`);
+    const { RATE_LIMIT: _a, rate_limit: _b, ...rest } = rule;
+    return [rest];
+  });
+}
+
 function settingsModel(opts) {
   if ((opts.AIWAF_MODEL_STORAGE || 'file') !== 'file') return { kind: 'storage' };
   const file = opts.AIWAF_MODEL_PATH || SHIPPED_MODEL;
@@ -96,24 +122,46 @@ function nativeOptionsFromSettings(rawOpts = {}) {
   profile.rate_window = opts.WINDOW_SEC;
   profile.rate_max = opts.MAX_REQ;
   profile.rate_flood = opts.FLOOD_REQ;
-  if (profile.rate_flood < profile.rate_max) {
+  // Values the native engine can't take are reported and left at its defaults. A count over a
+  // fractional limit is the same as over its whole part, as the regular comparisons work.
+  const unusable = (key, setting, reason) => {
+    delete profile[key];
+    note(setting, 'not carried', `The native pipeline needs ${reason}, so its default applies.`);
+  };
+  if (!(Number(profile.rate_window) > 0)) unusable('rate_window', 'WINDOW_SEC', 'a positive window');
+  for (const [key, setting] of [['rate_max', 'MAX_REQ'], ['rate_flood', 'FLOOD_REQ']]) {
+    if (Number.isFinite(Number(profile[key])) && Math.floor(profile[key]) >= 1) profile[key] = Math.floor(profile[key]);
+    else unusable(key, setting, 'a limit of at least 1');
+  }
+  if (profile.rate_max !== undefined && profile.rate_flood !== undefined && profile.rate_flood < profile.rate_max) {
     profile.rate_max = profile.rate_flood;
-    note('MAX_REQ', 'changed', `It's above FLOOD_REQ (${profile.rate_flood}), so requests were flood-blocked first. The native limit is ${profile.rate_flood}.`);
+    note('MAX_REQ', 'carried', `It's above FLOOD_REQ (${profile.rate_flood}), so requests are flood-blocked first. The native limit is ${profile.rate_flood}, which blocks at the same point.`);
   }
   if (profile.rate_flood > 100000) {
     profile.rate_flood = 100000;
     note('FLOOD_REQ', 'changed', 'The native flood threshold is at most 100000.');
   }
-  profile.min_form_time = opts.AIWAF_MIN_FORM_TIME;
+  // A negative minimum form time never blocks, as 0 doesn't.
+  profile.min_form_time = Number.isFinite(Number(opts.AIWAF_MIN_FORM_TIME)) ? Math.max(0, Number(opts.AIWAF_MIN_FORM_TIME)) : 1;
   if (opts.AIWAF_MAX_PAGE_TIME > 0) profile.max_page_time = opts.AIWAF_MAX_PAGE_TIME;
   else note('AIWAF_MAX_PAGE_TIME', 'not carried', 'The native page expiry must be positive, so its default applies.');
   profile.honeypot_field = opts.HONEYPOT_FIELD ? String(opts.HONEYPOT_FIELD) : '';
   profile.allowed_methods = opts.AIWAF_METHOD_POLICY_ENABLED === true
     ? (opts.AIWAF_ALLOWED_METHODS || []).map(method => String(method).toUpperCase()) : [];
-  profile.static_keywords = [...(opts.staticKeywords || [])].map(String);
+  const list = (value, setting) => {
+    if (value == null) return [];
+    if (Array.isArray(value)) return value.map(String);
+    if (typeof value === 'string') return value.split(',').map(item => item.trim()).filter(Boolean);
+    note(setting, 'not carried', 'It isn\'t a list, so the native default applies.');
+    return null;
+  };
+  const keywords = list(opts.staticKeywords, 'staticKeywords');
+  if (keywords) profile.static_keywords = keywords;
   profile.learning = opts.AIWAF_ENABLE_KEYWORD_LEARNING !== false;
-  profile.geo_allow = [...(opts.AIWAF_GEO_ALLOW_COUNTRIES || [])];
-  profile.geo_block = [...(opts.AIWAF_GEO_BLOCK_COUNTRIES || [])];
+  for (const [key, setting] of [['geo_allow', 'AIWAF_GEO_ALLOW_COUNTRIES'], ['geo_block', 'AIWAF_GEO_BLOCK_COUNTRIES']]) {
+    const countries = list(opts[setting], setting);
+    if (countries) profile[key] = countries;
+  }
   const required = opts.AIWAF_REQUIRED_HEADERS || [];
   if (required && typeof required === 'object' && !Array.isArray(required)) {
     profile.required_headers = (required.DEFAULT || []).map(headerName);
@@ -122,9 +170,17 @@ function nativeOptionsFromSettings(rawOpts = {}) {
     profile.required_headers = [].concat(required).map(headerName);
   }
   // With no required headers, the regular check also skips the quality score.
-  profile.header_min_score = profile.required_headers.length ? opts.AIWAF_HEADER_QUALITY_MIN_SCORE : 0;
-  profile.sql_mode = String(rawOpts.AIWAF_SQL_INJECTION_MODE ?? process.env.AIWAF_SQL_INJECTION_MODE ?? 'block').toLowerCase();
+  // Scores are whole numbers, so a fractional minimum is the next whole one.
+  const minScore = Number(opts.AIWAF_HEADER_QUALITY_MIN_SCORE);
+  if (!profile.required_headers.length) profile.header_min_score = 0;
+  else if (Number.isFinite(minScore) && Math.abs(minScore) < 2 ** 31) profile.header_min_score = Math.ceil(minScore);
+  else note('AIWAF_HEADER_QUALITY_MIN_SCORE', 'not carried', 'It isn\'t a usable score, so the native default applies.');
+  profile.sql_mode = String(rawOpts.AIWAF_SQL_INJECTION_MODE ?? process.env.AIWAF_SQL_INJECTION_MODE ?? 'block').trim().toLowerCase();
+  if (!['block', 'monitor', 'off'].includes(profile.sql_mode)) unusable('sql_mode', 'AIWAF_SQL_INJECTION_MODE', 'block, monitor or off');
   profile.max_bytes = Number(rawOpts.AIWAF_PAYLOAD_MAX_BYTES ?? process.env.AIWAF_PAYLOAD_MAX_BYTES ?? 65536);
+  if (!(Number.isInteger(profile.max_bytes) && profile.max_bytes >= 1 && profile.max_bytes <= 1048576)) {
+    unusable('max_bytes', 'AIWAF_PAYLOAD_MAX_BYTES', 'a whole number of bytes from 1 to 1048576');
+  }
 
   const paths = (opts.AIWAF_EXEMPT_PATHS || []).map(String);
   profile.exempt_paths = paths.filter(path => !PATTERN.test(path));
@@ -165,10 +221,18 @@ function nativeOptionsFromSettings(rawOpts = {}) {
     rateFailureMode: opts.AIWAF_RATE_CACHE_FAILURE_MODE,
     // Resolved as the regular middleware resolves it, with its default trusted proxies.
     trustedProxies: opts.AIWAF_TRUSTED_PROXIES ?? 'default',
-    pathRules: opts.AIWAF_PATH_RULES || [],
+    pathRules: nativePathRules(opts.AIWAF_PATH_RULES, note),
     manifestPath: opts.AIWAF_PATH_MANIFEST,
     injectionRiskMode: opts.AIWAF_INJECTION_RISK_MODE
   };
+  if (options.injectionRiskMode != null) {
+    const mode = String(options.injectionRiskMode).trim().toLowerCase();
+    if (['block', 'log', 'off'].includes(mode)) options.injectionRiskMode = mode;
+    else {
+      delete options.injectionRiskMode;
+      note('AIWAF_INJECTION_RISK_MODE', 'not carried', 'It must be block, log or off, so the native default applies.');
+    }
+  }
   // The regular UUID check matches one segment under uuidRoutePrefix, and asks uuidResolver.
   const uuidPrefix = rawOpts.uuidRoutePrefix || '/user';
   profile.uuid_prefix = `${String(uuidPrefix).replace(/\/+$/, '')}/`;

@@ -9,6 +9,7 @@ const express = require('express');
 const request = require('supertest');
 const aiwaf = require('../index');
 const { nativeOptionsFromSettings } = require('../lib/nativeSettings');
+const createNativeForTest = require('../lib/nativePipeline');
 
 const outcome = (conversion, setting) => conversion.notes.find(n => n.setting === setting)?.outcome;
 const roots = [];
@@ -76,7 +77,7 @@ describe('nativeOptionsFromSettings', () => {
     expect(conversion.profile.rate_max).toBe(40);
     expect(conversion.profile.exempt_ips).toEqual(['203.0.113.4']);
     expect(conversion.profile.exempt_paths).toEqual(['/up']);
-    for (const [setting, expected] of [['MAX_REQ', 'changed'], ['AIWAF_EXEMPT_IPS', 'changed'], ['AIWAF_EXEMPT_PATHS', 'changed'],
+    for (const [setting, expected] of [['MAX_REQ', 'carried'], ['AIWAF_EXEMPT_IPS', 'changed'], ['AIWAF_EXEMPT_PATHS', 'changed'],
       ['AIWAF_MODEL_STORAGE', 'not carried'], ['AIWAF_TRUSTED_PROXIES', 'carried'], ['stores', 'carried']]) {
       expect(outcome(conversion, setting)).toBe(expected);
     }
@@ -142,5 +143,52 @@ describe('aiwaf({ AIWAF_NATIVE_PIPELINE: "from_settings" })', () => {
 
   test('regular options still cannot be mixed with a native profile', () => {
     expect(() => aiwaf({ MAX_REQ: 1, AIWAF_NATIVE_PIPELINE: { profile: {} } })).toThrow(/do not mix legacy options/);
+  });
+});
+
+describe('settings without differences always start natively', () => {
+  // The automatic switch relies on it. Edge values the regular middleware tolerates.
+  const EDGE = {
+    WINDOW_SEC: [0, 0.5, -1, '10', 'abc'], MAX_REQ: [0, -1, '5', 2.5], FLOOD_REQ: [0, -1, 3, 1e6],
+    AIWAF_MIN_FORM_TIME: [-1, '2'], AIWAF_MAX_PAGE_TIME: [0, -1], AIWAF_HEADER_QUALITY_MIN_SCORE: [-1, 2.5, 1e12],
+    AIWAF_SQL_INJECTION_MODE: ['BLOCK', 'Monitor', 'observe', ''], AIWAF_PAYLOAD_MAX_BYTES: [0, 1e7, '1000', 2.5],
+    staticKeywords: [1, 'a,b', []], AIWAF_GEO_BLOCK_COUNTRIES: [10, 'US,CA'], AIWAF_REQUIRED_HEADERS: [[], ['x-custom']],
+    AIWAF_PATH_RULES: [[{ PREFIX: '/', RATE_LIMIT: { WINDOW: 0 } }], [{ PREFIX: '/', RATE_LIMIT: { MAX: -1 } }],
+      [{ PREFIX: '/', RATE_LIMIT: { MAX: '5' } }], [{ PREFIX: '/', RATE_LIMIT: { FLOOD: 0 } }],
+      [{ PREFIX: '/', RATE_LIMIT: { MAX: 100 } }], ['nope'], 'nope'],
+    AIWAF_INJECTION_RISK_MODE: ['LOG', 'warn']
+  };
+  const starts = async conversion => {
+    const { stores: _stores, ...options } = conversion.options;
+    const middleware = await createNativeForTest({ ...options, dataDir: temp(), manifestPath: path.join(temp(), 'none.json'), profile: conversion.profile });
+    middleware.close();
+  };
+  test('one setting at a time and in combinations', async () => {
+    const cases = Object.entries(EDGE).flatMap(([name, values]) => values.map(value => ({ [name]: value })));
+    let seed = 7;
+    const pick = list => { seed = (seed * 16807) % 2147483647; return list[seed % list.length]; };
+    for (let i = 0; i < 300; i++) {
+      const options = {};
+      for (let k = 0; k < 4; k++) { const name = pick(Object.keys(EDGE)); options[name] = pick(EDGE[name].concat([1, 10, 100])); }
+      cases.push(options);
+    }
+    for (const options of cases) {
+      const conversion = nativeOptionsFromSettings(options);
+      if (conversion.differences().length) continue;
+      await expect(starts(conversion)).resolves.toBeUndefined();
+    }
+  });
+
+  test('values native can\'t take are reported, and equivalent ones carry over', () => {
+    const conversion = nativeOptionsFromSettings({ MAX_REQ: 2.5, AIWAF_MIN_FORM_TIME: -1, AIWAF_REQUIRED_HEADERS: ['accept'],
+      AIWAF_HEADER_QUALITY_MIN_SCORE: 2.5, AIWAF_SQL_INJECTION_MODE: 'Monitor', AIWAF_INJECTION_RISK_MODE: 'LOG', staticKeywords: 'a, b' });
+    expect(conversion.profile).toMatchObject({ rate_max: 2, min_form_time: 0, header_min_score: 3, sql_mode: 'monitor', static_keywords: ['a', 'b'] });
+    expect(conversion.options.injectionRiskMode).toBe('log');
+    const refused = nativeOptionsFromSettings({ WINDOW_SEC: 0, AIWAF_PAYLOAD_MAX_BYTES: 0, AIWAF_INJECTION_RISK_MODE: 'warn',
+      staticKeywords: 1, AIWAF_PATH_RULES: [{ PREFIX: '/a', RATE_LIMIT: { WINDOW: 0 }, DISABLE: ['geo_block'] }, 'nope'] });
+    expect(refused.differences().map(n => n.setting)).toEqual(expect.arrayContaining(
+      ['WINDOW_SEC', 'AIWAF_PAYLOAD_MAX_BYTES', 'AIWAF_INJECTION_RISK_MODE', 'staticKeywords', 'AIWAF_PATH_RULES']));
+    expect(refused.options.pathRules).toEqual([{ PREFIX: '/a', DISABLE: ['geo_block'] }]);
+    expect(nativeOptionsFromSettings({ AIWAF_PATH_RULES: 'nope' }).options.pathRules).toEqual([]);
   });
 });

@@ -428,7 +428,24 @@ fn write_csv(
 
 #[pyfunction]
 pub fn csv_headers_match(py: Python<'_>, path: String, expected: Vec<String>) -> PyResult<bool> {
-    py.allow_threads(|| with_table(&path, true, |(headers, _)| Ok(headers == &expected)))
+    py.allow_threads(|| headers_match(&path, &expected))
+}
+
+/// Compares only the header record, read from at most the first 64 KiB, so checking an
+/// append-only log at startup doesn't load (or cache) every row it has accumulated.
+fn headers_match(path: &str, expected: &[String]) -> PyResult<bool> {
+    use std::io::Read;
+
+    let file = File::open(path).map_err(error)?;
+    FileExt::lock_shared(&file).map_err(error)?;
+    let mut reader = csv::ReaderBuilder::new()
+        .flexible(true)
+        .from_reader((&file).take(64 * 1024));
+    match reader.headers() {
+        Ok(headers) => Ok(headers.iter().eq(expected.iter().map(String::as_str))),
+        // A header that doesn't fit, or isn't valid CSV, isn't the expected one.
+        Err(_) => Ok(false),
+    }
 }
 
 #[pyfunction]

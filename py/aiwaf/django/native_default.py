@@ -21,6 +21,16 @@ def native_plan():
     apply_legacy_settings()
     names = {name: getattr(settings, name) for name in dir(settings) if name.startswith("AIWAF_")}
     conversion = native_config(names, "django", middleware=middleware)
+    if "honeypot" in conversion.config.get("enabled", ()):
+        # Native honeypot timing needs a cache that keeps values and reports errors; the regular
+        # middleware also runs with DummyCache or ignored cache errors.
+        from django.core.exceptions import ImproperlyConfigured
+        from .honeypot_cache import DjangoHoneypotCache
+
+        try:
+            DjangoHoneypotCache("default", validate_backend=True)
+        except ImproperlyConfigured as error:
+            conversion.note("CACHES", "not carried", f"{error}.")
     model = None
     if "ai_anomaly" in conversion.config.get("enabled", ()):
         from . import middleware as regular_middleware

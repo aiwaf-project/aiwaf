@@ -299,6 +299,7 @@ struct State {
     model: Option<Arc<IsolationForest>>,
 }
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+static LOG_FAILURE_REPORTED: AtomicBool = AtomicBool::new(false);
 #[pyclass]
 pub struct NativeCSVPipeline {
     profile: Profile,
@@ -1274,9 +1275,11 @@ impl NativeCSVPipeline {
             } else {
                 payload.to_string().len().to_string()
             };
-            csv::csv_log_append(
+            // A request log that can't be written (a full disk, say) mustn't fail the response:
+            // the failure is logged once per process and requests carry on.
+            let logged = csv::csv_log_append(
                 py,
-                path,
+                path.clone(),
                 strings(&LOG_HEADERS),
                 vec![
                     f.date,
@@ -1295,7 +1298,21 @@ impl NativeCSVPipeline {
                     reason,
                 ],
                 p.log_fsync,
-            )?;
+            );
+            if let Err(error) = logged {
+                if !LOG_FAILURE_REPORTED.swap(true, Ordering::Relaxed) {
+                    let _ = py.import_bound("logging").and_then(|logging| {
+                        logging.call_method1("getLogger", ("aiwaf.native",))?.call_method1(
+                            "warning",
+                            (
+                                "AIWAF couldn't write the request log %s: %s; requests continue unlogged",
+                                path,
+                                error.to_string(),
+                            ),
+                        )
+                    });
+                }
+            }
         }
         Ok((final_status, payload.to_string()))
     }

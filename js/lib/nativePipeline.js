@@ -260,18 +260,28 @@ module.exports = async function createNativeMiddleware(options = {}) {
   const profile = JSON.parse(JSON.stringify(options.profile || {}));
   const manifestPath = options.manifestPath ?? process.env.AIWAF_PATH_MANIFEST;
   const rules = getEffectivePathRules(options.pathRules || [], manifestPath ? { manifestPath } : undefined);
-  // Checked once, so a bad rule fails at startup rather than on a request.
+  // The regular rate limiter flood-blocks above the flood threshold before a higher limit is
+  // reached, so a limit above it acts as the threshold: the engine is given that.
+  if (profile.rate_max !== undefined && profile.rate_max > (profile.rate_flood ?? 40)) profile.rate_max = profile.rate_flood ?? 40;
   const profileRate = { window: profile.rate_window ?? 10, max: profile.rate_max ?? 20, flood: profile.rate_flood ?? 40 };
+  const effectiveRate = overrides => {
+    if (!Object.keys(overrides).length) return overrides;
+    const limits = { ...profileRate, ...overrides };
+    limits.flood = Math.min(limits.flood, 100000);
+    limits.max = Math.min(limits.max, limits.flood);
+    return limits;
+  };
+  // Checked once, so a bad rule fails at startup rather than on a request.
   for (const rule of rules) {
-    const limits = { ...profileRate, ...rateOverrides(rule.RATE_LIMIT || rule.rate_limit || {}) };
-    if (!(limits.window > 0) || !(limits.max > 0) || limits.flood < limits.max || limits.flood > 100000) {
+    const limits = effectiveRate(rateOverrides(rule.RATE_LIMIT || rule.rate_limit || {}));
+    if (Object.keys(limits).length && (!(limits.window > 0) || !(limits.max > 0))) {
       throw new Error(`Invalid RATE_LIMIT for path rule ${JSON.stringify(rule.PREFIX ?? rule.prefix)}`);
     }
   }
   const routePlan = req => {
     const meta = req.aiwafRoute || {};
     const plan = createRoutePlan(String(req.path || req.url || '/').split('?')[0], rules, meta);
-    return { plan, disabled: ALL_MIDDLEWARES.filter(name => !plan.shouldApply(name)), rate: rateOverrides(plan.getOverrides('RATE_LIMIT')) };
+    return { plan, disabled: ALL_MIDDLEWARES.filter(name => !plan.shouldApply(name)), rate: effectiveRate(rateOverrides(plan.getOverrides('RATE_LIMIT'))) };
   };
   if (!Object.hasOwn(profile, 'blocklist') && Object.hasOwn(profile, 'blacklist')) profile.blocklist = profile.blacklist;
   delete profile.blacklist;
@@ -537,4 +547,5 @@ module.exports = async function createNativeMiddleware(options = {}) {
 module.exports.DEFER_BODY = DEFER_BODY;
 module.exports.regularStores = regularStores;
 module.exports.recentAnswers = recentAnswers;
+module.exports.rateOverrides = rateOverrides;
 module.exports.redisRateCounter = require('./nativeRateCounter').redisRateCounter;

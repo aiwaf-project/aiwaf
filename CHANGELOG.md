@@ -1,5 +1,72 @@
 # Changelog
 
+## Python 1.2.2 / aiwaf-rust 0.2.10 / Node.js 1.2.2 — prepared release
+
+- **Fix (aiwaf-rust 0.2.10):** the native pipeline's startup check of its request log read the
+  whole file into memory, and kept it cached for the life of the worker, just to compare the
+  header row. Logs only grow, so a long-running site could need gigabytes per worker, or be
+  killed on a host with a memory limit. It now reads only the header. A request log that can't
+  be written, as on a full disk, no longer turns every response into a 500: the failure is
+  logged once on `aiwaf.native` and requests carry on.
+- **Fix:** Python's native pipeline handles store failures like Node.js's: a failed blocklist,
+  exemption, keyword or country read is logged and read as not blocked, not exempt or nothing
+  learned, so a database outage doesn't turn every request into an error. A failed exemption
+  read now matches the regular middleware, which fails open. A block or keyword that can't be
+  written is logged instead of failing a response that was already decided, and the worker
+  still remembers its own block.
+- **Fix:** the switch to the native pipeline checks that its data directory can be created and
+  written. With model storage, the regular middleware writes no files, so a site whose working
+  directory isn't writable (the default `aiwaf_data` is relative to it) failed to start after
+  the switch. It now stays on the regular middleware and says why.
+- **Fix (Node.js):** when `aiwaf(options)` chose the native pipeline automatically and it then
+  couldn't start (an unreadable model file, say), the first request awaited the failed startup,
+  and Express 4 left that as an unhandled rejection, which ends the Node.js process. The
+  automatic switch now falls back to the regular middleware with a warning. A native pipeline
+  chosen explicitly passes its startup error to `next(error)` for each request instead of
+  crashing, and the engine's startup errors are now `Error`s with a message instead of strings.
+- **Fix (Node.js, regular middleware):** an error inside `aiwaf(options)`, such as a store
+  failing during a database outage, became an unhandled rejection, which ends the Node.js
+  process, and left the request hanging. The middleware now passes it to `next(error)`.
+  Blocklist and recent-request reads fail open with one warning per kind, as exemption checks
+  already did; with the default `AIWAF_RATE_CACHE_FAILURE_MODE = 'closed'` the rate limiter
+  still answers 503 when its storage fails, and `'open'` lets requests through. A block that
+  can't be written is reported and the request is still denied.
+- **Fix (Node.js, regular middleware):** a catch-all `*` route, as in `app.all('*', ...)`, made
+  the anomaly stage build an invalid pattern and throw on every request, which ended the
+  process. Route paths are now matched as Express matches them: `:name` is one segment
+  (route parameters were never matched before, so `/users/:id` didn't recognise `/users/5`),
+  `*` matches anything, other characters are literal, and arrays and RegExp routes work.
+- Request handling was compared with the regular middleware in Django, Flask and FastAPI,
+  with hundreds of malformed requests (invalid encodings, NUL bytes, oversized headers and
+  query strings, broken bodies) and failing stores, lookups and disks, and in Express over raw
+  sockets; the native pipeline now errors in no case where the regular middleware doesn't.
+
+- **Fix:** a site whose rate limits put a limit above the flood threshold failed to start on
+  1.2.0 and 1.2.1 when the regular middleware switched to the native pipeline, with
+  `ValueError: Invalid RATE_LIMIT for path rule`. A common case was a path rule raising `MAX`
+  above the default flood threshold of 40, such as `{"PREFIX": "/", "RATE_LIMIT": {"MAX": 100}}`.
+  The regular rate limiter flood-blocks above the flood threshold before such a limit is reached,
+  so the native pipelines in Python and Node.js now treat that limit as the threshold, blocking
+  at the same point, for path rules and for the profile. The settings converters report it as
+  carried, so it no longer keeps an app on the regular middleware. A rule window under one
+  second or a negative limit is still refused at startup.
+- **Fix:** other settings the regular middleware accepts could also stop a site that switched
+  to the native pipeline. The settings converters now check every value against what the
+  native engines take, and the switch only happens when all of them start natively:
+  - Values are normalized as the regular middleware reads them: `AIWAF_SQL_INJECTION_MODE`,
+    `AIWAF_INJECTION_RISK_MODE` and the rate key mode in any case (`"BLOCK"`, `"IP"`); in
+    Node.js, a fractional `MAX_REQ` or header score, a negative minimum form time, and
+    comma-separated keyword or country lists.
+  - Values native can't represent are reported and keep the regular middleware: windows under
+    one second (or not positive in Node.js), negative or zero limits, a UUID threshold of 0,
+    negative weights or times, an out-of-range `AIWAF_PAYLOAD_MAX_BYTES`, an invalid
+    path-rule `RATE_LIMIT`, and a path rule that isn't a dictionary.
+  - Django: with the honeypot middleware listed, a `DummyCache` or a cache set to ignore errors
+    keeps the regular middleware, which runs with either; native honeypot timing can't.
+  - Node.js: options the converter can't read keep the regular middleware instead of failing.
+  Tests now try hundreds of edge values and combinations and require every one reported
+  without differences to start natively.
+
 ## Python 1.2.1 / Node.js 1.2.1 — prepared release
 
 - Flask's `AIWAF_USE_CSV` carries over to the native pipeline. It was reported as a setting

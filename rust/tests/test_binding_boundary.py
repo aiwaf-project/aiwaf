@@ -116,6 +116,22 @@ def test_csv_headers_match(tmp_path):
     assert aiwaf_rust.csv_headers_match(path, ["other"]) is False
 
 
+def test_csv_headers_match_reads_only_the_header(tmp_path):
+    # An append-only log can be large; startup compares its header without loading it.
+    log = tmp_path / "log.csv"
+    with log.open("w", newline="") as file:
+        file.write(",".join(HEADERS) + "\n")
+        file.write("1.1.1.1,x\n" * 200000 + 'broken,"unterminated\n')
+    assert aiwaf_rust.csv_headers_match(str(log), HEADERS) is True
+    # A header that doesn't fit in the first 64 KiB, or isn't valid CSV, doesn't match.
+    huge = tmp_path / "huge.csv"
+    huge.write_text("x" * (70 * 1024) + "\n")
+    assert aiwaf_rust.csv_headers_match(str(huge), HEADERS) is False
+    broken = tmp_path / "broken.csv"
+    broken.write_bytes(b'"open\n')
+    assert aiwaf_rust.csv_headers_match(str(broken), HEADERS) is False
+
+
 def test_csv_remove_key_and_set_update(tmp_path):
     path = seeded(tmp_path)
     aiwaf_rust.csv_remove_key(path, HEADERS, "1.1.1.1")

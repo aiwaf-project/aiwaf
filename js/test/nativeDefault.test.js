@@ -170,3 +170,36 @@ describe('the anomaly model', () => {
     expect(missing.notes.find(n => n.setting === 'AIWAF_MODEL_PATH').outcome).toBe('carried');
   });
 });
+
+describe('when the native pipeline can\'t start', () => {
+  test('an automatic switch falls back to the regular middleware', async () => {
+    delete process.env.AIWAF_NATIVE_PIPELINE;
+    installed(aiwaf.NATIVE_DEFAULT_WASM);
+    jest.spyOn(console, 'info').mockImplementation(() => {});
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    // A model that claims to be a WASM model but can't be loaded: only startup finds out.
+    const model = path.join(temp(), 'model.json');
+    fs.writeFileSync(model, JSON.stringify({ model_type: 'aiwaf_wasm.IsolationForest', model_state: { broken: true } }));
+    const middleware = aiwaf({ AIWAF_MODEL_PATH: model, AIWAF_PATH_MANIFEST: path.join(temp(), 'none.json') });
+    const fallback = await middleware.ready;
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('the regular middleware runs instead'));
+    expect(fallback.diagnostics()).toMatchObject({ native: false });
+    expect(fallback.inspectBody()).toBeNull();
+    fallback.setModel();
+    fallback.close();
+    const app = express();
+    app.use(middleware);
+    app.get('/items', (_req, res) => res.json({ ok: true }));
+    expect((await request(app).get('/items')).status).toBe(200);
+  });
+
+  test('an explicit native pipeline reports the error to each request instead of crashing', async () => {
+    const middleware = aiwaf({ AIWAF_NATIVE_PIPELINE: { profile: { sql_mode: 'loud' } } });
+    await expect(middleware.ready).rejects.toThrow();
+    const app = express();
+    app.use(middleware);
+    app.get('/items', (_req, res) => res.json({ ok: true }));
+    app.use((error, _req, res, _next) => res.status(500).json({ error: 'startup' }));
+    expect((await request(app).get('/items')).body).toEqual({ error: 'startup' });
+  });
+});

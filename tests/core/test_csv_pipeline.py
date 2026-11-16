@@ -357,9 +357,24 @@ def test_adapter_path_rules_override_rate_limits(tmp_path):
     assert [_request(pipeline, "/api/items")[0] for _ in range(2)] == [0, 429]
     assert [_request(pipeline, "/home")[0] for _ in range(2)] == [0, 0]
     with pytest.raises(ValueError):
-        _adapter(tmp_path, enabled=["rate_limit"], path_rules=[{"PREFIX": "/x/", "RATE_LIMIT": {"MAX": 9, "FLOOD": 3}}])
+        _adapter(tmp_path, enabled=["rate_limit"], path_rules=[{"PREFIX": "/x/", "RATE_LIMIT": {"WINDOW": 0}}])
     with pytest.raises(ValueError):
         _adapter(tmp_path, path_rules=[{"PREFIX": "/x/", "RATE_LIMIT": {"MAX": "many"}}])
+
+
+@needs_route_facts
+@pytest.mark.parametrize("config, flood", [
+    ({"path_rules": [{"PREFIX": "/", "RATE_LIMIT": {"MAX": 9, "FLOOD": 3}}]}, 3),
+    # A rule raising MAX above the default flood threshold, as a site upgrading to 1.2 had.
+    ({"path_rules": [{"PREFIX": "/", "RATE_LIMIT": {"WINDOW": 60, "MAX": 100}}]}, 40),
+    ({"rate_max": 100}, 40),
+    ({"rate_max": 50, "rate_flood": 5}, 5),
+])
+def test_a_limit_above_the_flood_threshold_acts_as_the_threshold(tmp_path, config, flood):
+    # The regular rate limiter flood-blocks above the threshold first, so the limit never applies.
+    pipeline = _adapter(tmp_path, enabled=["rate_limit"], **config)
+    statuses = [_request(pipeline, "/home")[0] for _ in range(flood + 1)]
+    assert statuses[-2:] == [0, 403]
 
 
 @needs_route_facts
@@ -818,3 +833,32 @@ def test_adapter_refuses_a_rate_counter_on_an_older_engine(tmp_path, monkeypatch
     with pytest.raises(RuntimeError, match="rate_counter"):
         _adapter(tmp_path, rate_backend="redis", rate_redis_url="redis://localhost")
 
+
+
+@needs_host_store
+def test_a_failing_store_is_logged_and_requests_carry_on(tmp_path, caplog):
+    # Reads fail open, as the regular middleware's exemption check does; writes don't fail responses.
+    class Broken(FakeStores):
+        def is_blocked(self, ip):
+            raise OSError("database is locked")
+
+        def is_exempted(self, ip, path):
+            raise OSError("database is locked")
+
+        def top_keywords(self, n):
+            raise OSError("database is locked")
+
+        def blocked_countries(self):
+            raise OSError("database is locked")
+
+        def block(self, ip, reason):
+            raise OSError("disk full")
+
+    # Failed reads aren't cached, so every request tries the store again.
+    pipeline = _store_pipeline(tmp_path, Broken(), enabled=["ip_keyword_block", "geo_block"], learning=True)
+    with caplog.at_level("WARNING", "aiwaf.native"):
+        assert _store_get(pipeline, "/a", "203.0.113.90") == 0
+        # The decision still stands when the block can't be written, and this worker remembers it.
+        assert _store_get(pipeline, "/admin-backup.php", "203.0.113.91", exists=False) == 403
+        assert _store_get(pipeline, "/b", "203.0.113.91") == 403
+    assert "store read failed (exemptions)" in caplog.text and "store write failed (block)" in caplog.text
