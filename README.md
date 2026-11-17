@@ -39,15 +39,15 @@ the supported Redis backends when sharing limits across workers.
 
 Each package is versioned and released independently.
 
-Python 1.2.2, Rust/Python 0.2.10, Node.js 1.2.2, WASM 0.2.7, and Java 1.3.6 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
+Python 1.2.3, Rust/Python 0.2.11, Node.js 1.2.3, WASM 0.2.8, and Java 1.3.7 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
 
 | Runtime | Package | Repository version | Primary use |
 | --- | --- | ---: | --- |
-| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.2.2` | Django, Flask, and FastAPI protection |
-| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.2.2` | Express and Node framework middleware |
-| Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.10` | Native Python acceleration and JSON model inference |
-| WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.7` | Rust detection and model primitives for JavaScript |
-| Java | `io.github.aiwaf-project:aiwaf-java` | `1.3.6` | Spring MVC and Jakarta Servlet protection |
+| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.2.3` | Django, Flask, and FastAPI protection |
+| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.2.3` | Express and Node framework middleware |
+| Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.11` | Native Python acceleration and JSON model inference |
+| WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.8` | Rust detection and model primitives for JavaScript |
+| Java | `io.github.aiwaf-project:aiwaf-java` | `1.3.7` | Spring MVC and Jakarta Servlet protection |
 
 Supported framework integrations include Django, Flask, FastAPI, Express, Fastify, Hapi, Koa, NestJS, Next.js API routes, AdonisJS, Sails.js, Spring MVC, and Jakarta Servlet.
 
@@ -256,7 +256,7 @@ pip install "aiwaf[django]"
 pip install "aiwaf[flask]"
 pip install "aiwaf[fastapi]"
 
-# Backward-compatible alias; Python 1.2.2 already installs aiwaf-rust
+# Backward-compatible alias; Python 1.2.3 already installs aiwaf-rust
 pip install "aiwaf[rust]"
 
 # Node.js middleware
@@ -266,13 +266,13 @@ npm install aiwaf
 npm install aiwaf-wasm
 ```
 
-Java 1.3.6, after it is published to Maven Central:
+Java 1.3.7, after it is published to Maven Central:
 
 ```xml
 <dependency>
   <groupId>io.github.aiwaf-project</groupId>
   <artifactId>aiwaf-java</artifactId>
-  <version>1.3.6</version>
+  <version>1.3.7</version>
 </dependency>
 ```
 
@@ -280,7 +280,7 @@ Java 1.3.6, after it is published to Maven Central:
 
 The Python package requires Python 3.10 or newer. Framework dependencies are optional, so install only the extra needed by the application.
 
-Python 1.2.2 requires `aiwaf-rust>=0.2.10`; the `rust` extra remains an installation
+Python 1.2.3 requires `aiwaf-rust>=0.2.11`; the `rust` extra remains an installation
 alias. Publish the matching Rust wheel with `NativeCSVPipeline` support before
 the Python release. The Rust release workflow builds Linux x86_64/aarch64,
 musl x86_64, macOS x86_64/arm64 and Windows x86_64 wheels and checks the native
@@ -1099,7 +1099,7 @@ existence to `Boolean(req.route)`. Supply accurate facts when the firewall runs
 before Express resolves routes. Country headers are not implicitly trusted.
 
 **`aiwaf(options)` runs the native pipeline by default** when two things hold: the
-installed aiwaf-wasm is 0.2.7 or newer (it has every native feature), and every option
+installed aiwaf-wasm is 0.2.8 or newer (it has every native feature), and every option
 carries over exactly, so the conversion report below lists no differences. Otherwise it
 runs the regular middleware, as before. It logs one line when it picks the native
 pipeline. To keep the regular middleware, set `AIWAF_NATIVE_PIPELINE: false` in the
@@ -1346,7 +1346,7 @@ cp -R ../licenses crates/aiwaf_wasm/pkg/
 
 ## Java package
 
-AIWAF Java 1.3.6 targets Java 17, Spring Framework 7.0, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
+AIWAF Java 1.3.7 targets Java 17, Spring Framework 7.0, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
 
 ### Core engine
 
@@ -1435,7 +1435,7 @@ UUID protection uses Python-compatible weighted signals: malformed input, valid 
 Generate a route manifest from the live Spring application rather than supplying controller methods manually:
 
 ```bash
-java -cp "your-app.jar:aiwaf-java-1.3.6.jar" \
+java -cp "your-app.jar:aiwaf-java-1.3.7.jar" \
   com.aiwaf.cli.AiwafConsole init \
   --app com.example.Application \
   --output .aiwaf/paths.json
@@ -1666,11 +1666,11 @@ Release versions and tags must match the relevant manifest.
 
 | Package | Manifest | Tag | Workflow |
 | --- | --- | --- | --- |
-| Python `aiwaf` | `pyproject.toml` | `python-v1.2.2` | `python-publish.yml` |
-| npm `aiwaf` | `js/package.json` | `js-v1.2.2` | `npm-publish.yml` |
-| PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.10` | `rust-publish.yml` |
-| npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.7` | `wasm-publish.yml` |
-| Maven `aiwaf-java` | `java/pom.xml` | `java-v1.3.6` | `java-publish.yml` |
+| Python `aiwaf` | `pyproject.toml` | `python-v1.2.3` | `python-publish.yml` |
+| npm `aiwaf` | `js/package.json` | `js-v1.2.3` | `npm-publish.yml` |
+| PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.11` | `rust-publish.yml` |
+| npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.8` | `wasm-publish.yml` |
+| Maven `aiwaf-java` | `java/pom.xml` | `java-v1.3.7` | `java-publish.yml` |
 
 Python and Rust publish to PyPI with trusted publishing. The npm workflows use npm trusted publishing and stage packages for approval. Configure the trusted publisher with organization `aiwaf-project`, repository `aiwaf`, the exact workflow filename, and the environment used by that workflow.
 
@@ -1678,11 +1678,11 @@ Java publishing uses the protected `maven-publish` environment plus `GPG_PRIVATE
 
 Registry releases are immutable. Increment the relevant manifest version before publishing another release.
 
-This release is Python `aiwaf 1.2.2` with `aiwaf-rust 0.2.10`, and npm `aiwaf 1.2.2`.
-Publish `aiwaf-rust 0.2.10` before Python `aiwaf 1.2.2`, which requires it. `aiwaf-wasm`
-0.2.7 is unchanged, so npm `aiwaf` 1.2.2 can be published directly. npm `aiwaf` 1.2.2 declares `aiwaf-wasm ^0.2.7`; the published
-1.2.0 still declared `^0.2.6`. Java has no changes since
-1.3.6, which is already published.
+This release is Python `aiwaf 1.2.3` with `aiwaf-rust 0.2.11`, npm `aiwaf 1.2.3` with
+`aiwaf-wasm 0.2.8`, and Java `aiwaf-java 1.3.7`. Publish `aiwaf-rust 0.2.11` before Python
+`aiwaf 1.2.3`, and `aiwaf-wasm 0.2.8` before npm `aiwaf 1.2.3`, which require them. After
+`aiwaf-wasm 0.2.8` is published, run `npm install aiwaf-wasm@0.2.8` in `js/` so the lockfile
+resolves it, then publish npm `aiwaf`. Java publishes on its own.
 
 ## Security and limitations
 

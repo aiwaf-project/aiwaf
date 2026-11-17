@@ -126,16 +126,31 @@ class NativePipelineDjangoStoreTests(TestCase):
             'aiwaf-rust with rate counters required')
 class NativePipelineDjangoCacheRateTests(SimpleTestCase):
     def test_rate_limits_are_counted_in_the_django_cache_and_shared(self):
-        from django.core.cache import caches
         from aiwaf.django.csv_pipeline import NativeAIWAFMiddleware
-        caches['default'].clear()
-        with TemporaryDirectory() as directory, override_settings(ROOT_URLCONF=__name__, AIWAF_CSV_PIPELINE={
-                'data_dir': directory, 'enabled': ['rate_limit'], 'exempt_paths': [], 'exempt_ips': [],
-                'rate_backend': 'django_cache', 'rate_max': 2, 'rate_flood': 10}):
+        # A cache shared between processes, as Redis or Memcached would be.
+        with TemporaryDirectory() as directory, TemporaryDirectory() as cache_dir, override_settings(
+                ROOT_URLCONF=__name__, CACHES={"default": {"BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
+                                                           "LOCATION": cache_dir}},
+                AIWAF_CSV_PIPELINE={'data_dir': directory, 'enabled': ['rate_limit'], 'exempt_paths': [], 'exempt_ips': [],
+                                    'rate_backend': 'django_cache', 'rate_max': 2, 'rate_flood': 10}):
             # Two middleware instances stand in for two workers sharing one cache.
             workers = [NativeAIWAFMiddleware(echo), NativeAIWAFMiddleware(echo)]
             factory = RequestFactory()
             statuses = [workers[i % 2](factory.get('/echo', REMOTE_ADDR='198.51.100.7')).status_code for i in range(3)]
+            assert statuses == [200, 200, 429]
+
+    def test_a_process_local_cache_uses_the_engines_own_memory(self):
+        # LocMemCache keeps values in this process only, as the engine's memory does.
+        from aiwaf.django.csv_pipeline import NativeAIWAFMiddleware
+        with TemporaryDirectory() as directory, override_settings(
+                ROOT_URLCONF=__name__, CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}},
+                AIWAF_CSV_PIPELINE={'data_dir': directory, 'enabled': ['rate_limit', 'honeypot'], 'exempt_paths': [],
+                                    'exempt_ips': [], 'rate_backend': 'django_cache', 'rate_max': 2, 'rate_flood': 10}):
+            middleware = NativeAIWAFMiddleware(echo)
+            assert middleware.pipeline.profile["rate_backend"] == "memory"
+            assert middleware.pipeline.profile["honeypot_backend"] == "memory"
+            factory = RequestFactory()
+            statuses = [middleware(factory.get('/echo', REMOTE_ADDR='198.51.100.8')).status_code for _ in range(3)]
             assert statuses == [200, 200, 429]
 
     def test_an_unknown_cache_alias_fails_at_startup(self):
@@ -145,3 +160,32 @@ class NativePipelineDjangoCacheRateTests(SimpleTestCase):
                 'data_dir': directory, 'rate_backend': 'django_cache', 'rate_cache_alias': 'missing'}):
             with self.assertRaises(ImproperlyConfigured):
                 NativeAIWAFMiddleware(echo)
+
+
+class NativeUrlResolutionCacheTests(SimpleTestCase):
+    def test_recent_paths_are_resolved_once_per_urlconf_language_and_path(self):
+        from unittest.mock import patch
+        from django.utils import translation
+        from aiwaf.django import csv_pipeline
+
+        csv_pipeline._RESOLVED.clear()
+        with patch.object(csv_pipeline, "resolve", wraps=csv_pipeline.resolve) as resolver:
+            self.assertEqual(csv_pipeline._resolved("/echo", __name__)[1:], (True, None))
+            self.assertEqual(csv_pipeline._resolved("/echo", __name__)[1:], (True, None))
+            self.assertEqual(resolver.call_count, 1)
+            self.assertEqual(csv_pipeline._resolved("/missing", __name__), (None, False, None))
+            self.assertEqual(csv_pipeline._resolved("/items/abc/", __name__)[2], "abc")
+            # i18n_patterns resolve per language, so the language is part of the key.
+            with translation.override("fr"):
+                csv_pipeline._resolved("/echo", __name__)
+            self.assertEqual(resolver.call_count, 4)
+
+    def test_the_cache_is_bounded(self):
+        from unittest.mock import patch
+        from aiwaf.django import csv_pipeline
+
+        csv_pipeline._RESOLVED.clear()
+        with patch.object(csv_pipeline, "_RESOLVED_LIMIT", 3):
+            for index in range(5):
+                csv_pipeline._resolved(f"/missing/{index}", __name__)
+            self.assertEqual(len(csv_pipeline._RESOLVED), 3)

@@ -44,9 +44,20 @@ function knownRoutes(app) {
 
 // An Express route path (a string, an array of them, or a RegExp) matched against a request
 // path: :name is one segment (:name? optional) and * is anything. Other characters are literal.
+const compiledRoutes = new Map();
 function routeMatches(route, path) {
   if (route instanceof RegExp) return route.test(path);
   if (Array.isArray(route)) return route.some(item => routeMatches(item, path));
+  const key = String(route);
+  if (compiledRoutes.has(key)) return compiledRoutes.get(key)?.test(path) ?? false;
+  const regex = compileRoute(key);
+  if (compiledRoutes.size >= 1024) compiledRoutes.clear();
+  compiledRoutes.set(key, regex);
+  return regex ? regex.test(path) : false;
+}
+
+// null when the route can't be compiled, which then matches nothing.
+function compileRoute(route) {
   const pattern = String(route).split(/(\/?:\w+\??|\*)/).map(part => {
     if (part === '*') return '.*';
     const param = part.match(/^(\/?):\w+(\?)?$/);
@@ -54,9 +65,9 @@ function routeMatches(route, path) {
     return part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }).join('');
   try {
-    return new RegExp(`^${pattern}/?$`).test(path);
+    return new RegExp(`^${pattern}/?$`);
   } catch (_) {
-    return false;
+    return null;
   }
 }
 
@@ -147,7 +158,7 @@ function applyAutoMiddlewareDefaults(opts, enabled, rawOpts = {}) {
 
 // The first aiwaf-wasm with every engine feature from_settings relies on: stores, shared rate
 // counts, path-rule limits, monitor mode and UUID resolvers.
-const NATIVE_DEFAULT_WASM = '0.2.7';
+const NATIVE_DEFAULT_WASM = '0.2.8';
 
 function installedWasmVersion() {
   const fs = require('fs');
@@ -173,14 +184,31 @@ const OFF = new Set(['false', '0', 'off', 'no']);
 function automaticNative(rawOpts) {
   if (OFF.has(String(process.env.AIWAF_NATIVE_PIPELINE ?? '').trim().toLowerCase())) return null;
   const version = installedWasmVersion();
-  if (!version || !atLeast(version, NATIVE_DEFAULT_WASM)) return null;
+  if (!version) return staysRegular('aiwaf-wasm isn\'t installed (npm install aiwaf-wasm).');
+  if (!atLeast(version, NATIVE_DEFAULT_WASM)) {
+    return staysRegular(`the installed aiwaf-wasm ${version} is older than ${NATIVE_DEFAULT_WASM} (npm install aiwaf-wasm@latest).`);
+  }
   let conversion;
   try {
     conversion = require('./nativeSettings').nativeOptionsFromSettings(rawOpts);
-  } catch (_) {
-    return null; // Options the converter can't read stay with the regular middleware.
+  } catch (error) {
+    // Options the converter can't read stay with the regular middleware.
+    return staysRegular(`its options couldn't be converted (${error && error.message}).`);
   }
-  return conversion.differences().length ? null : conversion;
+  const differences = conversion.differences();
+  if (!differences.length) return conversion;
+  return staysRegular(`these options don't carry over to it exactly:\n${differences
+    .map(note => `- ${note.setting}: ${note.outcome}. ${note.detail}`.trimEnd()).join('\n')}`);
+}
+
+// Why an app runs the regular middleware and not the native pipeline, said once per reason.
+const reportedReasons = new Set();
+function staysRegular(reason) {
+  if (!reportedReasons.has(reason)) {
+    reportedReasons.add(reason);
+    console.info(`AIWAF: using the regular middleware, not the native pipeline, because ${reason}`);
+  }
+  return null;
 }
 
 // Store reads fail open, as exemption checks already do: a storage outage is reported once per
@@ -218,6 +246,8 @@ module.exports = function aiwaf(rawOpts = {}) {
       const conversion = converted || require('./nativeSettings').nativeOptionsFromSettings(regular);
       conversion.log(nativeOptions.logger || console);
       native = { ...conversion.options, ...nativeOptions, profile: { ...conversion.profile, ...(overrides || {}) } };
+      // Chosen automatically, it runs only if it can answer exactly as the regular middleware.
+      if (rawOpts.AIWAF_NATIVE_PIPELINE.automatic) native.exact = true;
     } else if (Object.keys(rawOpts).some(key => key !== 'AIWAF_NATIVE_PIPELINE')) {
       throw new Error('Native pipeline uses a dedicated profile; do not mix legacy options');
     }
@@ -621,3 +651,4 @@ module.exports = function aiwaf(rawOpts = {}) {
 };
 
 module.exports.NATIVE_DEFAULT_WASM = NATIVE_DEFAULT_WASM;
+module.exports.matchesKnownRoute = matchesKnownRoute;

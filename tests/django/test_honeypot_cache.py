@@ -16,6 +16,14 @@ from django.test import SimpleTestCase, RequestFactory, override_settings
 from aiwaf.django.csv_pipeline import NativeAIWAFMiddleware
 from aiwaf.django.honeypot_cache import DjangoHoneypotCache
 from tests.django.test_csv_pipeline import echo
+from django.core.cache.backends.locmem import LocMemCache
+
+
+class SharedStandIn(LocMemCache):
+    """Stands in for a shared cache such as Redis: native calls it rather than keeping its own memory."""
+
+
+STAND_IN = 'tests.django.test_honeypot_cache.SharedStandIn'
 
 
 class NativeHoneypotCacheTests(SimpleTestCase):
@@ -27,8 +35,7 @@ class NativeHoneypotCacheTests(SimpleTestCase):
                        'exempt_paths': [], 'ip_blocking': False}
         self.settings = override_settings(ROOT_URLCONF='tests.django.test_csv_pipeline',
             AIWAF_CSV_PIPELINE=self.config,
-            CACHES={'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-                                'LOCATION': self.directory.name}})
+            CACHES={'default': {'BACKEND': STAND_IN, 'LOCATION': self.directory.name}})
         self.settings.enable()
         self.addCleanup(self.settings.disable)
 
@@ -149,6 +156,11 @@ class NativeHoneypotCacheTests(SimpleTestCase):
     def test_locmem_warning_and_invalid_alias(self):
         with self.assertWarnsRegex(RuntimeWarning, 'not shared across workers'):
             NativeAIWAFMiddleware(echo)
+        # A plain LocMemCache is process-local, so native keeps timing in its own memory instead.
+        with override_settings(CACHES={'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}}), \
+                warnings.catch_warnings():
+            warnings.simplefilter('error', RuntimeWarning)
+            self.assertEqual(NativeAIWAFMiddleware(echo).pipeline.profile['honeypot_backend'], 'memory')
         for alias in ('', 12, 'not-configured'):
             with self.subTest(alias=alias), override_settings(AIWAF_CSV_PIPELINE={**self.config, 'honeypot_cache_alias': alias}):
                 with self.assertRaises(ImproperlyConfigured):
@@ -171,7 +183,7 @@ class NativeHoneypotCacheTests(SimpleTestCase):
     def test_fail_open_cache_configuration_rejected(self):
         for option in ('IGNORE_EXCEPTIONS', 'ignore_exc'):
             with self.subTest(option=option), override_settings(CACHES={'default': {
-                'BACKEND': 'django.core.cache.backends.locmem.LocMemCache', 'OPTIONS': {option: True}}}):
+                'BACKEND': STAND_IN, 'OPTIONS': {option: True}}}):
                 with self.assertRaises(ImproperlyConfigured):
                     self.middleware()
 

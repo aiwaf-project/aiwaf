@@ -151,7 +151,7 @@ public final class AiwafEngine {
         boolean pathExempted = isPathExempted(req);
         String ip = blankToDefault(req.ip(), "127.0.0.1");
         boolean ipExempted = isIpExempted(ip);
-        if (!ipExempted && BlocklistManager.isBlocked(runtimeStorage, ip)) {
+        if (!ipExempted && readStore("blocklist", false, () -> BlocklistManager.isBlocked(runtimeStorage, ip))) {
             AiwafDecision d = AiwafDecision.deny(403, "IP blocklisted");
             return finalizeDecision(d, startedNs, "ip_blocklisted");
         }
@@ -285,7 +285,8 @@ public final class AiwafEngine {
                 return finalizeDecision(d, startedNs, "geo_allowlist");
             }
             boolean blockedByConfig = config.geoBlockedCountries.contains(country);
-            boolean blockedByStore = runtimeStorage.geoBlockStore().getCountries().contains(country);
+            boolean blockedByStore = readStore("blocked countries", Set.<String>of(),
+                    () -> runtimeStorage.geoBlockStore().getCountries()).contains(country);
             if (blockedByConfig || blockedByStore) {
                 telemetryIncrement("middleware.geo_block.blocked");
                 AiwafDecision d = AiwafDecision.deny(403, "Geo blocked");
@@ -343,7 +344,8 @@ public final class AiwafEngine {
     public boolean isPathExempted(AiwafRequest req) {
         return config.isAutoExemptPath(req.path())
                 || ExemptionsCore.isPathExempt(req.path(), config.exemptPaths, config.exemptAllowWildcards, config.exemptAllowPrefix)
-                || runtimeStorage.pathExemptionStore().isExempted(req.path(), config.exemptAllowWildcards, config.exemptAllowPrefix);
+                || readStore("path exemptions", false, () -> runtimeStorage.pathExemptionStore()
+                        .isExempted(req.path(), config.exemptAllowWildcards, config.exemptAllowPrefix));
     }
 
     public boolean shouldApplyMiddleware(AiwafRequest req, String middlewareName) {
@@ -590,7 +592,8 @@ public final class AiwafEngine {
     private String detectLearnedKeyword(String path) {
         String p = path == null ? "" : path.toLowerCase(Locale.ROOT);
         String[] tokens = p.split("\\W+");
-        Set<String> learned = new HashSet<>(runtimeStorage.keywordStore().getTopKeywords(100));
+        Set<String> learned = new HashSet<>(readStore("keywords", List.<String>of(),
+                () -> runtimeStorage.keywordStore().getTopKeywords(100)));
         for (String token : tokens) {
             if (config.legitimatePathKeywords.contains(token) || config.exemptKeywords.contains(token)) continue;
             // Older releases learned ordinary route words from malicious queries.
@@ -630,7 +633,8 @@ public final class AiwafEngine {
     }
 
     private boolean isIpExempted(String ip) {
-        if (runtimeStorage.exemptionStore().isExempted(ip) || config.exemptIps.contains(ip)) return true;
+        if (readStore("exemptions", false, () -> runtimeStorage.exemptionStore().isExempted(ip))
+                || config.exemptIps.contains(ip)) return true;
         if (config.localhostExempted && ("::1".equals(ip) || (ip != null && ip.startsWith("127.")))) return true;
         if (config.privateIpsExempted && isPrivateIp(ip)) return true;
         Set<String> patterns = new HashSet<>(config.exemptIpPatterns);
@@ -896,5 +900,25 @@ public final class AiwafEngine {
 
     private int recentBurst(String ip, long nowMillis) {
         return runtimeStorage.state().recentStats(ip, nowMillis, config.aiRecentWindowSeconds).burstCount();
+    }
+
+    private static final java.util.logging.Logger STORE_LOG = java.util.logging.Logger.getLogger("com.aiwaf.storage");
+    private static final Set<String> REPORTED_STORE_FAILURES = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * A store read that fails (a lock or database error, say) is logged once per store and read
+     * as nothing found, so a storage outage doesn't fail every request, as in the native
+     * pipelines. Writes still report their errors.
+     */
+    static <T> T readStore(String store, T fallback, java.util.function.Supplier<T> read) {
+        try {
+            return read.get();
+        } catch (RuntimeException ex) {
+            if (REPORTED_STORE_FAILURES.add(store)) {
+                STORE_LOG.warning(() -> "AIWAF " + store + " read failed (" + ex.getMessage()
+                        + "); continuing without it. This is reported once.");
+            }
+            return fallback;
+        }
     }
 }

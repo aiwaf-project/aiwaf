@@ -27,10 +27,12 @@ describe('nativeOptionsFromSettings', () => {
     expect([profile.min_form_time, profile.max_page_time]).toEqual([0, 3600]);
     expect(profile.static_keywords).toEqual([]);
     expect(profile.exempt_paths).toEqual([]);
-    expect(profile.enabled).not.toContain('header_validation');
+    // With AIWAF_HEADER_VALIDATION off, only aiwaf-wasm's User-Agent check runs, as in the regular middleware.
+    expect(profile.header_policy).toBe('node_ua');
     expect(profile.enabled).not.toContain('logging');
     expect(options).toEqual({ pathRules: [], manifestPath: '.aiwaf/paths.json', injectionRiskMode: 'block',
-      stores: expect.any(Object), storesFallback: 'csv', rateFailureMode: 'closed', trustedProxies: 'default' });
+      stores: expect.any(Object), storesFallback: 'csv', rateFailureMode: 'closed', trustedProxies: 'default',
+      countryLookup: expect.any(Function), regularAnomaly: expect.any(Object) });
   });
 
   test('carries the regular options over', () => {
@@ -38,10 +40,17 @@ describe('nativeOptionsFromSettings', () => {
       windowSec: 30, MAX_REQ: 10, FLOOD_REQ: 20, staticKeywords: ['.php'], AIWAF_HEADER_VALIDATION: true,
       AIWAF_REQUIRED_HEADERS: ['user-agent'], AIWAF_GEO_BLOCK_COUNTRIES: ['CN'], AIWAF_MIDDLEWARE_LOGGING: true,
       AIWAF_METHOD_POLICY_ENABLED: true, AIWAF_ALLOWED_METHODS: ['get', 'post'], HONEYPOT_FIELD: 'website',
-      AIWAF_SQL_INJECTION_MODE: 'monitor', pathRules: [{ PREFIX: '/api/', DISABLE: ['honeypot'] }]
+      AIWAF_SQL_INJECTION_MODE: 'monitor', pathRules: [{ PREFIX: '/api/', DISABLE: ['honeypot'] }],
+      AIWAF_POST_ONLY_SUFFIXES: ['/submit/', '/Upload/'], AIWAF_EXEMPT_KEYWORDS: ['.PHP'], AIWAF_ALLOWED_PATH_KEYWORDS: ['legacy']
     });
     expect([profile.rate_window, profile.rate_max, profile.rate_flood]).toEqual([30, 10, 20]);
-    expect(profile.enabled).toEqual(expect.arrayContaining(['header_validation', 'logging', 'geo_block']));
+    // Requests are logged by the regular request logger, beside the native pipeline.
+    expect(profile.enabled).toEqual(expect.arrayContaining(['header_validation', 'geo_block']));
+    expect(profile.enabled).not.toContain('logging');
+    expect(options.regularLog).toMatchObject({ AIWAF_MIDDLEWARE_LOGGING: true });
+    // A suffix with capitals never matches the regular check's lowercased path.
+    expect(profile.post_only_suffixes).toEqual(['/submit/']);
+    expect([profile.exempt_keywords, profile.allowed_path_keywords]).toEqual([['.php'], ['legacy']]);
     expect(profile.required_headers).toEqual(['HTTP_USER_AGENT']);
     expect(profile.allowed_methods).toEqual(['GET', 'POST']);
     expect([profile.honeypot_field, profile.sql_mode, profile.geo_block]).toEqual(['website', 'monitor', ['CN']]);
@@ -50,15 +59,19 @@ describe('nativeOptionsFromSettings', () => {
 
   test('no required headers also means no quality score, as in the regular check', () => {
     expect(nativeOptionsFromSettings({ AIWAF_HEADER_VALIDATION: true }).profile.header_min_score).toBe(0);
-    const perMethod = nativeOptionsFromSettings({ AIWAF_REQUIRED_HEADERS: { GET: ['accept'], DEFAULT: ['user-agent'] } });
+    const perMethod = nativeOptionsFromSettings({ AIWAF_REQUIRED_HEADERS: { GET: ['accept'], post: ['x-token'], DEFAULT: ['user-agent'] } });
     expect(perMethod.profile.required_headers).toEqual(['HTTP_USER_AGENT']);
-    expect(outcome(perMethod, 'AIWAF_REQUIRED_HEADERS')).toBe('changed');
+    // The regular check looks methods up in uppercase, so a lowercase key never applies.
+    expect(perMethod.profile.required_headers_by_method).toEqual({ GET: ['HTTP_ACCEPT'] });
+    expect(perMethod.differences()).toEqual([]);
+    const getOnly = nativeOptionsFromSettings({ AIWAF_HEADER_VALIDATION: true, AIWAF_REQUIRED_HEADERS: { GET: ['accept'] } });
+    expect(getOnly.profile.header_min_score).toBe(3);
   });
 
   test('auto selection turns logging on unless it was set, as in the regular middleware', () => {
-    expect(nativeOptionsFromSettings({ AIWAF_MIDDLEWARES: ['auto'] }).profile.enabled).toContain('logging');
-    expect(nativeOptionsFromSettings({ AIWAF_MIDDLEWARES: ['auto'], AIWAF_MIDDLEWARE_LOGGING: false }).profile.enabled)
-      .not.toContain('logging');
+    expect(nativeOptionsFromSettings({ AIWAF_MIDDLEWARES: ['auto'] }).options.regularLog).toBeDefined();
+    expect(nativeOptionsFromSettings({ AIWAF_MIDDLEWARES: ['auto'], AIWAF_MIDDLEWARE_LOGGING: false }).options.regularLog)
+      .toBeUndefined();
   });
 
   test('values outside the native limits are adjusted and reported', () => {
@@ -72,17 +85,21 @@ describe('nativeOptionsFromSettings', () => {
   test('reports everything that does not carry over exactly', () => {
     const conversion = nativeOptionsFromSettings({
       MAX_REQ: 50, FLOOD_REQ: 40, AIWAF_EXEMPT_IPS: ['10.0.0.0/8', '203.0.113.4'], AIWAF_EXEMPT_PATHS: ['/up', '*.css'],
-      AIWAF_MODEL_STORAGE: 'db', AIWAF_TRUSTED_PROXIES: ['cloudflare']
+      AIWAF_FORCE_JSON_ERRORS: false, AIWAF_TRUSTED_PROXIES: ['cloudflare']
     });
     expect(conversion.profile.rate_max).toBe(40);
     expect(conversion.profile.exempt_ips).toEqual(['203.0.113.4']);
     expect(conversion.profile.exempt_paths).toEqual(['/up']);
     for (const [setting, expected] of [['MAX_REQ', 'carried'], ['AIWAF_EXEMPT_IPS', 'changed'], ['AIWAF_EXEMPT_PATHS', 'changed'],
-      ['AIWAF_MODEL_STORAGE', 'not carried'], ['AIWAF_TRUSTED_PROXIES', 'carried'], ['stores', 'carried']]) {
+      ['AIWAF_FORCE_JSON_ERRORS', 'not carried'], ['AIWAF_TRUSTED_PROXIES', 'carried'], ['stores', 'carried']]) {
       expect(outcome(conversion, setting)).toBe(expected);
     }
-    expect(conversion.report()).toContain('AIWAF_MODEL_STORAGE');
-    expect(outcome(nativeOptionsFromSettings({}), 'AIWAF_MODEL_STORAGE')).toBeUndefined();
+    expect(conversion.report()).toContain('AIWAF_FORCE_JSON_ERRORS');
+    expect(outcome(nativeOptionsFromSettings({}), 'AIWAF_FORCE_JSON_ERRORS')).toBeUndefined();
+    // A model kept in the app's model store is read when the native pipeline starts.
+    const stored = nativeOptionsFromSettings({ AIWAF_MODEL_STORAGE: 'db' });
+    expect(outcome(stored, 'AIWAF_MODEL_STORAGE')).toBe('carried');
+    expect(stored.options.regularAnomaly).toMatchObject({ AIWAF_MODEL_STORAGE: 'db' });
   });
 });
 
@@ -103,7 +120,7 @@ describe('the report matches the Python converter', () => {
     const logger = { warn: jest.fn(), info: jest.fn() };
     nativeOptionsFromSettings({}).log(logger);
     expect(logger.info).toHaveBeenCalledWith('Native pipeline settings: 1 carried over unchanged.');
-    const conversion = nativeOptionsFromSettings({ AIWAF_MODEL_STORAGE: 'db' });
+    const conversion = nativeOptionsFromSettings({ AIWAF_FORCE_JSON_ERRORS: false });
     conversion.log(logger);
     expect(logger.warn).toHaveBeenCalledTimes(1);
     conversion.notes.splice(0, conversion.notes.length);

@@ -17,6 +17,18 @@ from ...core.runtime_storage import KeywordStore, CSVStorage
 from ...core.policy_csv_storage import PolicyCSVStorage
 
 _DEFAULT_EVALUATE = evaluate_keyword_policy
+# Path words the keyword check never learns, besides any found in the app's routes.
+DEFAULT_LEGITIMATE = frozenset({
+    "profile", "user", "users", "account", "accounts", "settings", "dashboard",
+    "home", "about", "contact", "help", "search", "list", "lists", "view",
+    "views", "edit", "create", "update", "delete", "detail", "details", "api",
+    "auth", "login", "logout", "register", "signup", "signin", "reset",
+    "confirm", "activate", "verify", "page", "pages", "category", "categories",
+    "tag", "tags", "post", "posts", "article", "articles", "blog", "blogs",
+    "news", "item", "items", "admin", "administration", "manage", "manager",
+    "control", "panel", "config", "configuration", "option", "options",
+    "preference", "preferences",
+})
 _DEFAULT_INSPECT = inspect_asgi_request
 _DEFAULT_ADD = KeywordStore.add_keyword
 _DEFAULT_TOP = KeywordStore.get_top_keywords
@@ -59,17 +71,7 @@ class IPAndKeywordBlockMiddleware(BaseHTTPMiddleware):
         except Exception:
             pass
         # Conservative defaults mirroring Django baseline + route extraction.
-        default_legitimate = {
-            "profile", "user", "users", "account", "accounts", "settings", "dashboard",
-            "home", "about", "contact", "help", "search", "list", "lists", "view",
-            "views", "edit", "create", "update", "delete", "detail", "details", "api",
-            "auth", "login", "logout", "register", "signup", "signin", "reset",
-            "confirm", "activate", "verify", "page", "pages", "category", "categories",
-            "tag", "tags", "post", "posts", "article", "articles", "blog", "blogs",
-            "news", "item", "items", "admin", "administration", "manage", "manager",
-            "control", "panel", "config", "configuration", "option", "options",
-            "preference", "preferences",
-        }
+        default_legitimate = set(DEFAULT_LEGITIMATE)
         route_keywords = set()
         safe_prefixes = set()
         app_state = getattr(app, "app", app)

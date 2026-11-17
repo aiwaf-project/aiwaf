@@ -1,21 +1,21 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 mod client_ip;
+mod csv_pipeline;
 mod csv_runtime;
-mod training_evidence;
+mod exemption_policy;
 mod native_anomaly;
 mod request_engine;
-mod csv_pipeline;
-mod exemption_policy;
 mod runtime_policy;
 mod training_dates;
+mod training_evidence;
 mod training_pipeline;
 use aiwaf_core::{
     BehaviorAnalysis, BuiltFeatureRecord, Contamination, FeatureBatchResult, FeatureRecordInput,
-    FeatureRecordOutput, FeatureState, IsolationForest as CoreForest, IsolationForestState,
-    IsolationTreeState, KeywordMatcher as CoreKeywordMatcher, MaxFeatures, MaxSamples,
-    ParsedFeatureRecord, RawFeatureRecord, RecentEntryInput, RouteMatcher as CoreRouteMatcher,
-    analyze_recent_behavior as core_analyze_recent_behavior, build_records as core_build_records,
-    extract_features as core_extract_features,
+    FeatureRecordOutput, FeatureState, HeaderLimits, IsolationForest as CoreForest,
+    IsolationForestState, IsolationTreeState, KeywordMatcher as CoreKeywordMatcher, MaxFeatures,
+    MaxSamples, ParsedFeatureRecord, RawFeatureRecord, RecentEntryInput,
+    RouteMatcher as CoreRouteMatcher, analyze_recent_behavior as core_analyze_recent_behavior,
+    build_records as core_build_records, extract_features as core_extract_features,
     extract_features_batch_with_state as core_extract_features_batch_with_state,
     extract_raw_features as core_extract_raw_features,
     extract_training_features as core_extract_training_features,
@@ -24,6 +24,7 @@ use aiwaf_core::{
     validate_headers as core_validate_headers,
     validate_headers_full_default as core_validate_headers_full_default,
     validate_headers_with_config as core_validate_headers_with_config,
+    validate_headers_with_config_limits as core_validate_headers_with_config_limits,
 };
 use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
@@ -244,18 +245,28 @@ fn validate_headers_full_default(
     ))
 }
 
+/// ``max_user_agent_length`` is the app's AIWAF_MAX_USER_AGENT_LENGTH; by default 500.
 #[pyfunction]
+#[pyo3(signature = (headers, required_headers=None, min_score=None, max_user_agent_length=None))]
 fn validate_headers_with_config(
     headers: Bound<'_, PyDict>,
     required_headers: Option<Vec<String>>,
     min_score: Option<i32>,
+    max_user_agent_length: Option<usize>,
 ) -> PyResult<Option<String>> {
     let map = headers_to_map(&headers)?;
-    Ok(core_validate_headers_with_config(
-        &map,
-        required_headers,
-        min_score,
-    ))
+    Ok(match max_user_agent_length {
+        None => core_validate_headers_with_config(&map, required_headers, min_score),
+        Some(max_user_agent_length) => core_validate_headers_with_config_limits(
+            &map,
+            required_headers,
+            min_score,
+            &HeaderLimits {
+                max_user_agent_length,
+                ..HeaderLimits::default()
+            },
+        ),
+    })
 }
 
 #[pyfunction]

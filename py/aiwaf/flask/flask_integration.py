@@ -69,21 +69,42 @@ class AIWAF:
 
     def _native_default(self, app, enabled, use_database):
         """The native pipeline, when it can run these exact settings; otherwise None."""
-        from aiwaf.core.native_settings import (carry_model, log_native_default, native_access_log, native_by_default,
-                                                native_config)
+        from aiwaf.core.native_settings import (carry_model, log_native_default, log_native_fallback,
+                                                native_access_log, native_by_default, native_config)
 
         if use_database is True:
             return None  # A database chosen in code, which the converter can't see.
         names = {name: value for name, value in app.config.items() if name.startswith("AIWAF_")}
         conversion = native_config(names, "flask")
         # The same stages the regular middleware would register.
-        conversion.config["enabled"] = [stage for stage in self.AVAILABLE_MIDDLEWARES if stage in set(enabled)]
-        if "logging" in enabled:
+        stages = [stage for stage in self.AVAILABLE_MIDDLEWARES if stage in set(enabled)]
+        # A log format the app chose (JSON, CSV or combined) is written by the regular logging
+        # middleware, to the same files; otherwise the native pipeline logs requests itself.
+        regular_log = "logging" in stages and app.config.get("AIWAF_LOG_FORMAT") is not None
+        if regular_log:
+            stages.remove("logging")
+        elif "logging" in stages:
             native_access_log(conversion, "AIWAF_LOG_DIR", app.config.get("AIWAF_LOG_DIR", "aiwaf_logs"))
+        conversion.config["enabled"] = stages
+        if "ip_keyword_block" in stages or "ai_anomaly" in stages:
+            # Words the regular keyword check never learns: the app's routes, AIWAF_ALLOWED_PATH_KEYWORDS
+            # and AIWAF_EXEMPT_KEYWORDS, read as it reads them.
+            from .ip_and_keyword_block_middleware import IPAndKeywordBlockMiddleware
+
+            conversion.config["legitimate_keywords"] = sorted(
+                IPAndKeywordBlockMiddleware._get_legitimate_path_keywords(None, app))
+            # Keyword blocks skip paths under the app's own route prefixes, as in the regular check.
+            conversion.config["safe_prefixes"] = sorted(IPAndKeywordBlockMiddleware._collect_safe_prefixes(None, app))
+        if "ai_anomaly" in stages:
+            from aiwaf.core.native_settings import carry_learning
+            from .anomaly_middleware import STATIC_KEYWORDS
+
+            carry_learning(conversion, "flask", STATIC_KEYWORDS)
         # The model settings are decided here, from the model the regular middleware would use.
-        # AIWAF_LOG_DIR only places the request log, decided below.
+        # AIWAF_LOG_DIR only places the request log, decided above, and AIWAF_ACCESS_LOG only
+        # counts toward the stages and the model's logs, both decided from it already.
         handled = {"AIWAF_MODEL_PATH", "AIWAF_ALLOW_CUSTOM_MODEL_PATH", "AIWAF_MIN_AI_LOGS", "AIWAF_FORCE_AI",
-                   "AIWAF_LOG_DIR"}
+                   "AIWAF_LOG_DIR", "AIWAF_ACCESS_LOG", "AIWAF_ALLOWED_PATH_KEYWORDS"} | ({"AIWAF_LOG_FORMAT", "AIWAF_CSV_LOG_FSYNC"} if regular_log else set())
         conversion.notes = [note for note in conversion.notes if note.setting not in handled]
         model = self._regular_model(app) if "ai_anomaly" in enabled else None
         if model is not None and not self._model_in_use(app):
@@ -91,12 +112,20 @@ class AIWAF:
                                                             "are enough logs; the native pipeline would use it at once.")
         model = carry_model(conversion, model, "AIWAF_MODEL_PATH")
         choice = self.native_pipeline if self.native_pipeline is not None else app.config.get("AIWAF_NATIVE_PIPELINE")
-        if not native_by_default(conversion, choice=choice):
+        if not native_by_default(conversion, choice=choice, framework="Flask"):
             return None
         from .csv_pipeline import NativeAIWAF
 
+        try:
+            native = NativeAIWAF(app, config=dict(conversion.config), model=model)
+        except Exception as error:
+            log_native_fallback("Flask", error)
+            return None
+        if regular_log:
+            # Registered after the native pipeline, as the regular chain registers it last.
+            self.middleware_instances["logging"] = self.AVAILABLE_MIDDLEWARES["logging"](app)
         log_native_default("Flask")
-        return NativeAIWAF(app, config=dict(conversion.config), model=model)
+        return native
 
     @staticmethod
     def _model_in_use(app):

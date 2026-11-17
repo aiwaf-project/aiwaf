@@ -266,7 +266,8 @@ module.exports = {
     }
     return {
       requiredHeaders: Array.isArray(requiredHeaders) ? requiredHeaders : [],
-      minScore: (Array.isArray(requiredHeaders) && requiredHeaders.length === 0) ? 0 : config.minScore
+      minScore: (Array.isArray(requiredHeaders) && requiredHeaders.length === 0) ? 0 : config.minScore,
+      maxUserAgentLength: config.maxUserAgentLength
     };
   },
   isStaticRequest(pathname) {

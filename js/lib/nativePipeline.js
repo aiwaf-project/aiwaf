@@ -158,6 +158,51 @@ async function readModelFile(file) {
   }
   return require('./wasmAdapter').createIsolationForestFromJSON(data.model_state);
 }
+// A model from the app's model store, read as the regular anomaly check reads it: none when
+// the store has none or can't be read. A model in the older JavaScript format can't be used.
+async function loadedModel(load) {
+  let data = null;
+  try { data = await load(); } catch (_) { data = null; }
+  if (!data) return null;
+  if (data.model_type !== 'aiwaf_wasm.IsolationForest' || !data.model_state) {
+    throw new Error('The stored model is in an older format the native pipeline can\'t load. Retrain with: aiwaf train');
+  }
+  return require('./wasmAdapter').createIsolationForestFromJSON(data.model_state);
+}
+const COUNTRY = Symbol('aiwaf.country');
+// Node.js's regular anomaly check (the ai_anomaly stage in lib/wafMiddleware.js): for a path
+// with no known route, the regular model's verdict on the request's features, then its recent
+// history from the request log. Resolves to a block reason, or null.
+async function createRegularAnomaly(opts) {
+  const anomalyDetector = require('./anomalyDetector');
+  const featureUtils = require('./featureUtils');
+  featureUtils.init(opts);
+  await anomalyDetector.init(opts);
+  return {
+    start: req => featureUtils.markRequestStart(req),
+    async check(req, ip) {
+      if (require('./wafMiddleware').matchesKnownRoute(req.app, req.path || req.url || '/')) return null;
+      const features = await featureUtils.extractFeatures(req);
+      if (!(await anomalyDetector.isAnomalous(features)) || !anomalyDetector.isModelSufficientlyTrained()) return null;
+      const now = Date.now();
+      let rows = [];
+      try { rows = await require('./requestLogStore').recent(5000); } catch (_) { rows = []; }
+      const recent = rows.filter(row => row.ip_address === ip)
+        .map(row => ({ timestamp: row.created_at ? new Date(row.created_at).getTime() : now, path: row.path,
+          status: Number(row.status || 0), responseTime: Number(row.response_time_ms || 0) }))
+        .filter(entry => now - entry.timestamp <= 5 * 60 * 1000);
+      const stats = await anomalyDetector.analyzeRecentBehaviorAccelerated(recent);
+      return stats && stats.should_block
+        ? `AI anomaly + scanning 404s (total:${stats.max_404s}, scanning:${stats.scanning_404s}, kw:${stats.avg_kw_hits.toFixed(1)}, burst:${stats.avg_burst.toFixed(1)})`
+        : null;
+    }
+  };
+}
+// Recorded for the regular request logger, as the regular middleware records its blocks.
+function markBlocked(res, reason, country = '') {
+  if (!res.locals) res.locals = {};
+  res.locals.aiwafDecision = { blocked: true, reason, country };
+}
 function headers(raw = {}) {
   return Object.fromEntries(Object.entries(raw).map(([key, value]) => [
     ['content-type', 'content-length'].includes(key.toLowerCase()) ? key.toUpperCase().replace(/-/g, '_') : `HTTP_${key.toUpperCase().replace(/-/g, '_')}`,
@@ -194,7 +239,7 @@ function recentAnswers(seconds, limit = 10000) {
 const STORE_METHODS = ['isBlocked', 'isExempted', 'topKeywords', 'blockedCountries', 'block', 'learn'];
 // Node's own blocklist, exemption, keyword and geo stores: a database when one is configured,
 // otherwise their CSV files, as the regular middleware uses them.
-function regularStores({ dynamicTopN = 10, exemptionsDb = true } = {}) {
+function regularStores({ dynamicTopN = 10, exemptionsDb = true, extendedInfo = null } = {}) {
   const blocklistManager = require('./blocklistManager');
   const exemptionStore = require('./exemptionStore');
   const dynamicKeywordStore = require('./dynamicKeywordStore');
@@ -212,8 +257,17 @@ function regularStores({ dynamicTopN = 10, exemptionsDb = true } = {}) {
     // A learned keyword applies once its count passes dynamicTopN, as in the regular middleware.
     topKeywords: async limit => (await dynamicKeywordStore.list(limit))
       .filter(row => Number(row.count || 0) > dynamicTopN).map(row => String(row.keyword)),
+    // The counts themselves, so learning not yet written can count at once, as the regular
+    // middleware's in-memory counts do.
+    keywordCounts: async limit => (await dynamicKeywordStore.list(limit))
+      .map(row => [String(row.keyword), Number(row.count || 0)]),
+    activeAbove: dynamicTopN,
     blockedCountries: async () => (await geoStore.listBlockedCountries()).map(row => String(row.country_code)),
-    block: (ip, reason) => blocklistManager.block(ip, reason),
+    // As the regular middleware writes a block: with the request's extended info when the app
+    // captures it (AIWAF_CAPTURE_EXTENDED_REQUEST_INFO), otherwise an empty object.
+    block: (ip, reason, _expiresAt, req) => blocklistManager.block(ip, reason, req ? {
+      extendedRequestInfo: (extendedInfo && require('./runtimeUtils').extractExtendedRequestInfo(req, extendedInfo)) || {}
+    } : undefined),
     learn: keyword => dynamicKeywordStore.increment(keyword)
   };
 }
@@ -227,10 +281,13 @@ module.exports = async function createNativeMiddleware(options = {}) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) throw new TypeError('Native adapter options must be an object');
   if (options.profile !== undefined && (!options.profile || typeof options.profile !== 'object' || Array.isArray(options.profile))) throw new TypeError('Native profile must be an object');
   const allowed = new Set(['profile', 'dataDir', 'logPath', 'logFsync', 'persistBlocks', 'model', 'countryLookup', 'authenticated', 'routeExists', 'onError', 'pathRules', 'manifestPath', 'injectionRiskMode', 'logger', 'uuidResolver', 'stores', 'storeCacheSeconds', 'storesFallback',
-    'rateCounter', 'rateCounterFallback', 'rateFailureMode', 'trustedProxies', 'modelFile']);
+    'rateCounter', 'rateCounterFallback', 'rateFailureMode', 'trustedProxies', 'modelFile', 'modelLoader', 'regularLog', 'modelGate', 'exact', 'regularAnomaly']);
   for (const key of Object.keys(options)) if (!allowed.has(key)) throw new Error(`Unknown native adapter option: ${key}`);
   if (options.uuidResolver != null && typeof options.uuidResolver !== 'function') throw new TypeError('uuidResolver must be a function');
-  for (const key of ['countryLookup','authenticated','routeExists','onError']) {
+  // countryLookup may return a promise; the request waits for it, as for uuidResolver.
+  if (options.countryLookup != null && typeof options.countryLookup !== 'function') throw new TypeError('countryLookup must be a function');
+  if (options.modelLoader != null && typeof options.modelLoader !== 'function') throw new TypeError('modelLoader must be a function');
+  for (const key of ['authenticated','routeExists','onError']) {
     if (options[key] != null && (typeof options[key] !== 'function' || options[key].constructor.name === 'AsyncFunction')) throw new TypeError(`${key} must be synchronous`);
   }
   if (options.pathRules != null && !Array.isArray(options.pathRules)) throw new TypeError('pathRules must be an array of rules');
@@ -255,6 +312,17 @@ module.exports = async function createNativeMiddleware(options = {}) {
   if (options.modelFile != null && (options.model != null || typeof options.modelFile !== 'string')) {
     throw new TypeError('modelFile must be a path, and can\'t be combined with model');
   }
+  // The regular request logger, run beside the native pipeline with the regular options, when
+  // the app logs requests its own way (a JSONL, CSV or database log).
+  let regularLog = null;
+  if (options.regularLog != null) {
+    regularLog = require('./middlewareLogger');
+    regularLog.init(options.regularLog);
+  }
+  // The regular anomaly check, run with the regular options after the engine's stages, as the
+  // regular middleware runs it last: its features, model, log minimum and request-log history.
+  let regularAnomaly = null;
+  if (options.regularAnomaly != null) regularAnomaly = await createRegularAnomaly(options.regularAnomaly);
   const storeCacheSeconds = Number(options.storeCacheSeconds ?? 5);
   if (!(storeCacheSeconds >= 0)) throw new TypeError('storeCacheSeconds must be a non-negative number');
   const profile = JSON.parse(JSON.stringify(options.profile || {}));
@@ -298,6 +366,28 @@ module.exports = async function createNativeMiddleware(options = {}) {
       rateCounter = null;
     } else if (!supported) throw new Error('rateCounter needs a newer aiwaf-wasm. Run: npm install aiwaf-wasm@latest');
   }
+  {
+    // Header caps, blocked user agents and login forms need a newer aiwaf-wasm. An older one
+    // runs without them only when they're the regular defaults, which it handled as before.
+    const { LEGACY_DEFAULTS } = require('./nativeSettings');
+    const given = Object.keys(LEGACY_DEFAULTS).filter(key => profile[key] !== undefined);
+    if (given.length) {
+      const probe = await createRequestPipeline({});
+      const supports = feature => typeof probe.native.supports === 'function' && probe.native.supports(feature);
+      const missing = given.filter(key => !supports(LEGACY_DEFAULTS[key][0]));
+      probe.native.free();
+      // An entry's third item adapts the profile for an older engine itself, saying whether it could.
+      const usable = key => (typeof LEGACY_DEFAULTS[key][2] === 'function' ? LEGACY_DEFAULTS[key][2](profile)
+        : LEGACY_DEFAULTS[key].length >= 2 && JSON.stringify(profile[key]) === JSON.stringify(LEGACY_DEFAULTS[key][1]));
+      // Chosen automatically, the native pipeline must answer exactly as the regular middleware
+      // would, so an engine missing any of these leaves the app on the regular middleware.
+      const unusable = options.exact ? missing : missing.filter(key => !usable(key));
+      if (unusable.length) {
+        throw new Error(`${unusable.join(', ')} need a newer aiwaf-wasm. Run: npm install aiwaf-wasm@latest`);
+      }
+      for (const key of missing) delete profile[key];
+    }
+  }
   if (stores) {
     // Checked before the profile is built, since older engines reject policy_store.
     const probe = await createRequestPipeline({});
@@ -327,6 +417,10 @@ module.exports = async function createNativeMiddleware(options = {}) {
     }
     let model = options.model;
     if (options.modelFile != null) model = await readModelFile(options.modelFile);
+    if (options.modelLoader != null) model = await loadedModel(options.modelLoader);
+    // The regular anomaly check uses its model only once there are AIWAF_MIN_AI_LOGS recent
+    // logs, counted when it starts.
+    if (model != null && typeof options.modelGate === 'function' && !(await options.modelGate())) model = null;
     try {
       engine = await createRequestPipeline(profile, model);
     } catch (error) {
@@ -371,11 +465,11 @@ module.exports = async function createNativeMiddleware(options = {}) {
   const pending = new Set();
   // Keywords and countries change rarely, so they're read at most every storeCacheSeconds.
   const cache = new Map();
-  const cached = (name, load) => {
+  const cached = (name, load, item = String) => {
     const now = performance.now();
     const entry = cache.get(name);
     if (entry && now < entry.until) return entry.value;
-    const value = Promise.resolve().then(load).then(items => [...(items || [])].map(String));
+    const value = Promise.resolve().then(load).then(items => [...(items || [])].map(item));
     cache.set(name, { until: now + storeCacheSeconds * 1000, value });
     // A failed read isn't kept, so the next request tries again.
     value.catch(() => { if (cache.get(name)?.value === value) cache.delete(name); });
@@ -388,6 +482,16 @@ module.exports = async function createNativeMiddleware(options = {}) {
   const stageOn = (route, name) => route.plan.shouldApply(name) && (!profile.enabled || profile.enabled.includes(name));
   // The host stores' facts for one request. A store read that fails is reported and treated
   // as not blocked, not exempt and nothing learned, so storage outages don't block traffic.
+  // Learned keywords not yet in the store, counted at once: the store write runs after the
+  // response, and the next request shouldn't wait for it or miss it.
+  const pendingLearned = new Map();
+  const activeKeywords = async () => {
+    if (typeof stores.keywordCounts !== 'function') return cached('keywords', () => stores.topKeywords(2000));
+    const counts = new Map(await cached('keywordCounts', () => stores.keywordCounts(2000),
+      ([keyword, count]) => [String(keyword), Number(count) || 0]));
+    for (const [keyword, pending] of pendingLearned) counts.set(keyword, (counts.get(keyword) || 0) + pending);
+    return [...counts].filter(([, count]) => count > Number(stores.activeAbove ?? 0)).map(([keyword]) => keyword);
+  };
   const storeFacts = async (req, route) => {
     const ip = clientIp(req);
     const rawPath = String(req.path || req.url || '/').split('?')[0];
@@ -399,7 +503,7 @@ module.exports = async function createNativeMiddleware(options = {}) {
     if (exempt) return { exempt: true };
     const [blocked, keywords, countries] = await Promise.all([
       active.includes('ip_keyword_block') || active.includes('ai_anomaly') ? read(() => blockedIps.get(ip, () => stores.isBlocked(ip)), false) : false,
-      active.includes('ip_keyword_block') ? read(() => cached('keywords', () => stores.topKeywords(2000)), []) : [],
+      active.includes('ip_keyword_block') ? read(activeKeywords, []) : [],
       active.includes('geo_block') ? read(() => cached('countries', () => stores.blockedCountries()), []) : []
     ]);
     return { blocked: !!blocked, exempt: false, dynamic_keywords: keywords, geo_countries: countries };
@@ -417,6 +521,7 @@ module.exports = async function createNativeMiddleware(options = {}) {
     const window = Math.max(route.rate.window ?? profile.rate_window ?? 10, 1);
     return rateCounter.count(key, Date.now() / 1000, window);
   };
+  let logFailed = false;
   const report = error => { if (options.onError) options.onError(error); else console.error('AIWAF native finalization failed:', error.message); };
   // This pipeline takes no general settings, so these two come from the environment. Route
   // checks run in aiwaf-wasm, loaded here so requests can use them straight away.
@@ -446,24 +551,44 @@ module.exports = async function createNativeMiddleware(options = {}) {
       if (found && typeof found.then === 'function') found = found.then(exists => !!exists, () => null);
       else if (found !== null) found = !!found;
     }
+    if (regularLog && route.plan.shouldApply('logging')) regularLog.attach(req, res, { ip: clientIp(req) });
+    if (regularAnomaly) regularAnomaly.start(req);
+    let country = null;
+    if (options.countryLookup) {
+      try { country = options.countryLookup(req); } catch (error) { return next(error); }
+      if (country && typeof country.then === 'function') {
+        // A lookup that fails finds no country, as the regular geo check does.
+        country = country.then(value => { req[COUNTRY] = String(value || ''); }, () => { req[COUNTRY] = ''; });
+      } else {
+        req[COUNTRY] = String(country || '');
+        country = null;
+      }
+    }
     const counted = rateCounter && stageOn(route, 'rate_limit');
     const peek = !req[DEFER_BODY] && !req[PEEKED] && profile.sql_mode !== 'off' && stageOn(route, 'ip_keyword_block') && readable(req)
       ? peekBody(req, maxBytes).then(prefix => { req[PEEKED] = prefix; }) : null;
-    if (!stores && !counted && !peek && !(found && typeof found.then === 'function')) return handle(req, res, next, route, start, found, null);
-    return Promise.all([found, stores ? storeFacts(req, route) : null, peek])
+    if (!stores && !counted && !peek && !country && !(found && typeof found.then === 'function')) return handle(req, res, next, route, start, found, null);
+    return Promise.all([found, stores ? storeFacts(req, route) : null, peek, country])
       .then(async ([exists, facts]) => {
         if (counted) {
           let count;
           try { count = await rateCount(req, route, facts?.exempt); } catch (error) {
             report(error);
             // As the regular rate limiter does: closed answers 503, open lets the request through.
-            if (rateFailureMode === 'closed') return res.status(503).json({ error: 'temporarily_unavailable' });
+            if (rateFailureMode === 'closed') {
+              markBlocked(res, 'rate_cache_unavailable');
+              return res.status(503).json({ error: 'temporarily_unavailable' });
+            }
           }
           if (count !== undefined) facts = { ...(facts || {}), rate_count: count };
         }
         return handle(req, res, next, route, start, exists, facts);
       }, next);
   };
+  // Node.js's header check reads the protocol, which isn't a header, as server-protocol.
+  const requestHeaders = profile.header_policy === 'node'
+    ? req => (req.httpVersion ? { ...headers(req.headers), SERVER_PROTOCOL: `HTTP/${req.httpVersion}` } : headers(req.headers))
+    : req => headers(req.headers);
   const handle = (req, res, next, route, start, uuidExists, facts) => {
     if (closed) return next(new Error('Native pipeline is closed'));
     let decision;
@@ -472,16 +597,19 @@ module.exports = async function createNativeMiddleware(options = {}) {
       if (observeRisks && plan.shouldApply('ip_keyword_block')
           && (!profile.enabled || profile.enabled.includes('ip_keyword_block'))) {
         const riskFinding = observeRisks(req);
-        if (riskFinding) return res.status(riskFinding.status).json({ error: riskFinding.rule });
+        if (riskFinding) {
+          markBlocked(res, riskFinding.rule);
+          return res.status(riskFinding.status).json({ error: riskFinding.rule });
+        }
       }
       const rawPath = String(req.path || req.url || '/').split('?')[0];
       const body = req[DEFER_BODY] ? {body:null,exhausted:false} : safeBody(req, maxBytes);
       decision = JSON.parse(native.begin(JSON.stringify({
         ip: clientIp(req),
-        path: rawPath, method: String(req.method || 'GET'), headers: headers(req.headers),
+        path: rawPath, method: String(req.method || 'GET'), headers: requestHeaders(req),
         query: String(req.originalUrl || req.url || '').split('?').slice(1).join('?'),
         body: body.body, parsed_query: req.query ?? null,
-        now: Date.now() / 1000, country: String(synchronous(options.countryLookup, req, '') || ''),
+        now: Date.now() / 1000, country: req[COUNTRY] ?? '',
         authenticated: req[DEFER_BODY] ? false : !!synchronous(options.authenticated, req, false),
         exists: !!synchronous(options.routeExists, req, !!req.route), disabled,
         payload_exhausted: body.exhausted, defer_body: !!req[DEFER_BODY],
@@ -501,24 +629,53 @@ module.exports = async function createNativeMiddleware(options = {}) {
         const effects = JSON.parse(native.finish(decision.context, aborted ? 499 : res.statusCode || 200, performance.now() - start, Date.now() / 1000));
         if (blocks && effects.block_csv) blocks.append(effects.block_csv);
         if (keywords && effects.keyword_csv) keywords.append(effects.keyword_csv);
-        if (log && effects.log_csv) log.append(effects.log_csv);
-        if (stores) writeEffects(effects);
+        if (log && effects.log_csv) {
+          // A request log that can't be written (a full disk, say) is reported once, not per request.
+          try { log.append(effects.log_csv); } catch (error) { if (!logFailed) { logFailed = true; report(error); } }
+        }
+        if (stores) writeEffects(effects, req);
       } catch (error) { report(error); }
     };
     res.on('finish', () => finalize(false));
     res.on('close', () => finalize(true));
-    if (decision.status) return res.status(decision.status).json({ error: decision.reason });
+    if (decision.status) {
+      markBlocked(res, decision.reason, decision.reason === 'geo_block' ? req[COUNTRY] ?? '' : '');
+      return res.status(decision.status).json({ error: decision.reason });
+    }
+    if (regularAnomaly && route.plan.shouldApply('ai_anomaly')) {
+      const ip = clientIp(req);
+      return regularAnomaly.check(req, ip).then(reason => {
+        if (!reason) return next();
+        if (stores) {
+          blockedIps.set(ip, true);
+          Promise.resolve().then(() => stores.block(ip, reason, undefined, req)).catch(report);
+        }
+        markBlocked(res, 'anomaly');
+        return res.status(403).json({ error: 'blocked' });
+      }, next);
+    }
     return next();
   };
   // Store writes run after the response, so a slow or failing store never delays it.
-  const writeEffects = effects => {
+  const writeEffects = (effects, req) => {
     if (effects.block) {
       blockedIps.set(effects.block.ip, true);
-      Promise.resolve().then(() => stores.block(effects.block.ip, effects.block.reason, effects.block.expires_at)).catch(report);
+      Promise.resolve().then(() => stores.block(effects.block.ip, effects.block.reason, effects.block.expires_at, req)).catch(report);
     }
-    if (effects.keyword) {
-      Promise.resolve().then(() => stores.learn(effects.keyword))
-        .then(() => cache.delete('keywords'), report);
+    // Node.js's learning rule reports every learned segment; the native rule, one keyword.
+    const learned = effects.keywords && effects.keywords.length ? effects.keywords : (effects.keyword ? [effects.keyword] : []);
+    for (const keyword of learned) pendingLearned.set(keyword, (pendingLearned.get(keyword) || 0) + 1);
+    if (learned.length) {
+      Promise.resolve().then(async () => { for (const keyword of learned) await stores.learn(keyword); })
+        .finally(() => {
+          // Written (or failed): the store's own count takes over.
+          for (const keyword of learned) {
+            const left = (pendingLearned.get(keyword) || 0) - 1;
+            if (left > 0) pendingLearned.set(keyword, left); else pendingLearned.delete(keyword);
+          }
+          cache.delete('keywords');
+          cache.delete('keywordCounts');
+        }).catch(report);
     }
   };
   middleware.inspectPayload = req => {

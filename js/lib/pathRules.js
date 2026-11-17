@@ -37,11 +37,18 @@ function normalizePaths(items = []) {
   return (items || []).map(item => normalizePath(item, false));
 }
 
+// Patterns come from configuration, so each is compiled once.
+const compiledWildcards = new Map();
 function wildcardMatch(pathValue, pattern) {
-  const escaped = String(pattern)
-    .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*/g, '.*');
-  return new RegExp(`^${escaped}$`).test(pathValue);
+  const key = String(pattern);
+  let regex = compiledWildcards.get(key);
+  if (!regex) {
+    const escaped = key.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    regex = new RegExp(`^${escaped}$`);
+    if (compiledWildcards.size >= 1024) compiledWildcards.clear();
+    compiledWildcards.set(key, regex);
+  }
+  return regex.test(pathValue);
 }
 
 function isPathExempt(pathValue, exemptPaths = [], { allowWildcards = true, allowPrefix = true } = {}) {
@@ -101,7 +108,25 @@ function isMiddlewareDisabledForPath(path, rules, middlewareName) {
   return disabled.some(entry => normalizeMiddlewareName(entry) === target);
 }
 
+// Path rules and route markers are fixed once the app runs, so a plan is built once per path
+// and markers, for each rules list. Plans are only read, and getOverrides returns copies.
+const planCaches = new WeakMap();
 function createRoutePlan(path, rules = [], context = {}) {
+  if (!Array.isArray(rules)) return buildRoutePlan(path, rules, context);
+  const key = [path, rules.length, context.fullyExempt ? 1 : 0, (context.exemptMiddlewares || []).join(','),
+    (context.requiredMiddlewares || []).join(',')].join('\u0000');
+  let plans = planCaches.get(rules);
+  if (!plans) planCaches.set(rules, plans = new Map());
+  let plan = plans.get(key);
+  if (!plan) {
+    plan = buildRoutePlan(path, rules, context);
+    if (plans.size >= 4096) plans.delete(plans.keys().next().value);
+    plans.set(key, plan);
+  }
+  return plan;
+}
+
+function buildRoutePlan(path, rules = [], context = {}) {
   const required = new Set((context.requiredMiddlewares || []).map(normalizeMiddlewareName));
   const exempt = new Set((context.exemptMiddlewares || []).map(normalizeMiddlewareName));
   const fullyExempt = !!context.fullyExempt;

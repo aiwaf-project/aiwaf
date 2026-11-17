@@ -192,11 +192,13 @@ pub fn validate_headers(headers: JsValue) -> Result<JsValue, JsValue> {
     .map_err(|e| e.into())
 }
 
+/// `max_user_agent_length` is the app's AIWAF_MAX_USER_AGENT_LENGTH; by default 500.
 #[wasm_bindgen]
 pub fn validate_headers_with_config(
     headers: JsValue,
     required_headers: JsValue,
     min_score: JsValue,
+    max_user_agent_length: JsValue,
 ) -> Result<JsValue, JsValue> {
     let mut map = headers_js_to_map(headers)?;
     add_navigator_ua_if_missing(&mut map);
@@ -211,8 +213,18 @@ pub fn validate_headers_with_config(
     } else {
         Some(from_value(min_score)?)
     };
-    to_value(&core_validate_headers_with_config(
-        &map, required, min_score,
+    let limits = aiwaf_core::HeaderLimits {
+        max_user_agent_length: if max_user_agent_length.is_null()
+            || max_user_agent_length.is_undefined()
+        {
+            500
+        } else {
+            from_value(max_user_agent_length)?
+        },
+        ..aiwaf_core::HeaderLimits::default()
+    };
+    to_value(&aiwaf_core::validate_headers_with_config_limits(
+        &map, required, min_score, &limits,
     ))
     .map_err(|e| e.into())
 }

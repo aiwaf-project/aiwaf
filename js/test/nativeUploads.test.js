@@ -134,3 +134,25 @@ test('a body stream that fails while being read goes to next(error)', async () =
   req.destroy(new Error('client went away'));
   expect((await failed).message).toBe('client went away');
 });
+
+test('a request log that can\'t be written is reported once and requests carry on', async () => {
+  if (!fs.existsSync('/dev/full')) return;
+  const dir = temp();
+  const errors = [];
+  const logPath = path.join(dir, 'requests.csv');
+  const middleware = await createNative({ dataDir: dir, manifestPath: path.join(dir, 'none.json'), logPath,
+    onError: error => errors.push(error.message), profile: { enabled: ['logging'] } });
+  handles.push(middleware);
+  const app = express();
+  app.use(middleware);
+  app.get('/items', (_req, res) => res.json({ ok: true }));
+  expect((await request(app).get('/items')).status).toBe(200);
+  // The adapter keeps its file open; swapping the file doesn't affect it, so make writes fail directly.
+  const fd = fs.openSync('/dev/full', 'w');
+  const write = fs.writeSync;
+  jest.spyOn(fs, 'writeSync').mockImplementation((target, ...rest) => write(fd, ...rest));
+  for (let i = 0; i < 3; i++) expect((await request(app).get('/items')).status).toBe(200);
+  jest.restoreAllMocks();
+  fs.closeSync(fd);
+  expect(errors).toHaveLength(1);
+});

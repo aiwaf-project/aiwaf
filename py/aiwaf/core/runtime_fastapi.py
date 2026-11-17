@@ -29,6 +29,19 @@ from aiwaf.core.cache_backend import CacheBackendConfig, make_cache_backend
 logger = logging.getLogger(__name__)
 
 
+# FastAPI's regular header check skips these (aiwaf.core.runtime_utils.is_static_file and its
+# static paths).
+FASTAPI_STATIC_EXTENSIONS = ('.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.svg', '.woff', '.woff2', '.ttf',
+                             '.eot', '.otf', '.map', '.json', '.xml', '.txt', '.pdf', '.zip', '.tar', '.gz', '.webp', '.avif')
+FASTAPI_STATIC_PATHS = ('/static/', '/media/', '/assets/', '/favicon.ico')
+
+
+def core_header_patterns():
+    from aiwaf.core import header_validation
+
+    return header_validation.SUSPICIOUS_USER_AGENTS
+
+
 class AIWAF:
     """
     AI Web Application Firewall for FastAPI.
@@ -159,7 +172,7 @@ class AIWAF:
             has_uuid_routes=detect_uuid_routes_in_fastapi_app(self.app),
         )
 
-        self.native = self._native_default(enabled)
+        self.native = self._native_default(enabled, path_rules)
         if self.native:
             return
 
@@ -267,7 +280,7 @@ class AIWAF:
                 use_rust=bool(self.config.get('AIWAF_USE_RUST', True) and self.config.get('AIWAF_RUST_CSV', True)),
             )
     
-    def _native_default(self, enabled) -> bool:
+    def _native_default(self, enabled, path_rules=None) -> bool:
         """Run the native pipeline instead, when it can run these exact settings."""
         from aiwaf.core.native_settings import (log_native_default, native_access_log, native_by_default,
                                                 native_config_fastapi)
@@ -285,18 +298,66 @@ class AIWAF:
                     ("header_validation", "header_validation"), ("logging_middleware", "logging")]
         stages = [stage for section, stage in sections
                   if section in enabled and (geo if section == "geo_block" else self.config.is_enabled(section))]
+        logging_cfg = self.config.get("logging_middleware", {}) or {}
+        # Requests are logged by the regular logging middleware, beside the native pipeline, in the
+        # app's format and files. It runs innermost, so it never logs requests AIWAF blocked.
+        regular_log = "logging" in stages
+        if regular_log:
+            stages.remove("logging")
         conversion.config["enabled"] = stages
-        conversion.notes = [note for note in conversion.notes if note.setting != "logging_middleware"]
+        if "ip_keyword_block" in stages or "ai_anomaly" in stages:
+            # The regular keyword check's legitimate words. It also looks for route words, on the
+            # middleware it wraps, which never has routes, so it finds none.
+            from aiwaf.fast.middleware.ip_and_keyword_block_middleware import DEFAULT_LEGITIMATE
+
+            conversion.config["legitimate_keywords"] = sorted(DEFAULT_LEGITIMATE)
+        if "ai_anomaly" in stages:
+            from aiwaf.core.native_settings import carry_learning
+            from aiwaf.fast.middleware.anomaly_middleware import STATIC_KW
+
+            carry_learning(conversion, "fastapi", STATIC_KW)
+        if "header_validation" in stages:
+            # FastAPI's regular header check skips static files and also flags a bare Mozilla/5.0.
+            from aiwaf.core.native_settings import _engine_supports
+            from aiwaf.fast.middleware.header_validation import HeaderValidationMiddleware
+
+            if _engine_supports("header_skip") and _engine_supports("extra_user_agents"):
+                conversion.config["header_skip_extensions"] = sorted(FASTAPI_STATIC_EXTENSIONS)
+                conversion.config["header_skip_paths"] = list(FASTAPI_STATIC_PATHS)
+                extra = HeaderValidationMiddleware.SUSPICIOUS_USER_AGENTS[len(core_header_patterns()):]
+                conversion.config["extra_suspicious_user_agents"] = list(extra)
+            else:
+                conversion.note("header_validation", "changed", "The regular header check skips static files and "
+                                                                "flags a bare Mozilla/5.0; the installed aiwaf-rust "
+                                                                "can't. Upgrade it: pip install -U aiwaf-rust")
+        # The log directory only places the request log, decided below.
+        conversion.notes = [note for note in conversion.notes if note.setting not in (
+            "logging_middleware", "logging_middleware.log_dir", "logging_middleware.log_format")]
         conversion.config.pop("log_path", None)
         if "logging" in stages:
             log_dir = (self.config.get("logging_middleware", {}) or {}).get("log_dir", "aiwaf_logs")
             native_access_log(conversion, "logging_middleware", log_dir)
-        if not native_by_default(conversion, choice=self.native_pipeline):
+        if not native_by_default(conversion, choice=self.native_pipeline, framework="FastAPI"):
             return False
+        from aiwaf.core.native_settings import log_native_fallback
         from aiwaf.fast.csv_pipeline import NativeAIWAFMiddleware
 
+        try:
+            # FastAPI builds middleware when the app starts, too late to choose the regular
+            # middleware instead, so build one now to see that it can start.
+            NativeAIWAFMiddleware(self.app, config=dict(conversion.config), aiwaf_config=self.config, stores_ready=True)
+        except Exception as error:
+            log_native_fallback("FastAPI", error)
+            return False
         log_native_default("FastAPI")
-        self.app.add_middleware(NativeAIWAFMiddleware, config=dict(conversion.config), aiwaf_config=self.config)
+        if regular_log:
+            # Registered first, innermost, where the regular chain puts it.
+            from aiwaf.fast.middleware.logging_middleware import AIWAFLoggingMiddleware
+
+            self.app.add_middleware(AIWAFLoggingMiddleware, log_dir=logging_cfg.get("log_dir", "aiwaf_logs"),
+                                    log_format=logging_cfg.get("log_format", "combined"), path_rules=path_rules)
+        self.app.add_middleware(NativeAIWAFMiddleware, config=dict(conversion.config), aiwaf_config=self.config,
+                                stores_ready=True)
         return True
 
     def _add_lifecycle_events(self, app: FastAPI):

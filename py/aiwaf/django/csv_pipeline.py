@@ -1,4 +1,9 @@
 """Django adapter for an explicitly configured Rust-owned CSV pipeline."""
+import threading
+import time
+from collections import OrderedDict
+from contextvars import ContextVar
+
 from django.conf import settings
 from django.http import HttpResponse
 from django.urls import resolve, Resolver404
@@ -8,6 +13,10 @@ from aiwaf.core.request_context import extract_ip_from_django_request
 from .geoip import lookup_country
 from .honeypot_cache import DjangoHoneypotCache
 from aiwaf.core.csv_pipeline import PipelineStores
+
+
+# The request being handled, so a block written to the regular store carries its extended info.
+_REQUEST = ContextVar("aiwaf_native_request", default=None)
 
 
 class DjangoStores(PipelineStores):
@@ -47,8 +56,13 @@ class DjangoStores(PipelineStores):
 
     def block(self, ip, reason):
         from .blocklist_manager import BlocklistManager
+        from .middleware import _get_blocklist_extended_info
 
-        BlocklistManager.block(ip, reason)
+        # As the regular middleware does: the request's headers, when
+        # AIWAF_BLOCKLIST_STORE_EXTENDED_INFO is on.
+        request = _REQUEST.get()
+        info = _get_blocklist_extended_info(request) if request is not None else None
+        BlocklistManager.block(ip, reason, extended_request_info=info)
 
     def learn(self, keywords):
         from .storage import get_keyword_store
@@ -56,6 +70,51 @@ class DjangoStores(PipelineStores):
         store = get_keyword_store()
         for keyword in keywords:
             store.add_keyword(keyword)
+
+
+def _process_local(alias):
+    """Whether a Django cache keeps its values in this process only."""
+    from django.core.cache import caches
+    from django.core.cache.backends.locmem import LocMemCache
+
+    try:
+        # Exactly LocMemCache: a subclass may keep its values elsewhere.
+        return type(caches[alias]) is LocMemCache
+    except Exception:  # An alias that doesn't exist is reported where the cache is used.
+        return False
+
+
+_RESOLVED = OrderedDict()
+_RESOLVED_LOCK = threading.Lock()
+_RESOLVED_LIMIT = 4096
+
+
+def _resolved(path, urlconf):
+    """The view, whether it exists, and its uuid parameter, for a path; recent paths are cached.
+
+    Resolution depends only on the URLconf's resolver, the active language (i18n_patterns) and
+    the path, so those are the key. A changed URLconf has a new resolver, so a new key.
+    """
+    from django.urls import get_resolver
+    from django.utils import translation
+
+    key = (get_resolver(urlconf), translation.get_language(), path)
+    with _RESOLVED_LOCK:
+        hit = _RESOLVED.get(key)
+        if hit is not None:
+            _RESOLVED.move_to_end(key)
+            return hit
+    try:
+        match = resolve(path, urlconf=urlconf)
+        # The regular UUID middleware reads the route's uuid parameter.
+        result = (match.func, True, match.kwargs.get("uuid"))
+    except Resolver404:
+        result = (None, False, None)
+    with _RESOLVED_LOCK:
+        _RESOLVED[key] = result
+        while len(_RESOLVED) > _RESOLVED_LIMIT:
+            _RESOLVED.popitem(last=False)
+    return result
 
 
 class NativeAIWAFMiddleware:
@@ -79,10 +138,19 @@ class NativeAIWAFMiddleware:
         if store not in ("csv", "django"):
             raise ValueError('AIWAF_CSV_PIPELINE "store" must be "csv" or "django"')
         active = "honeypot" in config.get("enabled", {"honeypot"})
+        rate_alias = config.pop("rate_cache_alias", "default")
+        # Saves each request the anomaly stage checks to RequestLog, as the regular anomaly
+        # middleware does, for aiwaf train when there is no access log to read.
+        self.save_request_log = bool(config.pop("save_request_log", False))
+        # A LocMemCache keeps its values in this process only, as the engine's own memory does, so
+        # timing and rate counts behave the same there without a Django cache call per request.
+        if config["honeypot_backend"] == "django_cache" and _process_local(alias):
+            config["honeypot_backend"] = "memory"
+        if config.get("rate_backend") == "django_cache" and _process_local(rate_alias):
+            config["rate_backend"] = "memory"
         cache = DjangoHoneypotCache(alias, validate_backend=active) if config["honeypot_backend"] == "django_cache" else None
         # "django_cache" counts rate limits in a Django cache, as the regular rate limiter does.
         counter = None
-        rate_alias = config.pop("rate_cache_alias", "default")
         if config.get("rate_backend") == "django_cache":
             from .rate_cache import DjangoRateCounter
             counter = DjangoRateCounter(rate_alias)
@@ -90,20 +158,24 @@ class NativeAIWAFMiddleware:
         self.pipeline = CSVPipeline(config, honeypot_cache=cache, rate_counter=counter,
                                     stores=DjangoStores() if store == "django" else None)
         self.country_lookup = getattr(settings, "AIWAF_CSV_PIPELINE_COUNTRY_LOOKUP", None)
+        # The GeoIP lookup cache, as the regular geo middleware reads it.
+        self.geo_cache = (getattr(settings, "AIWAF_GEO_CACHE_PREFIX", "aiwaf:geo:"),
+                          getattr(settings, "AIWAF_GEO_CACHE_SECONDS", 3600))
         validate_fact_callback(self.country_lookup)
         model = model if model is not None else getattr(settings, "AIWAF_CSV_PIPELINE_MODEL", None)
         if model is not None:
             self.pipeline.native.set_model(model)
 
     def __call__(self, request):
-        endpoint, exists, uuid = None, False, None
+        token = _REQUEST.set(request)
         try:
-            match = resolve(request.path_info, urlconf=getattr(request, "urlconf", None))
-            endpoint, exists = match.func, True
-            # The regular UUID middleware reads the route's uuid parameter.
-            uuid = match.kwargs.get("uuid")
-        except Resolver404:
-            pass
+            return self._handle(request)
+        finally:
+            _REQUEST.reset(token)
+
+    def _handle(self, request):
+        start = time.time()
+        endpoint, exists, uuid = _resolved(request.path_info, getattr(request, "urlconf", None))
         # Django function views do not declare their supported methods. Preserve
         # conservative acceptance; class-based views expose http_method_names.
         methods = {"GET", "POST", "HEAD", "OPTIONS", "PUT", "PATCH", "DELETE", "TRACE", "CONNECT"}
@@ -116,11 +188,36 @@ class NativeAIWAFMiddleware:
         ctx, status, payload = self.pipeline.begin(ip=ip, path=request.path, method=request.method,
             headers={k: str(v) for k, v in request.META.items() if k.startswith("HTTP_") or k in {"CONTENT_TYPE", "CONTENT_LENGTH", "SERVER_PROTOCOL"}},
             query=query, body=body, exists=exists, methods=methods, endpoint=endpoint,
-            country=(fact_value(lookup, ip) if lookup else lookup_country(ip, cache_prefix="aiwaf_geo", cache_seconds=3600)) if self.pipeline.needs_country else "", exhausted=exhausted,
+            country=(fact_value(lookup, ip) if lookup else lookup_country(ip, cache_prefix=self.geo_cache[0], cache_seconds=self.geo_cache[1])) if self.pipeline.needs_country else "", exhausted=exhausted,
             authenticated=is_authenticated_session_context(getattr(request, "user", None), getattr(request, "session", None)),
             uuid=None if uuid is None else str(uuid))
         response = HttpResponse(payload, status=status, content_type="application/json") if status else self.get_response(request)
         final_status, final_payload = self.pipeline.finish(ctx, response.status_code, response.get("Content-Length", "-"))
         if final_payload != "null":
             return HttpResponse(final_payload, status=final_status, content_type="application/json")
+        if self.save_request_log and not status:
+            self._save_request_log(request, response, ip, endpoint, start)
         return response
+
+    def _save_request_log(self, request, response, ip, endpoint, start):
+        """The row the regular anomaly middleware saves for a request it let through."""
+        if "ai_anomaly" in self.pipeline.disabled_stages(request.path, endpoint):
+            return
+        try:
+            from .models import RequestLog
+            from .utils import is_exempt, is_ip_exempted
+
+            if is_exempt(request) or is_ip_exempted(ip):
+                return
+            RequestLog.objects.create(
+                ip_address=ip,
+                method=request.method,
+                path=request.path[:500],
+                status_code=int(getattr(response, "status_code", 0) or 0),
+                response_time=float(time.time() - start),
+                user_agent=request.META.get("HTTP_USER_AGENT", "")[:1000],
+                referer=request.META.get("HTTP_REFERER", "")[:500],
+                content_length=str(response.get("Content-Length", "-"))[:20],
+            )
+        except Exception:
+            pass  # As in the regular middleware: logging never breaks the response.

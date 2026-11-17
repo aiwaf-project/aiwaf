@@ -309,3 +309,22 @@ def test_analyze_recent_behavior_returns_none_on_backend_error(monkeypatch):
     backend = SimpleNamespace(analyze_recent_behavior=_boom)
     monkeypatch.setattr(rust_backend, "aiwaf_rust", backend)
     assert rust_backend.analyze_recent_behavior([{"a": 1}], ["k"]) is None
+
+
+def test_the_apps_user_agent_cap_reaches_rust_and_older_builds_keep_theirs(monkeypatch):
+    real = pytest.importorskip("aiwaf_rust")
+    headers = {"HTTP_USER_AGENT": "Mozilla/5.0 Chrome/130 " + "a" * 700, "HTTP_ACCEPT": "text/html",
+               "HTTP_ACCEPT_LANGUAGE": "en", "HTTP_ACCEPT_ENCODING": "gzip", "HTTP_CONNECTION": "keep-alive"}
+    monkeypatch.setattr(rust_backend, "aiwaf_rust", real)
+    assert "Too long" in rust_backend.validate_headers(headers, None, 3)
+    assert rust_backend.validate_headers(headers, None, 3, max_user_agent_length=1000) is None
+    # An older aiwaf-rust takes no cap, and keeps its own.
+    calls = []
+
+    def older(headers, required_headers, min_score):
+        calls.append(min_score)
+        return "Suspicious user agent: Too long"
+
+    monkeypatch.setattr(rust_backend, "aiwaf_rust", SimpleNamespace(validate_headers_with_config=older))
+    assert rust_backend.validate_headers(headers, None, 3, max_user_agent_length=1000) == "Suspicious user agent: Too long"
+    assert calls == [3]

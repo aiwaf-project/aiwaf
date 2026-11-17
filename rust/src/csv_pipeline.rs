@@ -2,7 +2,7 @@
 use crate::{csv_runtime as csv, runtime_policy as policy};
 use aiwaf_core::payload::decode;
 use aiwaf_core::{
-    IsolationForest, RecentEntryInput, analyze_recent_behavior, validate_headers_full_default,
+    HeaderLimits, IsolationForest, RecentEntryInput, analyze_recent_behavior, validate_headers_full,
 };
 use pyo3::{
     exceptions::{PyRuntimeError, PyValueError},
@@ -94,9 +94,31 @@ struct Profile {
     uuid_not_found_weight: i64,
     uuid_success_decay: i64,
     required_headers: Vec<String>,
+    /// Required headers for particular methods (as given; the regular check looks methods up
+    /// in uppercase); other methods use required_headers.
+    required_headers_by_method: HashMap<String, Vec<String>>,
+    /// The header check skips paths (lowercased) ending in one of these or starting with one of
+    /// those, as Django's regular header check skips static files.
+    header_skip_extensions: Vec<String>,
+    header_skip_paths: Vec<String>,
+    /// Suspicious User-Agent patterns checked after the built-in ones (Python regex syntax the
+    /// regex crate shares), as FastAPI's regular header check adds one.
+    extra_suspicious_user_agents: Vec<String>,
     header_min_score: i32,
+    /// The header check's caps, as the regular middleware's AIWAF_MAX_HEADER_BYTES and friends.
+    header_max_bytes: usize,
+    header_max_count: usize,
+    header_max_user_agent: usize,
+    header_max_accept: usize,
+    /// User agents blocked by substring, after the legitimate-bot and suspicious-pattern checks.
+    blocked_user_agents: Vec<String>,
     anomaly_window: f64,
     anomaly_keywords: Vec<String>,
+    /// The regular middleware whose keyword-learning rule the anomaly stage follows: "django",
+    /// "flask" or "fastapi"; empty for the native rule.
+    learn_context: String,
+    /// Words never learned, replacing the native exclusions, as the regular middleware has them.
+    learn_exclude: Option<HashSet<String>>,
     log_path: String,
     log_fsync: bool,
     /// "csv" keeps the blocklist, exemptions, keywords and countries in data_dir. "host" takes them
@@ -168,7 +190,16 @@ impl Default for Profile {
             uuid_not_found_weight: 1,
             uuid_success_decay: 2,
             required_headers: vec!["HTTP_USER_AGENT".into(), "HTTP_ACCEPT".into()],
+            required_headers_by_method: HashMap::new(),
+            header_skip_extensions: vec![],
+            header_skip_paths: vec![],
+            extra_suspicious_user_agents: vec![],
             header_min_score: 3,
+            header_max_bytes: 32 * 1024,
+            header_max_count: 100,
+            header_max_user_agent: 500,
+            header_max_accept: 4096,
+            blocked_user_agents: vec![],
             anomaly_window: 60.0,
             anomaly_keywords: [
                 "admin",
@@ -222,6 +253,8 @@ impl Default for Profile {
             ]
             .map(str::to_owned)
             .to_vec(),
+            learn_context: String::new(),
+            learn_exclude: None,
             log_path: String::new(),
             log_fsync: false,
             policy_store: "csv".into(),
@@ -297,6 +330,8 @@ struct State {
     /// The largest rate window used so far, so overrides with longer windows aren't pruned early.
     rate_window: f64,
     model: Option<Arc<IsolationForest>>,
+    /// What this process learned, for the "flask" learning rule.
+    learned_here: HashSet<String>,
 }
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static LOG_FAILURE_REPORTED: AtomicBool = AtomicBool::new(false);
@@ -309,6 +344,7 @@ pub struct NativeCSVPipeline {
     honeypot_cache: Option<PyObject>,
     /// With rate_backend "counter": shared window counts, such as Redis, from the adapter.
     rate_counter: Option<PyObject>,
+    header_limits: HeaderLimits,
 }
 
 impl NativeCSVPipeline {
@@ -331,6 +367,136 @@ impl NativeCSVPipeline {
             f.now,
         )
     }
+    /// The segments of a 404 probe the anomaly stage learns as keywords. `learn_context` picks
+    /// the regular middleware whose rule it follows: "django", "flask" or "fastapi"; by default
+    /// the native rule. With `learn_exclude`, exactly those words (and, for "flask", what this
+    /// process already learned) are never learned.
+    fn learned_segments(&self, f: &Facts) -> Vec<String> {
+        let p = &self.profile;
+        static SEGMENTS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let split = SEGMENTS.get_or_init(|| regex::Regex::new(r"\W+").unwrap());
+        let lower = f.path.to_lowercase();
+        let query_lower = f.query.to_lowercase();
+        let query_keys: Vec<String> = f
+            .query
+            .split('&')
+            .map(|part| decode(part.split('=').next().unwrap_or("").as_bytes()))
+            .collect();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // Flask counts its anomaly keywords (the exclusions) and what it learned as malicious.
+        let flask_known = |seg: &str, state: &State| {
+            p.learn_exclude.as_ref().map_or_else(|| p.static_keywords.contains(seg), |ex| ex.contains(seg))
+                || state.learned_here.contains(seg)
+        };
+        let path_wide = match p.learn_context.as_str() {
+            // aiwaf.django.middleware.AIAnomalyMiddleware._is_malicious_context
+            "django" => {
+                split.split(&f.path).filter(|seg| p.static_keywords.contains(*seg)).count() > 1
+                    || ["../", "..\\", ".env", "wp-admin", "phpmyadmin", "config", "backup", "database", "mysql",
+                        "passwd", "shadow"]
+                        .iter()
+                        .any(|s| lower.contains(s))
+                    || query_keys.iter().any(|key| ["cmd", "exec", "system", "shell"].contains(&key.as_str()))
+                    || ["%2e%2e", "%252e", "%c0%ae"].iter().any(|s| f.path.contains(s))
+            }
+            // aiwaf.flask.anomaly_middleware.AIAnomalyMiddleware._is_malicious_context
+            "flask" => {
+                split.split(&lower).filter(|seg| flask_known(seg, &state)).count() > 1
+                    || ["../", "..\\", ".env", "wp-admin", "phpmyadmin", "config", "backup", "database", "mysql",
+                        "passwd", "shadow", "admin", "shell", "cmd", "exec", "system"]
+                        .iter()
+                        .any(|s| lower.contains(s))
+                    || query_keys.iter().any(|key| ["cmd", "exec", "system", "shell", "eval"].contains(&key.as_str()))
+                    || ["%2e%2e", "%252e", "%c0%ae", "%2f", "%5c"].iter().any(|s| lower.contains(s))
+                    || ["union select", "drop table", "insert into", "delete from", "update set", "<script",
+                        "javascript:", "onload=", "onerror=", "document.cookie"]
+                        .iter()
+                        .any(|s| query_lower.contains(s))
+            }
+            // FastAPI decides per segment, below.
+            "fastapi" => false,
+            _ => {
+                [
+                    "../",
+                    "..\\",
+                    ".env",
+                    "wp-admin",
+                    "phpmyadmin",
+                    "config",
+                    "backup",
+                    "database",
+                    "mysql",
+                    "passwd",
+                    "shadow",
+                    "admin",
+                    "shell",
+                    "cmd",
+                    "exec",
+                    "system",
+                    "%2e%2e",
+                    "%252e",
+                    "%c0%ae",
+                    "%2f",
+                    "%5c",
+                ]
+                .iter()
+                .any(|s| lower.contains(s))
+                    || [
+                        "union select",
+                        "drop table",
+                        "insert into",
+                        "delete from",
+                        "update set",
+                        "<script",
+                        "javascript:",
+                        "onload=",
+                        "onerror=",
+                        "document.cookie",
+                    ]
+                    .iter()
+                    .any(|s| f.query.contains(s))
+                    || f.query.split('&').any(|part| {
+                        ["cmd", "exec", "system", "shell", "eval"].contains(
+                            &decode(part.split('=').next().unwrap_or("").as_bytes()).as_str(),
+                        )
+                    })
+            }
+        };
+        let segments: Vec<&str> = split.split(&lower).filter(|s| s.chars().count() > 3).collect();
+        let learned: Vec<String> = segments
+            .into_iter()
+            .filter(|seg| match p.learn_context.as_str() {
+                // aiwaf.fast.middleware.anomaly_middleware._segment_has_malicious_context
+                "fastapi" => {
+                    lower.contains("../")
+                        || lower.contains("..\\")
+                        || (query_lower.contains(*seg)
+                            && ["union", "select", "drop", "insert", "script", "alert", "eval"]
+                                .iter()
+                                .any(|token| query_lower.contains(token)))
+                }
+                _ => path_wide,
+            })
+            .filter(|seg| match &p.learn_exclude {
+                Some(exclude) => {
+                    !exclude.contains(*seg) && !(p.learn_context == "flask" && state.learned_here.contains(*seg))
+                }
+                None => {
+                    !p.anomaly_keywords.iter().any(|kw| kw == seg)
+                        && !p.static_keywords.contains(*seg)
+                        && !p.legitimate_keywords.contains(*seg)
+                        && !p.exempt_keywords.contains(*seg)
+                }
+            })
+            .map(str::to_owned)
+            .collect();
+        if p.learn_context == "flask" {
+            // Flask's regular middleware adds what it learns to the words it counts as malicious.
+            state.learned_here.extend(learned.iter().cloned());
+        }
+        learned
+    }
+
     fn learn(&self, py: Python<'_>, f: &Facts, keywords: Vec<String>) -> PyResult<()> {
         if self.host() {
             return self.effect(f, "keywords", keywords);
@@ -472,13 +638,17 @@ impl NativeCSVPipeline {
             }
             if p.sql_mode != "off" {
                 if let Some((rule, status)) = py.allow_threads(|| {
-                    aiwaf_core::payload::inspect_sql(&query, &body, p.max_bytes, exhausted).or_else(|| {
-                        aiwaf_core::payload::inspect_sql_headers(
-                            f.headers.iter().map(|(name, value)| (name.as_str(), value.as_str())),
-                            p.max_bytes,
-                        )
-                        .or_else(|| aiwaf_core::payload::inspect_sql_path(&f.path, p.max_bytes))
-                    })
+                    aiwaf_core::payload::inspect_sql(&query, &body, p.max_bytes, exhausted).or_else(
+                        || {
+                            aiwaf_core::payload::inspect_sql_headers(
+                                f.headers
+                                    .iter()
+                                    .map(|(name, value)| (name.as_str(), value.as_str())),
+                                p.max_bytes,
+                            )
+                            .or_else(|| aiwaf_core::payload::inspect_sql_path(&f.path, p.max_bytes))
+                        },
+                    )
                 }) {
                     if p.sql_mode == "monitor" {
                         *monitored = Some(rule);
@@ -742,16 +912,25 @@ impl NativeCSVPipeline {
                 }
             }
         }
-        if f.active.contains("header_validation") {
+        let path = f.path.to_lowercase();
+        let skipped = p.header_skip_extensions.iter().any(|ext| path.ends_with(ext.as_str()))
+            || p.header_skip_paths.iter().any(|prefix| path.starts_with(prefix.as_str()));
+        if f.active.contains("header_validation") && !skipped {
+            let limits = &self.header_limits;
+            let required = p
+                .required_headers_by_method
+                .get(&f.method.to_uppercase())
+                .unwrap_or(&p.required_headers);
             if let Some(reason) = py.allow_threads(|| {
-                validate_headers_full_default(
+                validate_headers_full(
                     &f.headers,
-                    &p.required_headers,
-                    if p.required_headers.is_empty() {
+                    required,
+                    if required.is_empty() {
                         0
                     } else {
                         p.header_min_score
                     },
+                    limits,
                 )
             }) {
                 return block(reason, 403, None);
@@ -780,6 +959,7 @@ impl NativeCSVPipeline {
             || !["memory", "csv", "counter"].contains(&p.rate_backend.as_str())
             || !["memory", "csv", "django_cache", "cache"].contains(&p.honeypot_backend.as_str())
             || !["ip", "ip_path"].contains(&p.rate_key_mode.as_str())
+            || !["", "django", "flask", "fastapi"].contains(&p.learn_context.as_str())
             || p.enabled.iter().any(|s| !STAGES.contains(&s.as_str()))
             || [p.rate_window, p.anomaly_window, p.uuid_window]
                 .iter()
@@ -846,7 +1026,30 @@ impl NativeCSVPipeline {
             .map(|s| s.trim().to_uppercase())
             .filter(|s| !s.is_empty())
             .collect();
+        for list in [&mut p.header_skip_extensions, &mut p.header_skip_paths] {
+            *list = list.iter().map(|s| s.to_lowercase()).collect();
+        }
+        let header_limits = HeaderLimits {
+            max_header_bytes: p.header_max_bytes,
+            max_header_count: p.header_max_count,
+            max_user_agent_length: p.header_max_user_agent,
+            max_accept_length: p.header_max_accept,
+            blocked_user_agents: p
+                .blocked_user_agents
+                .iter()
+                .map(|agent| agent.trim().to_lowercase())
+                .filter(|agent| !agent.is_empty())
+                .collect(),
+            count_http_prefix: true,
+            extra_suspicious: p
+                .extra_suspicious_user_agents
+                .iter()
+                .map(|pattern| regex::Regex::new(&format!("(?i){pattern}")))
+                .collect::<Result<_, _>>()
+                .map_err(|error| PyValueError::new_err(format!("Invalid User-Agent pattern: {error}")))?,
+        };
         let pipeline = Self {
+            header_limits,
             profile: p,
             state: Mutex::new(State::default()),
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
@@ -873,6 +1076,10 @@ impl NativeCSVPipeline {
             ("rate_buckets.csv", strings(&["key", "value", "expires_at"])),
         ] {
             if name == "pipeline_state.csv" && pipeline.profile.honeypot_backend != "csv" {
+                continue;
+            }
+            if name == "rate_buckets.csv" && pipeline.profile.rate_backend != "csv" {
+                // Counted in memory or by the host's counter, so the file would never be read.
                 continue;
             }
             if pipeline.host() && !["pipeline_state.csv", "rate_buckets.csv"].contains(&name) {
@@ -914,6 +1121,11 @@ impl NativeCSVPipeline {
             "uuid_fact",
             "host_store",
             "rate_counter",
+            "header_limits",
+            "header_skip",
+            "method_headers",
+            "extra_user_agents",
+            "learn_context",
         ]
         .contains(&feature)
     }
@@ -1199,68 +1411,9 @@ impl NativeCSVPipeline {
                 }
             }
             if p.learning && status == 404 && !f.exists && !f.exempt {
-                let lower = f.path.to_lowercase();
-                let suspicious = [
-                    "../",
-                    "..\\",
-                    ".env",
-                    "wp-admin",
-                    "phpmyadmin",
-                    "config",
-                    "backup",
-                    "database",
-                    "mysql",
-                    "passwd",
-                    "shadow",
-                    "admin",
-                    "shell",
-                    "cmd",
-                    "exec",
-                    "system",
-                    "%2e%2e",
-                    "%252e",
-                    "%c0%ae",
-                    "%2f",
-                    "%5c",
-                ]
-                .iter()
-                .any(|s| lower.contains(s))
-                    || [
-                        "union select",
-                        "drop table",
-                        "insert into",
-                        "delete from",
-                        "update set",
-                        "<script",
-                        "javascript:",
-                        "onload=",
-                        "onerror=",
-                        "document.cookie",
-                    ]
-                    .iter()
-                    .any(|s| f.query.contains(s))
-                    || f.query.split('&').any(|part| {
-                        ["cmd", "exec", "system", "shell", "eval"].contains(
-                            &decode(part.split('=').next().unwrap_or("").as_bytes()).as_str(),
-                        )
-                    });
-                if suspicious {
-                    static SEGMENTS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-                    let learned = SEGMENTS
-                        .get_or_init(|| regex::Regex::new(r"\W+").unwrap())
-                        .split(&lower)
-                        .filter(|s| {
-                            s.chars().count() > 3
-                                && !p.anomaly_keywords.iter().any(|kw| kw == s)
-                                && !p.static_keywords.contains(*s)
-                                && !p.legitimate_keywords.contains(*s)
-                                && !p.exempt_keywords.contains(*s)
-                        })
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>();
-                    if !learned.is_empty() {
-                        self.learn(py, &f, learned)?;
-                    }
+                let learned = self.learned_segments(&f);
+                if !learned.is_empty() {
+                    self.learn(py, &f, learned)?;
                 }
             }
         }

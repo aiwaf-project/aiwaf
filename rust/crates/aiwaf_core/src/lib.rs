@@ -154,7 +154,7 @@ fn display_header_name(canonical: &str) -> String {
         .to_lowercase()
 }
 
-fn check_user_agent(user_agent: &str) -> Option<String> {
+fn check_user_agent_with(user_agent: &str, limits: &HeaderLimits) -> Option<String> {
     if user_agent.is_empty() {
         return None;
     }
@@ -172,15 +172,60 @@ fn check_user_agent(user_agent: &str) -> Option<String> {
             return Some(format!("Pattern: {}", pattern));
         }
     }
+    if let Some(regex) = limits.extra_suspicious.iter().find(|regex| regex.is_match(&ua_lower)) {
+        return Some(format!("Pattern: {}", regex.as_str().trim_start_matches("(?i)")));
+    }
+
+    if let Some(blocked) = limits
+        .blocked_user_agents
+        .iter()
+        .find(|blocked| !blocked.is_empty() && ua_lower.contains(blocked.as_str()))
+    {
+        return Some(format!("Blocked: {}", blocked));
+    }
 
     if user_agent.chars().count() < 10 {
         return Some("Too short".to_string());
     }
-    if user_agent.chars().count() > 500 {
+    if user_agent.chars().count() > limits.max_user_agent_length {
         return Some("Too long".to_string());
     }
 
     None
+}
+
+/// Size caps and blocked user agents for the header check. The defaults are the regular
+/// middleware's: 32 KiB of headers, 100 headers, a 500-character User-Agent and a
+/// 4096-character Accept header, and no blocked user agents.
+#[derive(Clone, Debug)]
+pub struct HeaderLimits {
+    pub max_header_bytes: usize,
+    pub max_header_count: usize,
+    pub max_user_agent_length: usize,
+    pub max_accept_length: usize,
+    /// Lowercase substrings: a User-Agent containing one is blocked, after the legitimate-bot
+    /// and suspicious-pattern checks.
+    pub blocked_user_agents: Vec<String>,
+    /// Whether the "HTTP_" of a header's name counts toward max_header_bytes, as it does in
+    /// Python's request META. Node.js counts names as sent (user-agent), so it turns this off.
+    pub count_http_prefix: bool,
+    /// Patterns checked after the built-in suspicious ones, as FastAPI's regular check adds
+    /// `mozilla/5\.0$`. Matched case-insensitively against the lowercased User-Agent.
+    pub extra_suspicious: Vec<Regex>,
+}
+
+impl Default for HeaderLimits {
+    fn default() -> Self {
+        Self {
+            max_header_bytes: 32 * 1024,
+            max_header_count: 100,
+            max_user_agent_length: 500,
+            max_accept_length: 4096,
+            blocked_user_agents: Vec::new(),
+            count_http_prefix: true,
+            extra_suspicious: Vec::new(),
+        }
+    }
 }
 
 /// The default Python header policy, including caps and arbitrary required headers.
@@ -190,28 +235,49 @@ pub fn validate_headers_full_default(
     required: &[String],
     min_score: i32,
 ) -> Option<String> {
+    validate_headers_full(headers, required, min_score, &HeaderLimits::default())
+}
+
+/// The Python header policy with the app's own size caps and blocked user agents.
+pub fn validate_headers_full(
+    headers: &HashMap<String, String>,
+    required: &[String],
+    min_score: i32,
+    limits: &HeaderLimits,
+) -> Option<String> {
     let mut total_chars = 0usize;
     let mut header_count = 0usize;
     for (key, value) in headers {
         if key.starts_with("HTTP_") || key == "CONTENT_TYPE" || key == "CONTENT_LENGTH" {
             header_count += 1;
-            total_chars += key.chars().count() + value.chars().count();
+            let name = if limits.count_http_prefix {
+                key.as_str()
+            } else {
+                key.strip_prefix("HTTP_").unwrap_or(key)
+            };
+            total_chars += name.chars().count() + value.chars().count();
         }
     }
-    if total_chars > 32 * 1024 {
-        return Some("Header bytes exceed 32768".to_string());
+    if total_chars > limits.max_header_bytes {
+        return Some(format!("Header bytes exceed {}", limits.max_header_bytes));
     }
-    if header_count > 100 {
-        return Some("Header count exceeds 100".to_string());
+    if header_count > limits.max_header_count {
+        return Some(format!("Header count exceeds {}", limits.max_header_count));
     }
 
     let ua = get_header(headers, "HTTP_USER_AGENT").unwrap_or_default();
-    if ua.chars().count() > 500 {
-        return Some("User-Agent longer than 500 chars".to_string());
+    if ua.chars().count() > limits.max_user_agent_length {
+        return Some(format!(
+            "User-Agent longer than {} chars",
+            limits.max_user_agent_length
+        ));
     }
     let accept = get_header(headers, "HTTP_ACCEPT").unwrap_or_default();
-    if accept.chars().count() > 4096 {
-        return Some("Accept header longer than 4096 chars".to_string());
+    if accept.chars().count() > limits.max_accept_length {
+        return Some(format!(
+            "Accept header longer than {} chars",
+            limits.max_accept_length
+        ));
     }
 
     let missing: Vec<String> = required
@@ -223,7 +289,7 @@ pub fn validate_headers_full_default(
         return Some(format!("Missing required headers: {}", missing.join(", ")));
     }
 
-    if let Some(reason) = check_user_agent(&ua) {
+    if let Some(reason) = check_user_agent_with(&ua, limits) {
         return Some(format!("Suspicious user agent: {}", reason));
     }
 
@@ -289,6 +355,149 @@ pub fn validate_headers_full_default(
     None
 }
 
+/// An app's own User-Agent lists for Node.js's header check (AIWAF_SUSPICIOUS_USER_AGENTS and
+/// AIWAF_LEGITIMATE_BOTS), matched case-insensitively against the lowercased User-Agent. An empty
+/// list matches nothing, as in Node.js.
+#[derive(Clone, Debug)]
+pub struct UserAgentLists {
+    pub suspicious: Option<Vec<Regex>>,
+    pub legitimate: Option<Vec<Regex>>,
+}
+
+impl UserAgentLists {
+    /// Compiles each JavaScript pattern source with the case-insensitive flag.
+    pub fn compile(suspicious: Option<&[String]>, legitimate: Option<&[String]>) -> Result<Self, String> {
+        let compile = |patterns: Option<&[String]>| -> Result<Option<Vec<Regex>>, String> {
+            patterns
+                .map(|patterns| {
+                    patterns
+                        .iter()
+                        .map(|pattern| {
+                            Regex::new(&format!("(?i){pattern}"))
+                                .map_err(|error| format!("User-Agent pattern {pattern:?}: {error}"))
+                        })
+                        .collect()
+                })
+                .transpose()
+        };
+        Ok(Self { suspicious: compile(suspicious)?, legitimate: compile(legitimate)? })
+    }
+}
+
+/// Node.js's regular header check (js/lib/headerValidation.js), for its native pipeline: every
+/// header counts toward the caps, named as Node.js names them (user-agent, server-protocol); the
+/// first missing required header blocks; a legitimate bot skips the rest; an empty User-Agent is
+/// suspicious; the header combinations apply whatever is required; and the quality score applies
+/// when `min_score` is above zero. Header names are given in the HTTP_ form.
+pub fn validate_headers_node(
+    headers: &HashMap<String, String>,
+    required: &[String],
+    min_score: i32,
+    limits: &HeaderLimits,
+    lists: Option<&UserAgentLists>,
+) -> Option<String> {
+    let mut total_chars = 0usize;
+    for (key, value) in headers {
+        total_chars += key.strip_prefix("HTTP_").unwrap_or(key).chars().count() + value.chars().count();
+    }
+    if total_chars > limits.max_header_bytes {
+        return Some(format!("Header bytes exceed {}", limits.max_header_bytes));
+    }
+    if headers.len() > limits.max_header_count {
+        return Some(format!("Header count exceeds {}", limits.max_header_count));
+    }
+    let ua = get_header(headers, "HTTP_USER_AGENT").unwrap_or_default();
+    if ua.chars().count() > limits.max_user_agent_length {
+        return Some(format!("User-Agent longer than {} chars", limits.max_user_agent_length));
+    }
+    let accept = get_header(headers, "HTTP_ACCEPT").unwrap_or_default();
+    if accept.chars().count() > limits.max_accept_length {
+        return Some(format!("Accept header longer than {} chars", limits.max_accept_length));
+    }
+    if let Some(missing) = required.iter().find(|name| !has_header(headers, name)) {
+        return Some(format!("Missing required headers: {}", display_header_name(missing)));
+    }
+    let lower = ua.to_lowercase();
+    let legitimate = lists.and_then(|lists| lists.legitimate.as_ref());
+    if legitimate.map_or_else(
+        || LEGITIMATE_BOTS.iter().any(|bot| bot.is_match(&lower)),
+        |bots| bots.iter().any(|bot| bot.is_match(&lower)),
+    ) {
+        return None;
+    }
+    if let Some(patterns) = lists.and_then(|lists| lists.suspicious.as_ref()) {
+        if let Some(pattern) = patterns.iter().find(|pattern| pattern.is_match(&lower)) {
+            return Some(format!(
+                "Suspicious user agent: Pattern: {}",
+                pattern.as_str().trim_start_matches("(?i)")
+            ));
+        }
+    } else if let Some((pattern, _)) = SUSPICIOUS_UA
+        .iter()
+        .filter(|(pattern, _)| *pattern != r"mozilla/4\.0$")
+        .find(|(_, regex)| regex.is_match(&lower))
+    {
+        return Some(format!("Suspicious user agent: Pattern: {}", pattern));
+    }
+    if lists.and_then(|lists| lists.suspicious.as_ref()).is_none() && lower == "mozilla/4.0" {
+        return Some("Suspicious user agent: Pattern: ^mozilla/4\\.0$".to_string());
+    }
+    if let Some(blocked) = limits
+        .blocked_user_agents
+        .iter()
+        .find(|blocked| lower.contains(blocked.as_str()))
+    {
+        return Some(format!("Suspicious user agent: Blocked: {}", blocked));
+    }
+    let protocol = get_header(headers, "SERVER_PROTOCOL").unwrap_or_default().to_uppercase();
+    let language = has_header(headers, "HTTP_ACCEPT_LANGUAGE");
+    let encoding = has_header(headers, "HTTP_ACCEPT_ENCODING");
+    let connection = get_header(headers, "HTTP_CONNECTION").unwrap_or_default();
+    if protocol.starts_with("HTTP/2") && lower.contains("mozilla/4.0") {
+        return Some("Suspicious headers: HTTP/2 with old browser user agent".to_string());
+    }
+    if !ua.is_empty() && accept.is_empty() {
+        return Some("Suspicious headers: User-Agent present but no Accept header".to_string());
+    }
+    if accept == "*/*" && !language && !encoding {
+        return Some("Suspicious headers: Generic Accept header without language/encoding".to_string());
+    }
+    if !ua.is_empty() && !language && !encoding && connection.is_empty() {
+        return Some("Suspicious headers: Missing all browser-standard headers".to_string());
+    }
+    if protocol == "HTTP/1.0" && lower.contains("chrome") {
+        return Some("Suspicious headers: Modern browser with HTTP/1.0".to_string());
+    }
+    if min_score > 0 {
+        let mut score = 0;
+        if !ua.is_empty() {
+            score += 2;
+        }
+        if !accept.is_empty() {
+            score += 2;
+        }
+        for name in ["HTTP_ACCEPT_LANGUAGE", "HTTP_ACCEPT_ENCODING", "HTTP_CONNECTION", "HTTP_CACHE_CONTROL"] {
+            if has_header(headers, name) {
+                score += 1;
+            }
+        }
+        if language && encoding {
+            score += 1;
+        }
+        if connection.to_lowercase() == "keep-alive" {
+            score += 1;
+        }
+        let accept_lower = accept.to_lowercase();
+        if accept_lower.contains("text/html") && accept_lower.contains("application/xml") {
+            score += 1;
+        }
+        if score < min_score {
+            return Some(format!("Low header quality score: {score}"));
+        }
+    }
+    None
+}
+
 pub fn validate_headers(headers: &HashMap<String, String>) -> Option<String> {
     validate_headers_with_config(headers, None, None)
 }
@@ -314,6 +523,21 @@ pub fn validate_headers_with_config(
     required_headers: Option<Vec<String>>,
     min_score: Option<i32>,
 ) -> Option<String> {
+    validate_headers_with_config_limits(
+        headers,
+        required_headers,
+        min_score,
+        &HeaderLimits::default(),
+    )
+}
+
+/// As `validate_headers_with_config`, with the app's User-Agent length cap and blocked agents.
+pub fn validate_headers_with_config_limits(
+    headers: &HashMap<String, String>,
+    required_headers: Option<Vec<String>>,
+    min_score: Option<i32>,
+    limits: &HeaderLimits,
+) -> Option<String> {
     let mut required_set = HashSet::new();
     let required: Vec<String> = required_headers
         .unwrap_or_else(|| vec!["HTTP_USER_AGENT".to_string(), "HTTP_ACCEPT".to_string()])
@@ -334,7 +558,7 @@ pub fn validate_headers_with_config(
     }
 
     let user_agent = get_header(headers, "HTTP_USER_AGENT").unwrap_or_default();
-    if let Some(reason) = check_user_agent(&user_agent) {
+    if let Some(reason) = check_user_agent_with(&user_agent, limits) {
         return Some(format!("Suspicious user agent: {}", reason));
     }
 
@@ -1431,6 +1655,81 @@ mod tests {
     use super::*;
 
     #[test]
+    fn header_limits_replace_the_default_caps_and_block_listed_agents() {
+        let browser = |ua: String| -> HashMap<String, String> {
+            [
+                ("HTTP_USER_AGENT", ua),
+                ("HTTP_ACCEPT", "text/html".to_string()),
+                ("HTTP_ACCEPT_LANGUAGE", "en".to_string()),
+                ("HTTP_ACCEPT_ENCODING", "gzip".to_string()),
+                ("HTTP_CONNECTION", "keep-alive".to_string()),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect()
+        };
+        let required = vec!["HTTP_USER_AGENT".to_string(), "HTTP_ACCEPT".to_string()];
+        let long = format!("Mozilla/5.0 {}", "a".repeat(600));
+        assert_eq!(
+            validate_headers_full_default(&browser(long.clone()), &required, 3),
+            Some("User-Agent longer than 500 chars".to_string())
+        );
+        let wide = HeaderLimits {
+            max_user_agent_length: 1000,
+            ..HeaderLimits::default()
+        };
+        assert_eq!(
+            validate_headers_full(&browser(long.clone()), &required, 3, &wide),
+            None
+        );
+        assert_eq!(
+            validate_headers_with_config_limits(
+                &browser(long),
+                Some(required.clone()),
+                Some(3),
+                &wide
+            ),
+            None
+        );
+        let narrow = HeaderLimits {
+            max_header_count: 2,
+            max_accept_length: 4,
+            ..HeaderLimits::default()
+        };
+        assert_eq!(
+            validate_headers_full(
+                &browser("Mozilla/5.0 Chrome/130".into()),
+                &required,
+                3,
+                &narrow
+            ),
+            Some("Header count exceeds 2".to_string())
+        );
+        let blocked = HeaderLimits {
+            blocked_user_agents: vec!["examplebrowser".into()],
+            ..HeaderLimits::default()
+        };
+        assert_eq!(
+            validate_headers_full(
+                &browser("Mozilla/5.0 ExampleBrowser/1".into()),
+                &required,
+                3,
+                &blocked
+            ),
+            Some("Suspicious user agent: Blocked: examplebrowser".to_string())
+        );
+        assert_eq!(
+            validate_headers_full(
+                &browser("Mozilla/5.0 Chrome/130".into()),
+                &required,
+                3,
+                &blocked
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn validate_headers_blocks_missing_required() {
         let mut headers = HashMap::new();
         headers.insert("HTTP_USER_AGENT".to_string(), "Mozilla/5.0".to_string());
@@ -1441,8 +1740,14 @@ mod tests {
     #[test]
     fn url_and_content_checks_are_conservative() {
         assert_eq!(validate_url("https://example.com/docs?q=script"), None);
-        assert_eq!(validate_url("/api/item\nX-Injected: yes"), Some("url_control_character"));
-        assert_eq!(validate_content("<script>example documentation</script>"), None);
+        assert_eq!(
+            validate_url("/api/item\nX-Injected: yes"),
+            Some("url_control_character")
+        );
+        assert_eq!(
+            validate_content("<script>example documentation</script>"),
+            None
+        );
         assert_eq!(validate_content("before\0after"), Some("content_nul_byte"));
     }
 
@@ -1639,7 +1944,10 @@ mod tests {
         assert_eq!(matcher.match_index("/api/items"), Some(1));
         assert_eq!(matcher.match_index("/apix"), Some(0));
         assert_eq!(matcher.match_index("/other"), Some(0));
-        assert_eq!(RouteMatcher::new(vec!["/api/".into()]).match_index("/other"), None);
+        assert_eq!(
+            RouteMatcher::new(vec!["/api/".into()]).match_index("/other"),
+            None
+        );
     }
 
     #[test]
@@ -2166,9 +2474,9 @@ mod model_contract_tests {
         assert_eq!(predictions[1], -1);
     }
 }
+pub mod client_ip;
 #[cfg(test)]
 mod fuzz_smoke;
-pub mod client_ip;
 pub mod payload;
 pub mod route_risks;
 pub mod sql;

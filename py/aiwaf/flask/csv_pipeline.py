@@ -80,6 +80,8 @@ class NativeAIWAF:
                 authenticated=fact_value(authenticated, request) if authenticated else False, exhausted=exhausted)
             g._aiwaf_pipeline_context = ctx
             if status:
+                # For the regular logging middleware, when it logs beside the native pipeline.
+                g.aiwaf_blocked, g.aiwaf_block_reason = True, "blocked"
                 return Response(payload, status=status, mimetype="application/json")
 
         @app.after_request

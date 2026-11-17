@@ -1,5 +1,194 @@
 # Changelog
 
+## Python 1.2.3 / aiwaf-rust 0.2.11 / Node.js 1.2.3 / WASM 0.2.8 / Java 1.3.7 — prepared release
+
+- **Upgrade order:** publish aiwaf-rust 0.2.11 and aiwaf-wasm 0.2.8 before Python 1.2.3 and
+  Node.js 1.2.3, which require them. Node.js runs the native pipeline automatically only with
+  aiwaf-wasm 0.2.8 or later; with an older one it keeps the regular middleware and says why.
+
+- Flask and FastAPI: when the regular middleware runs as the native pipeline (or with
+  `from_settings`), honeypot timing is kept in the process's memory, as their regular honeypot
+  middleware keeps it, instead of in a CSV file rewritten on every GET. In local benchmarks,
+  AIWAF's own cost on a Flask request fell from about 0.26 ms to 0.18 ms. A native profile that
+  sets `honeypot_backend` itself is unchanged.
+- Python's CSV stores no longer check that every CSV file exists before each read: the check
+  runs again when the data directory changes, and at least once a second. With a new client on
+  every request, a native Flask request fell from about 0.73 ms to 0.59 ms, and the regular
+  middleware got faster too.
+- **Fix (Node.js):** ten store methods (geo, exemptions, dynamic keywords, model and request log)
+  returned their database query without awaiting it, so a database error skipped the CSV
+  fallback and escaped. They now await it and fall back as intended.
+- Node.js's request log without a database no longer reads the whole log for each logged
+  request (to find the next id) or each recent-history check: it reads only the end of the
+  file. On a 50,000-row log, a logged request's write fell from about 44 ms to 0.2 ms.
+- Node.js builds route plans once per path and route markers, and compiles wildcard path rules,
+  route patterns and the UUID route prefix once, instead of on every request. The UUID route
+  prefix is now matched as literal text: a `.` in it no longer matches any character.
+- Node.js's native pipeline reports a request log it can't write once, not on every request.
+- **Java:** CSV and file storage read their file again only when it changed (by inode, change
+  time, modification time and size), instead of on every read, and reads take a shared lock,
+  so readers in different processes don't wait for each other. A blocklist read on a
+  5,000-entry CSV store fell from about 1.9 ms to 45 µs; changes from other processes and
+  outside edits are still seen. A store read that fails is logged once and read as nothing
+  found, as in the native pipelines, instead of failing the request.
+- Python's native Django pipeline does less work per request. In local benchmarks AIWAF's own
+  cost per request fell from about 0.20 ms to 0.13 ms, against about 3.1 ms for the regular
+  middleware.
+  - With Django's `LocMemCache` (exactly that class, not a subclass), honeypot timing and rate
+    counts use the engine's own memory instead of a Django cache call per request. Both keep
+    values in the process only; a process that builds more than one native middleware now
+    counts per middleware rather than per process. Since the cache isn't called, a
+    `LocMemCache` with ignored errors no longer keeps the regular middleware. Shared caches
+    such as Redis or Memcached are still used as before.
+  - Route plans from path rules and view decorators are computed once per path and view, in a
+    bounded cache; route checks still inspect every request.
+  - URL resolution is cached per URLconf, active language and path, in a bounded cache.
+- **Fix (Node.js):** an app with geo blocking that ran as the native pipeline automatically
+  stopped blocking by country, because nothing told the native pipeline which country a
+  request came from. It now looks countries up where the regular geo check finds them: the
+  MMDB database, then the `x-country-code` header, cached per address. `AIWAF_GEO_MMDB_PATH`,
+  `AIWAF_GEO_CACHE_SECONDS` and `AIWAF_GEO_CACHE_PREFIX` carry over. An app's `geoResolver` is
+  used as the regular check uses it, and may be asynchronous: the request waits for it.
+- **Fix (Django):** the regular anomaly middleware saves each request to `RequestLog`, which
+  `aiwaf train` reads when there is no access log, and drops its model until there are
+  `AIWAF_MIN_AI_LOGS` logs. As the native pipeline, neither happened: requests weren't saved,
+  and the model was used at once. The native pipeline now saves the same rows when
+  `AIWAF_ACCESS_LOG` names no log with requests in it to train from, and the model is carried
+  over only when the regular middleware would use it. Saving a row is a database write per
+  request: in a local load test on SQLite, native Django handled about 340 requests a second
+  per worker with it, against about 100 for the regular middleware.
+- **Fix (Django and Node.js):** the regular header check also ran aiwaf-rust's or aiwaf-wasm's
+  check, which capped the User-Agent at 500 characters whatever `AIWAF_MAX_USER_AGENT_LENGTH`
+  allowed. It now uses the app's cap, with aiwaf-rust 0.2.11 or aiwaf-wasm 0.2.8; older builds
+  keep 500.
+- Python: if the native pipeline is chosen automatically and can't start, the regular
+  middleware runs instead, with a warning on `aiwaf.native`, as in Node.js. Before, the error
+  stopped Django, Flask or FastAPI from starting. A native pipeline set up explicitly still
+  raises its error.
+- Python and Node.js say why an app runs the regular middleware and not the native pipeline:
+  the settings that don't carry over, or the aiwaf-rust or aiwaf-wasm that is missing or too
+  old. It's logged once, at info level on `aiwaf.native` (Python) or with `console.info`
+  (Node.js), and not for an app that turned the native pipeline off itself.
+- Python: more settings no longer keep an app on the regular middleware.
+  - Settings only `aiwaf train` and the other commands read, such as `AIWAF_AI_CONTAMINATION`,
+    `AIWAF_MIN_TRAIN_LOGS` and the `AIWAF_RUST_*` and `AIWAF_PYTHON_*` training options.
+  - `AIWAF_GEOIP_DB_PATH`, `AIWAF_GEO_CACHE_SECONDS` and `AIWAF_GEO_CACHE_PREFIX`, which the
+    native adapters read as the regular geo middleware does. Django's native middleware read a
+    fixed cache prefix and lifetime before.
+  - Django: `AIWAF_ACCESS_LOG`, `AIWAF_MIN_AI_LOGS`, `AIWAF_DISABLE_AI` and the `AIWAF_MODEL_*`
+    settings, which decide the model the regular middleware uses; that model is handed over.
+    Also `AIWAF_LOG_FORMAT` and `AIWAF_LOG_LEVEL`, which Django's middleware doesn't read.
+  - Flask: `AIWAF_ACCESS_LOG`. With `AIWAF_LOG_FORMAT` set (JSON, CSV or combined), the
+    regular logging middleware writes `access.log`, `error.log` and `aiwaf.log` beside the
+    native pipeline, in that format, instead of the native request log.
+  - FastAPI: `logging_middleware.log_dir`.
+  - `AIWAF_RUST_REQUEST_ENGINE`, since the native pipeline always checks requests in Rust.
+- More settings carry over to the native pipeline, so they no longer keep an app on the
+  regular middleware:
+  - Django: `AIWAF_MAX_HEADER_BYTES`, `AIWAF_MAX_HEADER_COUNT`, `AIWAF_MAX_USER_AGENT_LENGTH`
+    and `AIWAF_MAX_ACCEPT_LENGTH` (with aiwaf-rust 0.2.11). Flask's regular middleware doesn't
+    read them, so they don't change Flask's native pipeline either.
+  - Django and Flask: `AIWAF_WINDOW_SECONDS`, the anomaly window, and
+    `AIWAF_ALLOWED_PATH_KEYWORDS`. The native keyword checks now skip the same words the
+    regular ones do: the app's route words, its allowed and exempt keywords, and the regular
+    defaults. Before, the native pipeline used a shorter built-in list.
+  - Django and Flask: extended block info (`AIWAF_BLOCKLIST_STORE_EXTENDED_INFO` and its header
+    limits and redactions; Flask's `AIWAF_CAPTURE_EXTENDED_REQUEST_INFO` and
+    `AIWAF_EXTENDED_REQUEST_INFO_*`). A native block records the request's headers in the
+    regular blocklist, as the regular middleware does.
+  - FastAPI: `logging_middleware.log_format`. With JSON or CSV, the regular logging middleware
+    writes `access.log` beside the native pipeline, as Flask now does.
+  - Node.js: `AIWAF_LOGIN_PATH_PREFIXES`, `AIWAF_MAX_HEADER_BYTES`, `AIWAF_MAX_HEADER_COUNT`,
+    `AIWAF_MAX_USER_AGENT_LENGTH`, `AIWAF_MAX_ACCEPT_LENGTH` and `AIWAF_BLOCKED_USER_AGENTS`
+    (with aiwaf-wasm 0.2.8). The native header check now also blocks the regular default
+    scanners (sqlmap, nikto, acunetix, nmap and masscan) and counts header bytes as Node.js
+    sends the names.
+- **Fix (Node.js):** the native header check followed the Python rules, so it answered
+  differently from the regular Node.js middleware even with default options. The regular check
+  applies the header combinations whatever is required, treats an empty User-Agent as
+  suspicious, lets a legitimate bot skip the rest, skips static files, counts the protocol as a
+  header, and then runs aiwaf-wasm's own check; with `AIWAF_HEADER_VALIDATION` off it still runs
+  aiwaf-wasm's User-Agent check. The native pipeline now does exactly the same (with aiwaf-wasm
+  0.2.8). In side-by-side tests the two pipelines answer the same across ten header cases in
+  four configurations, and at the exact header byte and count limits.
+- Node.js: the rest of the regular options carry over to the native pipeline (with aiwaf-wasm
+  0.2.8), so none of them keeps an app on the regular middleware:
+  - `AIWAF_EXEMPT_KEYWORDS` and `AIWAF_ALLOWED_PATH_KEYWORDS`, checked as the regular keyword
+    check does: an allowed fragment in the path skips keyword blocks, and the first matching
+    keyword blocks unless it's exempt.
+  - `AIWAF_POST_ONLY_SUFFIXES`, with the method policy, and `AIWAF_REQUIRED_HEADERS` per method.
+  - Models kept in the model store (`AIWAF_MODEL_STORAGE` "db" or "cache", and its fallback and
+    cache settings), read when the native pipeline starts. A stored model in the older format
+    keeps the regular middleware, with a warning.
+  - Request logging (`AIWAF_MIDDLEWARE_LOGGING` with `AIWAF_MIDDLEWARE_LOG_PATH`, `_LOG_CSV`,
+    `_LOG_CSV_PATH` and `_LOG_DB`): the regular request logger runs beside the native pipeline
+    and writes the same JSONL, CSV and database logs, blocks included.
+  - `AIWAF_SUSPICIOUS_USER_AGENTS` and `AIWAF_LEGITIMATE_BOTS`, as pattern strings or RegExps
+    with no flag but `i`. A RegExp with other flags keeps the regular middleware.
+  - Extended block info (`AIWAF_CAPTURE_EXTENDED_REQUEST_INFO`,
+    `AIWAF_EXTENDED_INFO_MAX_HEADERS`, `AIWAF_EXTENDED_INFO_MAX_VALUE_LENGTH`): a native block
+    records the same request info in the regular blocklist.
+  - `AIWAF_MIN_AI_LOGS`: the model is used only when there are that many recent logs at
+    startup, as in the regular anomaly check.
+  - The native pipeline's `countryLookup` option may now return a promise.
+- Node.js: the automatic switch to the native pipeline now needs aiwaf-wasm 0.2.8, which can
+  answer exactly as the regular middleware. With an older aiwaf-wasm the app keeps the regular
+  middleware, with a warning to upgrade, instead of running native with the older header rules.
+  A native pipeline set up explicitly still runs on an older aiwaf-wasm when it uses none of
+  the new options.
+- Django: with `AIWAF_MIDDLEWARE_LOGGING`, the regular logger middleware runs beside the native
+  pipeline and writes the same CSV log and `RequestLog` rows, when it's listed before or after
+  every other AIWAF middleware. Listed between them, the app keeps the regular middleware.
+- **Fix (Python):** side-by-side tests now send the same requests through the regular
+  middleware and the native pipeline in Django, Flask and FastAPI, and compare every response:
+  header checks in several configurations, keywords and SQL injection, rate limits, honeypot
+  timing, UUID tampering and path exemptions. They found two differences, now fixed (with
+  aiwaf-rust 0.2.11):
+  - Django's and FastAPI's regular header checks skip static files (`.css`, `.js`, `/static/`
+    and the like); the native pipeline checked them.
+  - FastAPI's regular header check also flags a bare `Mozilla/5.0` User-Agent.
+  With an older aiwaf-rust, an app with the header check keeps the regular middleware.
+- **Fix:** side-by-side tests now also compare keyword learning, the anomaly model, geo blocking
+  and request logs, and found these differences, now fixed:
+  - Keyword learning from 404 probes followed one native rule; each regular middleware has its
+    own. The native pipeline now learns by Django's, Flask's, FastAPI's or Node.js's rule
+    (with aiwaf-rust 0.2.11 and aiwaf-wasm 0.2.8), never learning the words that rule skips.
+    With an older engine, an app with the anomaly stage keeps the regular middleware.
+  - Django's and Flask's regular keyword checks skip paths under the app's own route prefixes;
+    FastAPI's skips its default legitimate words. The native pipeline now does too.
+  - Node.js: a keyword learned by this process applies to the next request, as the regular
+    middleware's in-memory counts make it, instead of after the store write and its cache.
+  - Node.js: anomaly detection runs the regular check itself, after the other stages, as the
+    regular middleware does: its features, model (any format, from the file or the model
+    store), log minimum and request-log history. Before, the native pipeline judged recent
+    behavior from its own history and blocked scans the regular middleware let through.
+  - Django: geo blocking applies only with `AIWAF_GEO_BLOCK_ENABLED` and an allow or block list
+    of the app's own, as in the regular middleware.
+  - FastAPI: the native pipeline set up storage again when the app built its middleware,
+    emptying in-memory stores of anything added after `AIWAF(app)`.
+  - FastAPI: requests are logged by the regular logging middleware beside the native pipeline,
+    so requests AIWAF blocked aren't logged, as before.
+- **Fix (Flask):** when the anomaly model blocked a request after its view ran, the regular
+  middleware returned a `(body, 403)` tuple from `after_request`, which Flask can't send, so the
+  request failed with a 500. It now answers 403.
+- FastAPI's regular anomaly middleware never loads a trained model, so neither pipeline uses
+  one there; `aiwaf train` saves one that only Django, Flask and Node.js read.
+- Python: `AIWAF_REQUIRED_HEADERS` given per method (a dict with `DEFAULT`) carries over to the
+  native pipeline in Django and Flask, with aiwaf-rust 0.2.11.
+- aiwaf-rust 0.2.11 and aiwaf-wasm 0.2.8: the header check takes the app's caps and blocked
+  user agents (`header_max_bytes`, `header_max_count`, `header_max_user_agent`,
+  `header_max_accept`, `blocked_user_agents`). aiwaf-wasm also takes `login_prefixes`,
+  `header_bytes_without_prefix`, `exempt_keywords`, `allowed_path_keywords`,
+  `post_only_suffixes`, `required_headers_by_method` and `header_policy` ("python", "node" or
+  "node_ua", with `header_skip_extensions`, `header_skip_paths` and `header_wasm_check`).
+  aiwaf-rust also takes `required_headers_by_method`, `header_skip_extensions`,
+  `header_skip_paths` and `extra_suspicious_user_agents`. `supports()` reports each of them. The native pipeline also no longer creates `rate_buckets.csv`
+  unless rate limits are counted in it (`rate_backend` "csv").
+- In local benchmarks, AIWAF's own cost on a FastAPI request is about 0.13 ms as the native
+  pipeline, against about 1.7 ms for the regular middleware. With 1, 4 and 8 Django worker
+  processes sharing one data directory and database, the native pipeline handled about 2,100
+  requests a second per worker at every size, without errors.
+
 ## Python 1.2.2 / aiwaf-rust 0.2.10 / Node.js 1.2.2 — prepared release
 
 - **Fix (aiwaf-rust 0.2.10):** the native pipeline's startup check of its request log read the

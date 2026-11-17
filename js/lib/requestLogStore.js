@@ -96,8 +96,8 @@ module.exports = {
       }
     }
 
-    const current = rows();
-    csvStore.appendRow(csvPath, headers, { id: csvStore.nextId(current), ...payload });
+    // IDs only increase, so the last row gives the next one without reading the whole log.
+    csvStore.appendRow(csvPath, headers, { id: csvStore.nextId(csvStore.readTailRows(csvPath, headers, 1)), ...payload });
   },
 
   async recent(limit = 5000) {
@@ -105,15 +105,15 @@ module.exports = {
 
     if (await initialize()) {
       try {
-        return db('request_logs').select('*').orderBy('created_at', 'desc').limit(normalizedLimit);
+        return await db('request_logs').select('*').orderBy('created_at', 'desc').limit(normalizedLimit);
       } catch (err) {
         dbAvailable = false;
       }
     }
 
-    return rows()
-      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
-      .slice(0, normalizedLimit);
+    // The log is appended in time order, so the newest rows are its last lines.
+    return csvStore.readTailRows(csvPath, headers, normalizedLimit)
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
   },
 
   async geoSummary(limit = 25) {
@@ -121,7 +121,7 @@ module.exports = {
 
     if (await initialize()) {
       try {
-        return db('request_logs')
+        return await db('request_logs')
           .select('country')
           .count({ requests: '*' })
           .sum({ blocked_count: db.raw('CASE WHEN blocked THEN 1 ELSE 0 END') })

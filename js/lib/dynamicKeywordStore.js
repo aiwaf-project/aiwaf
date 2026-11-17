@@ -47,7 +47,7 @@ module.exports = {
     const normalizedLimit = Number(limit) > 0 ? Number(limit) : 1000;
     if (await initialize()) {
       try {
-        return db('dynamic_keywords')
+        return await db('dynamic_keywords')
           .select('*')
           .orderBy('count', 'desc')
           .limit(normalizedLimit);

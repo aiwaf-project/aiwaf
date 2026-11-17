@@ -1,7 +1,7 @@
 //! Stateful, bounded Node/WASM request processing. Filesystem I/O belongs to Node.
 use aiwaf_core::{
-    IsolationForest, RecentEntryInput, analyze_recent_behavior, validate_headers_full_default,
-    validate_url,
+    HeaderLimits, IsolationForest, RecentEntryInput, analyze_recent_behavior, validate_headers_full,
+    UserAgentLists, validate_headers_node, validate_headers_with_config_limits, validate_url,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -24,12 +24,20 @@ pub const STAGES: [&str; 8] = [
 ];
 static NEXT_CONTEXT: AtomicU64 = AtomicU64::new(1);
 /// Optional request facts this engine accepts, for `NativeRequestPipeline::supports`.
-pub const FEATURES: [&str; 5] = [
+pub const FEATURES: [&str; 13] = [
     "rate_overrides",
     "sql_monitor",
     "uuid_resolver",
     "host_store",
     "rate_count",
+    "header_limits",
+    "login_prefixes",
+    "keyword_exemptions",
+    "post_only_suffixes",
+    "method_headers",
+    "header_policy",
+    "user_agent_lists",
+    "learn_context",
 ];
 
 #[derive(Deserialize)]
@@ -41,6 +49,10 @@ struct Profile {
     static_keywords: Vec<String>,
     dynamic_keywords: HashSet<String>,
     legitimate_keywords: Vec<String>,
+    /// Keywords that never block, and path fragments that keep a request from keyword blocks,
+    /// as the regular AIWAF_EXEMPT_KEYWORDS and AIWAF_ALLOWED_PATH_KEYWORDS (lowercased).
+    exempt_keywords: Vec<String>,
+    allowed_path_keywords: Vec<String>,
     learning: bool,
     geo_allow: HashSet<String>,
     geo_block: HashSet<String>,
@@ -54,13 +66,45 @@ struct Profile {
     max_page_time: f64,
     skip_authenticated: bool,
     honeypot_field: String,
+    /// Paths under these prefixes are login forms, which may be posted faster (lowercased paths).
+    login_prefixes: Vec<String>,
+    /// "node" learns keywords as Node.js's regular middleware does (anomalyDetector
+    /// maybeLearnKeyword): every segment of a 404 that looks like a scan, from every request
+    /// that wasn't blocked or exempt. Empty for the native rule.
+    learn_context: String,
+    learn_scan_patterns: Vec<String>,
+    learn_static_keywords: Vec<String>,
+    /// With a method policy: a GET to a path ending in one of these is refused (lowercased).
+    post_only_suffixes: Vec<String>,
     allowed_methods: Vec<String>,
     uuid_prefix: String,
     uuid_window: f64,
     uuid_threshold: usize,
     anomaly_window: f64,
     required_headers: Vec<String>,
+    /// Required headers for particular methods (uppercase); other methods use required_headers.
+    required_headers_by_method: HashMap<String, Vec<String>>,
     header_min_score: i32,
+    /// The header check's caps and blocked user agents (by substring), as the regular middleware's.
+    header_max_bytes: usize,
+    header_max_count: usize,
+    header_max_user_agent: usize,
+    header_max_accept: usize,
+    blocked_user_agents: Vec<String>,
+    /// Count header names without "HTTP_" toward header_max_bytes, as Node.js sends them.
+    header_bytes_without_prefix: bool,
+    /// "python" (the default) or "node": Node.js's regular header check, which skips static
+    /// files (header_skip_extensions and header_skip_paths, matched on the lowercased path) and,
+    /// with header_wasm_check, then runs aiwaf-wasm's own check as the regular middleware does.
+    /// "node_ua" is what Node.js's regular middleware checks with AIWAF_HEADER_VALIDATION off:
+    /// aiwaf-wasm's User-Agent check alone, with header_wasm_check.
+    header_policy: String,
+    header_skip_extensions: Vec<String>,
+    header_skip_paths: Vec<String>,
+    header_wasm_check: bool,
+    /// The app's own User-Agent pattern lists for the "node" policy (JavaScript sources).
+    suspicious_user_agents: Option<Vec<String>>,
+    legitimate_bots: Option<Vec<String>>,
     sql_mode: String,
     max_bytes: usize,
     block_duration: f64,
@@ -99,6 +143,8 @@ impl Default for Profile {
             ]
             .map(str::to_owned)
             .into(),
+            exempt_keywords: vec![],
+            allowed_path_keywords: vec![],
             learning: true,
             geo_allow: HashSet::new(),
             geo_block: HashSet::new(),
@@ -111,13 +157,31 @@ impl Default for Profile {
             max_page_time: 240.0,
             skip_authenticated: true,
             honeypot_field: String::new(),
+            login_prefixes: vec!["/login".into(), "/admin/login".into()],
+            learn_context: String::new(),
+            learn_scan_patterns: vec![],
+            learn_static_keywords: vec![],
+            post_only_suffixes: vec![],
             allowed_methods: vec![],
             uuid_prefix: "/user/".into(),
             uuid_window: 60.0,
             uuid_threshold: 5,
             anomaly_window: 60.0,
             required_headers: vec!["HTTP_USER_AGENT".into(), "HTTP_ACCEPT".into()],
+            required_headers_by_method: HashMap::new(),
             header_min_score: 3,
+            header_max_bytes: 32 * 1024,
+            header_max_count: 100,
+            header_max_user_agent: 500,
+            header_max_accept: 4096,
+            blocked_user_agents: vec![],
+            header_bytes_without_prefix: false,
+            header_policy: "python".into(),
+            header_skip_extensions: vec![],
+            header_skip_paths: vec![],
+            header_wasm_check: false,
+            suspicious_user_agents: None,
+            legitimate_bots: None,
             sql_mode: "block".into(),
             max_bytes: 65536,
             block_duration: 86400.0,
@@ -182,6 +246,7 @@ struct Pending {
     status: u16,
     reason: String,
     apply: HashSet<String>,
+    exempt: bool,
 }
 #[derive(Default)]
 struct Client {
@@ -212,12 +277,130 @@ pub struct Engine {
     processed: usize,
     predictions: usize,
     pub model: Option<IsolationForest>,
+    header_limits: HeaderLimits,
+    agent_lists: Option<UserAgentLists>,
 }
+
+/// Whether a static or learned keyword blocks this path. With exempt keywords or allowed path
+/// fragments, as the regular check: an allowed fragment in the path skips keyword blocks, and the
+/// first static keyword found, then the first learned one, blocks unless it's exempt.
+fn keyword_hit(p: &Profile, path: &str, learned: &[&String]) -> bool {
+    if p.exempt_keywords.is_empty() && p.allowed_path_keywords.is_empty() {
+        return p
+            .static_keywords
+            .iter()
+            .chain(learned.iter().copied())
+            .any(|s| path.contains(s.as_str()));
+    }
+    let lower = path.to_lowercase();
+    if p.allowed_path_keywords.iter().any(|fragment| lower.contains(fragment.as_str())) {
+        return false;
+    }
+    let first_static = p.static_keywords.iter().find(|s| path.contains(s.as_str()));
+    let first_learned = learned.iter().copied().find(|s| lower.contains(s.as_str()));
+    [first_static, first_learned]
+        .into_iter()
+        .flatten()
+        .any(|keyword| !p.exempt_keywords.contains(keyword))
+}
+
+/// The segments Node.js's regular middleware learns from a 404 (anomalyDetector
+/// maybeLearnKeyword): none on a path with an allowed fragment; otherwise all of them, when the
+/// path looks like a scan and has a segment that isn't a static keyword.
+fn node_segments(p: &Profile, path: &str) -> Vec<String> {
+    static SEGMENTS: OnceLock<Regex> = OnceLock::new();
+    let lower = path.to_lowercase();
+    if lower.is_empty()
+        || p.exempt_keywords.iter().any(String::is_empty)
+        || p.allowed_path_keywords.iter().any(|fragment| lower.contains(fragment.as_str()))
+    {
+        return Vec::new();
+    }
+    // JavaScript's \W without the u flag: anything but ASCII letters, digits and _.
+    let split = SEGMENTS.get_or_init(|| Regex::new(r"[^A-Za-z0-9_]+").unwrap());
+    let segments: Vec<&str> = split.split(&lower).filter(|s| s.len() > 3).collect();
+    let scanning = p.learn_scan_patterns.iter().any(|pattern| lower.contains(pattern.as_str()))
+        || lower.contains("../")
+        || lower.contains("..\\")
+        || ["%2e%2e", "%252e", "%c0%ae"].iter().any(|s| lower.contains(s));
+    if scanning && segments.iter().any(|s| !p.learn_static_keywords.iter().any(|k| k == s)) {
+        segments.into_iter().map(str::to_owned).collect()
+    } else {
+        Vec::new()
+    }
+}
+
+fn is_post_only(p: &Profile, path: &str) -> bool {
+    let path = path.to_lowercase();
+    p.post_only_suffixes.iter().any(|suffix| path.ends_with(suffix.as_str()))
+}
+
+fn is_login_path(p: &Profile, path: &str) -> bool {
+    let path = path.to_lowercase();
+    p.login_prefixes.iter().any(|prefix| path.starts_with(prefix.as_str()))
+}
+
 impl Engine {
+    /// Node.js's regular header check, then aiwaf-wasm's own check as its regular middleware
+    /// runs it: the app's User-Agent cap, the same required headers (aiwaf-wasm's defaults when
+    /// none are), and no protocol.
+    fn node_headers(&self, r: &Request, required: &[String]) -> Option<String> {
+        let p = &self.profile;
+        let path = r.path.to_lowercase();
+        if p.header_skip_extensions.iter().any(|ext| path.ends_with(ext.as_str()))
+            || p.header_skip_paths.iter().any(|prefix| path.starts_with(prefix.as_str()))
+        {
+            return None;
+        }
+        if p.header_policy == "node_ua" {
+            if !p.header_wasm_check {
+                return None;
+            }
+            let mut headers = r.headers.clone();
+            headers.remove("SERVER_PROTOCOL");
+            return validate_headers_with_config_limits(
+                &headers,
+                Some(vec![]),
+                Some(0),
+                &HeaderLimits::default(),
+            );
+        }
+        let min_score = if required.is_empty() { 0 } else { p.header_min_score };
+        validate_headers_node(
+            &r.headers,
+            required,
+            min_score,
+            &self.header_limits,
+            self.agent_lists.as_ref(),
+        )
+        .or_else(|| {
+            if !p.header_wasm_check {
+                return None;
+            }
+            let mut headers = r.headers.clone();
+            headers.remove("SERVER_PROTOCOL");
+            validate_headers_with_config_limits(
+                &headers,
+                (!required.is_empty()).then(|| required.to_vec()),
+                Some(min_score),
+                &HeaderLimits {
+                    max_user_agent_length: self.header_limits.max_user_agent_length,
+                    ..HeaderLimits::default()
+                },
+            )
+        })
+    }
+
     pub fn new(profile: &str) -> Result<Self, String> {
         let mut p: Profile = serde_json::from_str(profile).map_err(|e| e.to_string())?;
         if p.enabled.iter().any(|s| !STAGES.contains(&s.as_str())) {
             return Err("Unknown stage".into());
+        }
+        if !["", "node"].contains(&p.learn_context.as_str()) {
+            return Err("Unsupported learn_context".into());
+        }
+        if !["python", "node", "node_ua"].contains(&p.header_policy.as_str()) {
+            return Err("Unsupported header_policy".into());
         }
         if !["off", "block", "monitor"].contains(&p.sql_mode.as_str())
             || !["memory", "host"].contains(&p.policy_store.as_str())
@@ -272,6 +455,48 @@ impl Engine {
             .collect();
         p.geo_allow = p.geo_allow.into_iter().map(|s| s.to_uppercase()).collect();
         p.geo_block = p.geo_block.into_iter().map(|s| s.to_uppercase()).collect();
+        for list in [
+            &mut p.exempt_keywords,
+            &mut p.allowed_path_keywords,
+            &mut p.post_only_suffixes,
+            &mut p.header_skip_extensions,
+            &mut p.header_skip_paths,
+        ] {
+            *list = list.iter().map(|s| s.to_lowercase()).collect();
+        }
+        p.required_headers_by_method = p
+            .required_headers_by_method
+            .into_iter()
+            .map(|(method, headers)| (method.to_uppercase(), headers))
+            .collect();
+        p.login_prefixes = p
+            .login_prefixes
+            .into_iter()
+            .map(|s| s.to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let header_limits = HeaderLimits {
+            max_header_bytes: p.header_max_bytes,
+            max_header_count: p.header_max_count,
+            max_user_agent_length: p.header_max_user_agent,
+            max_accept_length: p.header_max_accept,
+            blocked_user_agents: p
+                .blocked_user_agents
+                .iter()
+                .map(|agent| agent.trim().to_lowercase())
+                .filter(|agent| !agent.is_empty())
+                .collect(),
+            count_http_prefix: !p.header_bytes_without_prefix,
+            extra_suspicious: Vec::new(),
+        };
+        let agent_lists = if p.suspicious_user_agents.is_some() || p.legitimate_bots.is_some() {
+            Some(UserAgentLists::compile(
+                p.suspicious_user_agents.as_deref(),
+                p.legitimate_bots.as_deref(),
+            )?)
+        } else {
+            None
+        };
         let blocks = p.blocklist.clone();
         let learned = p
             .dynamic_keywords
@@ -290,6 +515,8 @@ impl Engine {
             processed: 0,
             predictions: 0,
             model: None,
+            header_limits,
+            agent_lists,
         })
     }
     pub fn set_model(&mut self, model: IsolationForest) -> Result<(), String> {
@@ -399,14 +626,14 @@ impl Engine {
             .difference(&r.disabled)
             .cloned()
             .collect();
-        if self.profile.exempt_ips.contains(&r.ip)
+        let exempt = self.profile.exempt_ips.contains(&r.ip)
             || r.exempt == Some(true)
             || self
                 .profile
                 .exempt_paths
                 .iter()
-                .any(|p| r.path.starts_with(p))
-        {
+                .any(|p| r.path.starts_with(p));
+        if exempt {
             apply.retain(|s| s == "logging");
         }
         let host = self.profile.policy_store == "host";
@@ -493,10 +720,7 @@ impl Engine {
                     .legitimate_keywords
                     .iter()
                     .any(|s| r.path.trim_matches('/') == s)
-                && p.static_keywords
-                    .iter()
-                    .chain(learned.iter().copied())
-                    .any(|s| r.path.contains(s.as_str()))
+                && keyword_hit(p, &r.path, &learned)
             {
                 status = 403;
                 reason = "keyword".into();
@@ -549,6 +773,9 @@ impl Engine {
             if !p.allowed_methods.is_empty() && !p.allowed_methods.contains(&r.method) {
                 status = 405;
                 reason = "method_not_allowed".into();
+            } else if r.method == "GET" && is_post_only(p, &r.path) {
+                status = 405;
+                reason = "get_post_only".into();
             } else if !p.honeypot_field.is_empty()
                 && r.body
                     .get(&p.honeypot_field)
@@ -564,7 +791,7 @@ impl Engine {
                     if let Some(start) = c.honey {
                         let elapsed = (r.now - start).max(0.0);
                         let min =
-                            if r.path.starts_with("/login") || r.path.starts_with("/admin/login") {
+                            if is_login_path(p, &r.path) {
                                 p.min_form_time.min(0.1)
                             } else {
                                 p.min_form_time
@@ -598,9 +825,16 @@ impl Engine {
             }
         }
         if status == 0 && apply.contains("header_validation") {
-            if let Some(k) =
-                validate_headers_full_default(&r.headers, &p.required_headers, p.header_min_score)
-            {
+            let required = p
+                .required_headers_by_method
+                .get(&r.method.to_uppercase())
+                .unwrap_or(&p.required_headers);
+            let found = if p.header_policy != "python" {
+                self.node_headers(&r, required)
+            } else {
+                validate_headers_full(&r.headers, required, p.header_min_score, &self.header_limits)
+            };
+            if let Some(k) = found {
                 status = 403;
                 reason = format!("header:{k}");
             }
@@ -621,6 +855,7 @@ impl Engine {
                 status,
                 reason: reason.clone(),
                 apply,
+                exempt,
             },
         );
         self.processed += 1;
@@ -683,6 +918,8 @@ impl Engine {
             let c = self.clients.entry(r.ip.clone()).or_default();
             if !p.allowed_methods.is_empty() && !p.allowed_methods.contains(&r.method) {
                 finding = Some((405, "method_not_allowed"));
+            } else if r.method == "GET" && is_post_only(p, &r.path) {
+                finding = Some((405, "get_post_only"));
             } else if !p.honeypot_field.is_empty()
                 && body
                     .get(&p.honeypot_field)
@@ -696,7 +933,7 @@ impl Engine {
                 if r.method == "POST" {
                     if let Some(start) = c.honey {
                         let min =
-                            if r.path.starts_with("/login") || r.path.starts_with("/admin/login") {
+                            if is_login_path(p, &r.path) {
                                 p.min_form_time.min(0.1)
                             } else {
                                 p.min_form_time
@@ -840,6 +1077,7 @@ impl Engine {
                 }
             }
             if self.profile.learning
+                && self.profile.learn_context.is_empty()
                 && status == 404
                 && !r.exists
                 && hits > 0
@@ -859,6 +1097,19 @@ impl Engine {
                         learned = Some(segment.to_owned());
                     }
                 }
+            }
+        }
+        let mut node_learned: Vec<String> = Vec::new();
+        if self.profile.learn_context == "node"
+            && self.profile.learning
+            && item.status == 0
+            && !item.exempt
+            && status == 404
+        {
+            node_learned = node_segments(&self.profile, &r.path);
+            if !host {
+                node_learned.retain(|_| self.learned.len() < 4096);
+                self.learned.extend(node_learned.iter().cloned());
             }
         }
         if let Some((_, expiry)) = &block {
@@ -887,12 +1138,16 @@ impl Engine {
         let block_csv = block
             .as_ref()
             .map(|(reason, expiry)| csv_row(&[r.ip.clone(), expiry.to_string(), reason.clone()]));
-        let keyword_csv = learned.as_ref().map(|keyword| csv_row(&[keyword.clone()]));
+        let keyword_csv = if node_learned.is_empty() {
+            learned.as_ref().map(|keyword| csv_row(&[keyword.clone()]))
+        } else {
+            Some(node_learned.iter().map(|keyword| csv_row(&[keyword.clone()])).collect::<String>())
+        };
         // Structured effects for host stores, alongside the CSV rows.
         let block_effect = block
             .as_ref()
             .map(|(reason, expiry)| json!({"ip":r.ip,"reason":reason,"expires_at":expiry}));
-        Ok(json!({"log_csv":log,"block_csv":block_csv,"keyword_csv":keyword_csv,"block":block_effect,"keyword":learned}).to_string())
+        Ok(json!({"log_csv":log,"block_csv":block_csv,"keyword_csv":keyword_csv,"block":block_effect,"keyword":learned,"keywords":node_learned}).to_string())
     }
     pub fn diagnostics(&self) -> String {
         json!({"native":true,"model":self.model.is_some(),"processed_requests":self.processed,"model_predictions":self.predictions,"clients":self.clients.len(),"pending":self.pending.len(),"blocked":self.blocks.len(),"learned_keywords":self.learned.len()}).to_string()
@@ -1266,6 +1521,93 @@ mod tests {
         assert_eq!(d["status"], 403);
         let d = begin(&mut other, request("a", "/form", "POST", 100.1, json!({})));
         assert_eq!(d["status"], 0);
+    }
+    #[test]
+    fn header_limits_blocked_agents_and_login_prefixes_come_from_the_profile() {
+        let header = |e: &mut Engine, ip: &str, ua: String| {
+            let mut r: Value =
+                serde_json::from_str(&request(ip, "/docs", "GET", 100.0, json!(null))).unwrap();
+            r["headers"]["HTTP_USER_AGENT"] = json!(ua);
+            begin(e, r.to_string())
+        };
+        let long = format!("Mozilla/5.0 Chrome/130 {}", "a".repeat(600));
+        let mut default = Engine::new("{}").unwrap();
+        assert_eq!(header(&mut default, "a", long.clone())["status"], 403);
+        let mut wide = Engine::new(
+            r#"{"header_max_user_agent":1000,"blocked_user_agents":["ExampleBrowser"]}"#,
+        )
+        .unwrap();
+        assert_eq!(header(&mut wide, "a", long)["status"], 0);
+        let d = header(&mut wide, "b", "Mozilla/5.0 examplebrowser/2".into());
+        assert_eq!(d["status"], 403);
+        assert!(d["reason"].as_str().unwrap().contains("Blocked: examplebrowser"));
+        let mut narrow = Engine::new(r#"{"header_max_count":2}"#).unwrap();
+        assert_eq!(
+            header(&mut narrow, "a", "Mozilla/5.0 Chrome/130 Safari".into())["reason"],
+            "header:Header count exceeds 2"
+        );
+        // A form posted 0.5 s after it was fetched is too fast, except on a login form.
+        let post = |prefixes: &str, path: &str| {
+            let mut e = Engine::new(&format!(r#"{{"login_prefixes":{prefixes}}}"#)).unwrap();
+            begin(&mut e, request("a", path, "GET", 100.0, json!(null)));
+            begin(&mut e, request("a", path, "POST", 100.5, json!({})))["status"].clone()
+        };
+        assert_eq!(post(r#"["/login","/admin/login"]"#, "/login/"), 0);
+        assert_eq!(post(r#"["/login","/admin/login"]"#, "/signin/"), 403);
+        assert_eq!(post(r#"["/SignIn/"]"#, "/signin/"), 0);
+        assert_eq!(post(r#"["/signin/"]"#, "/SIGNIN/next"), 0);
+        assert_eq!(post(r#"["/signin/"]"#, "/login/"), 403);
+        // Header bytes counted as Node.js sends the names: 27 with "HTTP_", 17 without.
+        let bytes = |profile: &str| {
+            let mut e = Engine::new(profile).unwrap();
+            let mut r: Value =
+                serde_json::from_str(&request("a", "/docs", "GET", 100.0, json!(null))).unwrap();
+            r["headers"] = json!({"HTTP_USER_AGENT":"Mozilla/5.0 Chrome/130 Safari/537.36","HTTP_ACCEPT":"text/html","HTTP_ACCEPT_LANGUAGE":"en","HTTP_ACCEPT_ENCODING":"gzip","HTTP_CONNECTION":"keep-alive"});
+            begin(&mut e, r.to_string())["status"].clone()
+        };
+        assert_eq!(bytes(r#"{"header_max_bytes":135}"#), 403);
+        assert_eq!(bytes(r#"{"header_max_bytes":135,"header_bytes_without_prefix":true}"#), 0);
+    }
+    #[test]
+    fn keyword_exemptions_post_only_suffixes_and_method_headers() {
+        let status = |profile: &str, path: &str, method: &str| {
+            let mut e = Engine::new(profile).unwrap();
+            begin(&mut e, request("a", path, method, 100.0, json!(null)))["status"].clone()
+        };
+        let keywords = r#"{"enabled":["ip_keyword_block"],"static_keywords":[".php","shell"]}"#;
+        assert_eq!(status(keywords, "/x.php", "GET"), 403);
+        let exempt = r#"{"enabled":["ip_keyword_block"],"static_keywords":[".php","shell"],"exempt_keywords":[".PHP"]}"#;
+        assert_eq!(status(exempt, "/x.php", "GET"), 0);
+        // The first keyword in list order decides, as in the regular check.
+        assert_eq!(status(exempt, "/shell/x.php", "GET"), 0);
+        let exempt_second = r#"{"enabled":["ip_keyword_block"],"static_keywords":[".php","shell"],"exempt_keywords":["shell"]}"#;
+        assert_eq!(status(exempt_second, "/shell/x.php", "GET"), 403);
+        assert_eq!(status(exempt_second, "/shell/x", "GET"), 0);
+        let allowed = r#"{"enabled":["ip_keyword_block"],"static_keywords":[".php"],"allowed_path_keywords":["Legacy"]}"#;
+        assert_eq!(status(allowed, "/legacy/x.php", "GET"), 0);
+        assert_eq!(status(allowed, "/x.php", "GET"), 403);
+        let post_only = r#"{"enabled":["honeypot"],"post_only_suffixes":["/Submit/"]}"#;
+        assert_eq!(status(post_only, "/form/submit/", "GET"), 405);
+        assert_eq!(status(post_only, "/form/submit/", "POST"), 0);
+        assert_eq!(status(post_only, "/form/", "GET"), 0);
+        let by_method = r#"{"enabled":["header_validation"],"required_headers":["HTTP_X_TOKEN"],"required_headers_by_method":{"get":[]}}"#;
+        assert_eq!(status(by_method, "/docs", "GET"), 0);
+        assert_eq!(status(by_method, "/docs", "POST"), 403);
+        // The app's own User-Agent lists, in the Node.js header check.
+        let agent = |profile: &str, ua: &str| {
+            let mut e = Engine::new(profile).unwrap();
+            let mut r: Value =
+                serde_json::from_str(&request("a", "/docs", "GET", 100.0, json!(null))).unwrap();
+            r["headers"]["HTTP_USER_AGENT"] = json!(ua);
+            begin(&mut e, r.to_string())["status"].clone()
+        };
+        let node = r#"{"enabled":["header_validation"],"header_policy":"node","required_headers":[]}"#;
+        assert_eq!(agent(node, "curl/8.0 Mozilla"), 403);
+        let lists = r#"{"enabled":["header_validation"],"header_policy":"node","required_headers":[],"suspicious_user_agents":["^evil"],"legitimate_bots":["MyMonitor"]}"#;
+        assert_eq!(agent(lists, "curl/8.0 Mozilla"), 0);
+        assert_eq!(agent(lists, "Evil/1.0 Mozilla"), 403);
+        assert_eq!(agent(lists, "mymonitor/1 evil"), 0);
+        assert!(Engine::new(r#"{"suspicious_user_agents":["(?<=x)y"]}"#).is_err());
     }
     #[test]
     fn exemptions_caps_geo_uuid_and_logging() {

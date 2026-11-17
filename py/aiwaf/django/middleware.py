@@ -1388,7 +1388,8 @@ class HeaderValidationMiddleware(NativeDefault, MiddlewareMixin):
 
         rust_reason = None
         if self._should_use_rust():
-            rust_reason = rust_validate_headers(headers, required_headers, min_score)
+            rust_reason = rust_validate_headers(headers, required_headers, min_score,
+                                                max_user_agent_length=self.MAX_USER_AGENT_LENGTH)
 
         reason = core_header_validation.evaluate_header_policy(
             headers,

@@ -33,10 +33,13 @@ def route_facts(router, scope):
 class FastAPIStores(PipelineStores):
     """The regular FastAPI middleware's stores, set up from its AIWAFConfig as it sets them up."""
 
-    def __init__(self, aiwaf_config=None):
+    def __init__(self, aiwaf_config=None, *, ready=False):
+        """``ready``: AIWAF(app) has already set up the stores, so they're used as they are."""
         from aiwaf.core.runtime_config import get_config
         from aiwaf.core.runtime_storage import get_exemption_store, initialize_storage
 
+        if ready:
+            return
         config = aiwaf_config if aiwaf_config is not None else get_config()
         initialize_storage(**config.get_storage_config())
         exemptions = config.get("exemptions", {})
@@ -81,8 +84,12 @@ class FastAPIStores(PipelineStores):
 
 class NativeAIWAFMiddleware:
     def __init__(self, app, config=None, *, model=None, country_lookup=None, authenticated=None, honeypot_cache=None,
-                 aiwaf_config=None):
-        """``config="from_settings"`` converts ``aiwaf_config``, or the AIWAFConfig the regular middleware uses."""
+                 aiwaf_config=None, stores_ready=False):
+        """``config="from_settings"`` converts ``aiwaf_config``, or the AIWAFConfig the regular middleware uses.
+
+        ``stores_ready``: AIWAF(app) set up the stores already. Setting them up again when the app
+        builds its middleware, at its first request, would empty in-memory stores.
+        """
         from aiwaf.core.native_settings import resolve
 
         validate_fact_callback(country_lookup)
@@ -94,7 +101,7 @@ class NativeAIWAFMiddleware:
         if store not in ("csv", "fastapi"):
             raise ValueError('The native "store" must be "csv" or "fastapi"')
         self.pipeline = CSVPipeline(config, model=model, honeypot_cache=honeypot_cache,
-                                    stores=FastAPIStores(aiwaf_config) if store == "fastapi" else None)
+                                    stores=FastAPIStores(aiwaf_config, ready=stores_ready) if store == "fastapi" else None)
         self.cache_io = self.pipeline.profile.get("honeypot_backend") == "cache"
         self.country_lookup = country_lookup
         self.authenticated = authenticated

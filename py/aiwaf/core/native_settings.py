@@ -47,6 +47,14 @@ _DIRECT = {
     "AIWAF_GEO_ALLOW_COUNTRIES": ("geo_allow", list),
     "AIWAF_REQUIRED_HEADERS": ("required_headers", list),
     "AIWAF_PATH_RULES": ("path_rules", list),
+    "AIWAF_WINDOW_SECONDS": ("anomaly_window", float),
+}
+# Django's regular header check reads these caps; the native one with a newer aiwaf-rust.
+_HEADER_LIMITS = {
+    "AIWAF_MAX_HEADER_BYTES": "header_max_bytes",
+    "AIWAF_MAX_HEADER_COUNT": "header_max_count",
+    "AIWAF_MAX_USER_AGENT_LENGTH": "header_max_user_agent",
+    "AIWAF_MAX_ACCEPT_LENGTH": "header_max_accept",
 }
 # Read from the environment by the regular middleware when they aren't settings.
 _ENVIRONMENT = ("AIWAF_SQL_INJECTION_MODE", "AIWAF_PAYLOAD_MAX_BYTES", "AIWAF_INJECTION_RISK_MODE",
@@ -60,6 +68,28 @@ _HANDLED = {"AIWAF_CSV_DATA_DIR", "AIWAF_DATA_DIR", "AIWAF_STORAGE_MODE", "AIWAF
             "AIWAF_SETTINGS",
             # Chooses between the pipelines; not a pipeline setting.
             "AIWAF_NATIVE_PIPELINE"}
+# Read only by ``aiwaf train`` and the other commands, never while a request is handled.
+_TRAINING = {"AIWAF_AI_BOOTSTRAP", "AIWAF_AI_CONTAMINATION", "AIWAF_AI_MAX_FEATURES", "AIWAF_AI_MAX_SAMPLES",
+             "AIWAF_AI_N_ESTIMATORS", "AIWAF_AI_RANDOM_STATE", "AIWAF_AI_WARM_START", "AIWAF_FORCE_AI_TRAINING",
+             "AIWAF_MIN_TRAIN_LOGS", "AIWAF_PYTHON_FEATURE_BATCH_SIZE", "AIWAF_PYTHON_PARALLEL_CHUNK_SIZE",
+             "AIWAF_PYTHON_PARALLEL_FEATURES", "AIWAF_PYTHON_PARALLEL_WORKERS", "AIWAF_RUST_FEATURE_BATCH_SIZE",
+             "AIWAF_RUST_FEATURE_CHUNK_SIZE", "AIWAF_RUST_ISOLATION_FOREST", "AIWAF_RUST_PARALLEL_CHUNK_SIZE",
+             "AIWAF_RUST_PARALLEL_FEATURES", "AIWAF_RUST_PARALLEL_WORKERS", "AIWAF_TRAINING_STATE_DIR"}
+# Read by the native adapters as the regular middleware reads them: the GeoIP database and its
+# lookup cache. AIWAF_RUST_REQUEST_ENGINE chooses the Rust request checks, which native always uses.
+_SAME = {"AIWAF_GEOIP_DB_PATH", "AIWAF_GEO_CACHE_SECONDS", "AIWAF_GEO_CACHE_PREFIX", "AIWAF_RUST_REQUEST_ENGINE"}
+# Set from Django's legacy AIWAF_SETTINGS; Django's regular middleware doesn't read them either.
+_DJANGO_UNREAD = {"AIWAF_LOG_FORMAT", "AIWAF_LOG_LEVEL"}
+# Flask's regular middleware reads no header caps, so the native defaults apply as they do there.
+_FLASK_UNREAD = set(_HEADER_LIMITS)
+# What a blocklist entry records about the request: the regular block store writes it in both
+# pipelines, from the request being handled.
+_BLOCK_INFO = {"AIWAF_BLOCKLIST_STORE_EXTENDED_INFO", "AIWAF_BLACKLIST_STORE_EXTENDED_INFO",
+               "AIWAF_BLOCKLIST_MAX_HEADERS", "AIWAF_BLACKLIST_MAX_HEADERS",
+               "AIWAF_BLOCKLIST_MAX_HEADER_VALUE_LENGTH", "AIWAF_BLACKLIST_MAX_HEADER_VALUE_LENGTH",
+               "AIWAF_BLOCKLIST_REDACT_HEADERS", "AIWAF_BLACKLIST_REDACT_HEADERS"}
+_FLASK_BLOCK_INFO = {"AIWAF_CAPTURE_EXTENDED_REQUEST_INFO", "AIWAF_EXTENDED_REQUEST_INFO_HEADERS",
+                     "AIWAF_EXTENDED_REQUEST_INFO_MAX_BYTES", "AIWAF_EXTENDED_REQUEST_INFO_REDACT_HEADERS"}
 # The settings that turn each Django stage on.
 _DJANGO_STAGES = {
     "aiwaf.django.middleware.GeoBlockMiddleware": "geo_block",
@@ -71,6 +101,13 @@ _DJANGO_STAGES = {
     "aiwaf.django.middleware.HeaderValidationMiddleware": "header_validation",
     "aiwaf.django.middleware_logger.AIWAFLoggerMiddleware": "logging",
 }
+# Django's regular header check: its default required headers, and the static files it skips.
+_DJANGO_REQUIRED = ("HTTP_USER_AGENT", "HTTP_ACCEPT")
+_DJANGO_STATIC_EXTENSIONS = (".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".woff", ".woff2", ".ttf")
+_DJANGO_STATIC_PATHS = ("/static/", "/media/", "/assets/", "/favicon.ico")
+DJANGO_LOGGER = "aiwaf.django.middleware_logger.AIWAFLoggerMiddleware"
+# The logger middleware's own settings, read by it as it runs beside the native pipeline.
+_DJANGO_LOGGER_SETTINGS = {"AIWAF_MIDDLEWARE_LOG", "AIWAF_MIDDLEWARE_CSV", "AIWAF_MIDDLEWARE_DB"}
 # Django's regular IP and keyword middleware blocks these when AIWAF_MALICIOUS_KEYWORDS isn't set.
 _DJANGO_STATIC_KEYWORDS = [".php", "xmlrpc", "wp-", ".env", ".git", ".bak", "conflg", "shell", "filemanager"]
 _GLOB = ("*", "?", "[")
@@ -176,6 +213,11 @@ def _payload_size(value):
 _NATIVE_VALUES = {
     "rate_window": _at_least(1, "a window"),
     "uuid_window": _at_least(1, "a window"),
+    "anomaly_window": _at_least(1, "a window"),
+    "header_max_bytes": _at_least(0, "a limit"),
+    "header_max_count": _at_least(0, "a limit"),
+    "header_max_user_agent": _at_least(0, "a limit"),
+    "header_max_accept": _at_least(0, "a limit"),
     "rate_max": _at_least(0, "a limit"),
     "rate_flood": _at_least(0, "a threshold"),
     "min_form_time": _at_least(0, "a time"),
@@ -288,12 +330,20 @@ def _stages(result, framework, settings, middleware):
     if "logging" in enabled and not settings.get("AIWAF_MIDDLEWARE_LOGGING", False):
         # The logger middleware writes nothing unless AIWAF_MIDDLEWARE_LOGGING is on.
         enabled.discard("logging")
+    if "logging" in enabled:
+        # The regular logger middleware keeps logging, beside the native pipeline, to the same
+        # CSV file and RequestLog. It sees the same requests when it's listed before or after
+        # every other AIWAF middleware; between them, it would see blocks from some and not others.
+        aiwaf = [path for path in middleware if path in _DJANGO_STAGES]
+        if aiwaf.index(DJANGO_LOGGER) in (0, len(aiwaf) - 1) and len(aiwaf) > 1:
+            enabled.discard("logging")
+            result.note("AIWAF_MIDDLEWARE_LOGGING", "carried")
+        else:
+            result.note("AIWAF_MIDDLEWARE_LOGGING", "changed",
+                        "The regular logger middleware runs beside the native pipeline only when it's listed "
+                        "before or after every other AIWAF middleware.")
     result.config["enabled"] = sorted(enabled)
     result.note("MIDDLEWARE", "carried")
-    if "logging" in enabled:
-        result.note("AIWAF_MIDDLEWARE_LOGGING", "changed",
-                    "Requests are logged to requests.csv in the data directory, with the native log's columns, "
-                    "not to AIWAF_MIDDLEWARE_LOG.")
 
 
 def native_config(settings: Mapping[str, Any], framework: str, *, middleware: Iterable[str] | None = None,
@@ -349,8 +399,22 @@ def native_config(settings: Mapping[str, Any], framework: str, *, middleware: It
         result.note("AIWAF_MALICIOUS_KEYWORDS", "not carried",
                     "Flask's regular middleware doesn't read it, so the native defaults apply as before.")
 
+    required = settings.get("AIWAF_REQUIRED_HEADERS")
+    if isinstance(required, Mapping):
+        # Per method, falling back to DEFAULT and then the regular defaults, as the regular
+        # header check reads them.
+        if _engine_supports("method_headers"):
+            default = required.get("DEFAULT")
+            result.config["required_headers"] = [str(h) for h in (default if default is not None else _DJANGO_REQUIRED)]
+            result.config["required_headers_by_method"] = {str(method): [str(h) for h in headers]
+                                                           for method, headers in required.items()
+                                                           if method != "DEFAULT" and headers is not None}
+            result.note("AIWAF_REQUIRED_HEADERS", "carried")
+        else:
+            result.note("AIWAF_REQUIRED_HEADERS", "not carried", "Per-method lists need a newer aiwaf-rust: "
+                                                                 "pip install -U aiwaf-rust")
     for name, (key, kind) in _DIRECT.items():
-        if settings.get(name) is None:
+        if settings.get(name) is None or (name == "AIWAF_REQUIRED_HEADERS" and isinstance(settings[name], Mapping)):
             continue
         try:
             result.config[key] = _native_value(key, kind, settings[name])
@@ -358,6 +422,21 @@ def native_config(settings: Mapping[str, Any], framework: str, *, middleware: It
             result.note(name, "not carried", f"Its value couldn't be read ({error}), so the native default applies.")
             continue
         result.note(name, "carried")
+    if framework == "django":
+        limits = _engine_supports("header_limits")
+        for name, key in _HEADER_LIMITS.items():
+            if settings.get(name) is None:
+                continue
+            if not limits:
+                result.note(name, "not carried", "The installed aiwaf-rust has fixed header limits; "
+                                                 "upgrade it to use this one: pip install -U aiwaf-rust")
+                continue
+            try:
+                result.config[key] = _native_value(key, int, settings[name])
+            except (TypeError, ValueError) as error:
+                result.note(name, "not carried", f"Its value couldn't be used ({error}).")
+                continue
+            result.note(name, "carried")
     maximum, flood = result.config.get("rate_max", 20), result.config.get("rate_flood", 40)
     if flood < maximum:
         # The regular rate limiter flood-blocks above the threshold before the limit is reached;
@@ -370,14 +449,44 @@ def native_config(settings: Mapping[str, Any], framework: str, *, middleware: It
     if "required_headers" in result.config:
         result.config["required_headers"] = [h if h.startswith("HTTP_") else "HTTP_" + h.upper().replace("-", "_")
                                              for h in result.config["required_headers"]]
+    for method, headers in result.config.get("required_headers_by_method", {}).items():
+        result.config["required_headers_by_method"][method] = [h if h.startswith("HTTP_") else "HTTP_" + h.upper().replace("-", "_")
+                                                               for h in headers]
     _rate_backend(result, framework, settings)
+    if framework == "flask":
+        # Flask's regular honeypot middleware keeps GET timestamps in the process's memory.
+        result.config["honeypot_backend"] = "memory"
     _stages(result, framework, settings, middleware)
+    if framework == "django" and "header_validation" in result.config.get("enabled", ()):
+        # Django's regular header check skips static files.
+        if _engine_supports("header_skip"):
+            result.config["header_skip_extensions"] = list(_DJANGO_STATIC_EXTENSIONS)
+            result.config["header_skip_paths"] = list(_DJANGO_STATIC_PATHS)
+        else:
+            result.note("HeaderValidationMiddleware", "changed", "The regular header check skips static files; "
+                                                                 "the installed aiwaf-rust checks them too. "
+                                                                 "Upgrade it: pip install -U aiwaf-rust")
+    if framework == "django" and "geo_block" in result.config.get("enabled", ()):
+        # Django's regular geo middleware does nothing unless AIWAF_GEO_BLOCK_ENABLED is on.
+        try:
+            geo_on = _value(bool, settings.get("AIWAF_GEO_BLOCK_ENABLED", False))
+        except ValueError:
+            geo_on = bool(settings.get("AIWAF_GEO_BLOCK_ENABLED"))
+        # Nor without an allow or block list of its own, whatever the store's blocked countries.
+        if not geo_on or not (result.config.get("geo_allow") or result.config.get("geo_block")):
+            result.config["enabled"] = [stage for stage in result.config["enabled"] if stage != "geo_block"]
     if settings.get("AIWAF_GEO_BLOCK_ENABLED") is not None:
-        # Countries decide geo blocking in both pipelines; the flag adds nothing without them.
         result.note("AIWAF_GEO_BLOCK_ENABLED", "carried")
 
+    same = _TRAINING | _SAME | _BLOCK_INFO | (_DJANGO_UNREAD | _DJANGO_LOGGER_SETTINGS if framework == "django"
+                                              else _FLASK_UNREAD | _FLASK_BLOCK_INFO)
     for name in sorted(settings):
-        if name.startswith("AIWAF_") and name not in _DIRECT and name not in _HANDLED:
+        if not name.startswith("AIWAF_") or name in _DIRECT or name in _HANDLED \
+                or (framework == "django" and name in _HEADER_LIMITS):
+            continue
+        if name in same:
+            result.note(name, "carried")
+        else:
             result.note(name, "not carried", "The native pipeline has no equivalent setting.")
     _check_path_rules(result, "AIWAF_PATH_RULES")
     return result
@@ -427,9 +536,11 @@ def native_config_fastapi(config=None, *, environ: Mapping[str, str] | None = No
     defaults = dict(_flatten(AIWAFConfig(load_from_env=False)._config))
     environ = os.environ if environ is None else environ
     changed = {key for key, value in values.items() if defaults.get(key, object()) != value}
+    # FastAPI's regular honeypot middleware keeps GET timestamps in the process's memory.
+    honeypot_backend = "memory"
     # The regular stores keep their files in storage.data_dir, which AIWAF_DATA_DIR sets.
     data_dir = values.get("storage.data_dir") or environ.get("AIWAF_DATA_DIR") or "aiwaf_data"
-    result = NativeConversion(config={"data_dir": str(data_dir)})
+    result = NativeConversion(config={"data_dir": str(data_dir), "honeypot_backend": honeypot_backend})
     if "storage.data_dir" in changed:
         result.note("storage.data_dir", "carried")
 
@@ -586,19 +697,26 @@ def _is_off(value) -> bool:
     return value is False or (isinstance(value, str) and value.strip().lower() in _OFF)
 
 
-def native_by_default(conversion: NativeConversion, *, choice=None, environ: Mapping[str, str] | None = None) -> bool:
+def native_by_default(conversion: NativeConversion, *, choice=None, environ: Mapping[str, str] | None = None,
+                      framework: str | None = None) -> bool:
     """Whether the regular middleware should run as the native pipeline.
 
     It does when nothing turns it off (``choice``, from the app's ``AIWAF_NATIVE_PIPELINE`` or
     ``native_pipeline`` argument, then the environment variable), the installed aiwaf-rust has
-    every native feature, and every setting carries over exactly.
+    every native feature, and every setting carries over exactly. With ``framework``, the
+    reason it doesn't is logged once, unless the app turned it off itself.
     """
     environ = os.environ if environ is None else environ
     if _is_off(choice) or (choice is None and _is_off(environ.get("AIWAF_NATIVE_PIPELINE"))):
         return False
     if not all(_engine_supports(feature) for feature in DEFAULT_FEATURES):
+        _stays_regular(framework, "the installed aiwaf-rust is too old for it "
+                                  "(pip install -U aiwaf-rust)." if _aiwaf_rust_installed() else
+                                  "aiwaf-rust isn't installed (pip install aiwaf-rust).")
         return False
     if conversion.differences():
+        _stays_regular(framework, "these settings don't carry over to it exactly:\n" + "\n".join(
+            f"- {note.setting}: {note.outcome}. {note.detail}".rstrip() for note in conversion.differences()))
         return False
     # The native engine keeps files in its data directory (and request logs at log_path); the
     # regular middleware may never write there, so a directory it can't create keeps it.
@@ -607,8 +725,34 @@ def native_by_default(conversion: NativeConversion, *, choice=None, environ: Map
         if not _writable_directory(directory):
             conversion.note("data_dir", "changed", f"The native pipeline keeps files in {os.path.abspath(directory)}, "
                                                    "which can't be created or written here.")
+            _stays_regular(framework, f"it keeps files in {os.path.abspath(directory)}, which can't be created "
+                                      "or written here.")
             return False
     return True
+
+
+_REPORTED = set()
+
+
+def _aiwaf_rust_installed() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("aiwaf_rust") is not None
+
+
+def _stays_regular(framework, reason, logger=LOGGER):
+    """Say, once per process, why an app runs the regular middleware and not the native pipeline."""
+    if framework is None or (framework, reason) in _REPORTED:
+        return
+    _REPORTED.add((framework, reason))
+    logger.info("AIWAF: running the regular middleware for %s, not the native pipeline, because %s", framework, reason)
+
+
+def log_native_fallback(framework: str, error, logger=LOGGER):
+    """The native pipeline was chosen but couldn't start: the regular middleware runs instead."""
+    logger.warning("AIWAF: the native pipeline couldn't start for %s (%s: %s), so the regular middleware runs "
+                   "instead. Set AIWAF_NATIVE_PIPELINE to False to skip the native pipeline.",
+                   framework, type(error).__name__, error)
 
 
 def _writable_directory(directory) -> bool:
@@ -636,6 +780,18 @@ def carry_model(conversion: NativeConversion, model, setting: str):
     conversion.note(setting, "not carried", "The loaded model isn't an aiwaf-rust model, which the native "
                                             "pipeline needs. Retrain it with aiwaf-rust installed.")
     return None
+
+
+def carry_learning(conversion: NativeConversion, framework: str, exclude) -> None:
+    """Learn keywords from 404 probes by the regular anomaly middleware's rule, never learning ``exclude``."""
+    if "ai_anomaly" not in conversion.config.get("enabled", ("ai_anomaly",)):
+        return
+    if not _engine_supports("learn_context"):
+        conversion.note("AIAnomalyMiddleware", "changed", "The installed aiwaf-rust learns keywords by its own rule, "
+                                                          "not the regular middleware's. Upgrade it: pip install -U aiwaf-rust")
+        return
+    conversion.config["learn_context"] = framework
+    conversion.config["learn_exclude"] = sorted({str(word) for word in exclude})
 
 
 def log_native_default(framework: str, logger=LOGGER):

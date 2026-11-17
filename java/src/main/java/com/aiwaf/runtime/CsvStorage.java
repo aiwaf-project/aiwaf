@@ -33,10 +33,22 @@ public final class CsvStorage implements StorageBackend {
 
     private final Path filePath;
     private final Map<String, Entry> data = new HashMap<>();
+    /** The file as last read or written, so an unchanged file isn't read again. */
+    private FileStamp loaded;
 
     public CsvStorage(String filePath) {
         this.filePath = Path.of(filePath).toAbsolutePath().normalize();
-        StorageFileLock.withLock(this.filePath, () -> { loadData(); return null; });
+        StorageFileLock.withLock(this.filePath, () -> { refresh(); return null; });
+    }
+
+    /** Reads the file again only if it changed since this instance last read or wrote it. */
+    private synchronized void refresh() {
+        FileStamp current = FileStamp.of(filePath);
+        if (current != null && current.equals(loaded)) {
+            return;
+        }
+        loadData();
+        loaded = current;
     }
 
     private synchronized void loadData() {
@@ -110,6 +122,7 @@ public final class CsvStorage implements StorageBackend {
             } catch (AtomicMoveNotSupportedException ex) {
                 Files.move(temp, filePath, StandardCopyOption.REPLACE_EXISTING);
             }
+            loaded = FileStamp.of(filePath);
         } catch (IOException ex) {
             throw new IllegalStateException("Unable to persist CSV storage", ex);
         }
@@ -133,8 +146,8 @@ public final class CsvStorage implements StorageBackend {
 
     @Override
     public synchronized Object get(String key) {
-        return StorageFileLock.withLock(filePath, () -> {
-            loadData();
+        return StorageFileLock.withReadLock(filePath, () -> {
+            refresh();
             cleanupExpired();
             Entry entry = data.get(key);
             return entry == null ? null : entry.value;
@@ -144,7 +157,7 @@ public final class CsvStorage implements StorageBackend {
     @Override
     public synchronized boolean set(String key, Object value, Integer ttlSeconds) {
         return StorageFileLock.withLock(filePath, () -> {
-            loadData();
+            refresh();
             cleanupExpired();
             Entry entry = new Entry();
             entry.value = value;
@@ -158,7 +171,7 @@ public final class CsvStorage implements StorageBackend {
     @Override
     public synchronized boolean delete(String key) {
         return StorageFileLock.withLock(filePath, () -> {
-            loadData();
+            refresh();
             boolean removed = data.remove(key) != null;
             if (removed) {
                 saveData();
@@ -174,8 +187,8 @@ public final class CsvStorage implements StorageBackend {
 
     @Override
     public synchronized List<String> getAllKeys(String globPattern) {
-        return StorageFileLock.withLock(filePath, () -> {
-            loadData();
+        return StorageFileLock.withReadLock(filePath, () -> {
+            refresh();
             cleanupExpired();
             String pattern = (globPattern == null || globPattern.isBlank()) ? "*" : globPattern;
             String regex = pattern.replace(".", "\\.").replace("*", ".*");

@@ -130,7 +130,7 @@ module.exports = {
     if (storage === 'cache') return cache.delete(cacheKey);
     if (storage === 'db') {
       await ensureDb();
-      return db('model_artifacts').del();
+      return await db('model_artifacts').del();
     }
     const modelPath = getModelPath(opts);
     if (!fs.existsSync(modelPath)) return false;

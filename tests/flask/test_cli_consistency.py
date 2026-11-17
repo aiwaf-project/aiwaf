@@ -6,6 +6,7 @@ This script demonstrates that the CLI now provides consistent results
 regardless of the working directory.
 """
 
+import sys
 import subprocess
 import os
 from pathlib import Path
@@ -13,7 +14,7 @@ from pathlib import Path
 def run_cli_command(command, working_dir=None):
     """Run AIWAF CLI command and capture output."""
     full_command = [
-        'python', '-m', 'aiwaf.flask.cli'
+        sys.executable, '-m', 'aiwaf.flask.cli'
     ] + command.split()
     
     try:

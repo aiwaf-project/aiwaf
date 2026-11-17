@@ -114,9 +114,13 @@ def test_django_stages_come_from_the_regular_middleware_list():
     middleware = ["aiwaf.django.middleware.RateLimitMiddleware", "aiwaf.django.middleware.HeaderValidationMiddleware",
                   "aiwaf.django.middleware_logger.AIWAFLoggerMiddleware"]
     assert convert(middleware=middleware).config["enabled"] == ["header_validation", "rate_limit"]
+    # Listed after every other AIWAF middleware, the regular logger logs beside the native pipeline.
     with_logging = convert({"AIWAF_MIDDLEWARE_LOGGING": True}, middleware=middleware)
-    assert with_logging.config["enabled"] == ["header_validation", "logging", "rate_limit"]
-    assert outcomes(with_logging)["AIWAF_MIDDLEWARE_LOGGING"] == "changed"
+    assert with_logging.config["enabled"] == ["header_validation", "rate_limit"]
+    assert outcomes(with_logging)["AIWAF_MIDDLEWARE_LOGGING"] == "carried"
+    # Between them, it would see blocks from some stages and not others.
+    between = [middleware[0], middleware[2], middleware[1]]
+    assert outcomes(convert({"AIWAF_MIDDLEWARE_LOGGING": True}, middleware=between))["AIWAF_MIDDLEWARE_LOGGING"] == "changed"
     # After switching to the native middleware, there's no regular chain to copy.
     switched = convert(middleware=["aiwaf.django.csv_pipeline.NativeAIWAFMiddleware"])
     assert "enabled" not in switched.config and outcomes(switched)["MIDDLEWARE"] == "changed"
@@ -436,3 +440,12 @@ def test_native_by_default_needs_a_data_directory_it_can_write(tmp_path, monkeyp
     read_only.mkdir()
     monkeypatch.setattr(native_settings.os, "access", lambda path, mode: False)
     assert not native_by_default(NativeConversion(config={"data_dir": str(read_only)}), environ={})
+
+
+def test_flask_and_fastapi_keep_honeypot_timing_in_memory_as_their_regular_middleware():
+    from aiwaf.core.native_settings import native_config_fastapi
+
+    assert convert({}, "flask").config["honeypot_backend"] == "memory"
+    assert native_config_fastapi(fastapi_config(), environ={}).config["honeypot_backend"] == "memory"
+    # Django's regular middleware keeps them in its cache, which its adapter handles.
+    assert "honeypot_backend" not in convert({}, "django").config

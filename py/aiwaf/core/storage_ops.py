@@ -5,6 +5,8 @@ Shared storage operation helpers (in-memory + CSV).
 from __future__ import annotations
 
 import csv
+import os
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -12,7 +14,39 @@ from .storage_csv import file_lock, safe_csv_operation
 from .native_runtime import csv_function, csv_values
 
 
+# Directories whose files were last found complete: (directory, file names) -> (the
+# directory's modification time then, when that was checked).
+_ENSURED: dict = {}
+_ENSURED_FOR_SECONDS = 1.0
+
+
+def _directory_mtime(data_dir) -> int | None:
+    try:
+        return os.stat(data_dir).st_mtime_ns
+    except OSError:
+        return None
+
+
 def ensure_csv_files(data_dir: Path, schema_headers: dict[str, list[str]]):
+    # Creating, deleting or replacing a file changes its directory's modification time, so an
+    # unchanged directory still has every file. Coarse file system timestamps could hide a
+    # change made in the same tick, so a full check still runs at least once a second.
+    key = (str(data_dir), tuple(schema_headers))
+    mtime = _directory_mtime(data_dir)
+    ensured = _ENSURED.get(key)
+    if mtime is not None and ensured is not None and ensured[0] == mtime \
+            and time.monotonic() - ensured[1] < _ENSURED_FOR_SECONDS:
+        return None
+    result = _ensure_csv_files(data_dir, schema_headers)
+    mtime = _directory_mtime(data_dir)
+    if mtime is not None:
+        if len(_ENSURED) >= 256:
+            _ENSURED.clear()
+        _ENSURED[key] = (mtime, time.monotonic())
+    return result
+
+
+def _ensure_csv_files(data_dir: Path, schema_headers: dict[str, list[str]]):
     def _create_files():
         data_dir.mkdir(exist_ok=True, parents=True)
         for name, headers in schema_headers.items():

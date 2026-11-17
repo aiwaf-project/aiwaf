@@ -420,7 +420,11 @@ class AIAnomalyMiddleware:
             BlocklistManager.block(ip, outcome.reason)
             self.logger.warning(f"Blocked IP {ip}: {outcome.reason}")
             if BlocklistManager.is_blocked(ip):
-                return jsonify({"error": "blocked"}), 403
+                # An after_request hook must return a response; a (body, status) tuple is only
+                # turned into one for views and before_request hooks.
+                blocked = jsonify({"error": "blocked"})
+                blocked.status_code = 403
+                return blocked
 
         self._persist_training_log(ip, response, resp_time)
         return response

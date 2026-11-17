@@ -66,6 +66,52 @@ function readRows(filePath, headers) {
   return rows;
 }
 
+// The last `limit` rows of an append-only CSV, newest last, read from the end of the file so
+// the cost doesn't grow with the file. Rows are one per line, as appendRow writes them.
+function readTailRows(filePath, headers, limit) {
+  if (!fs.existsSync(filePath) || !(limit > 0)) return [];
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const size = fs.fstatSync(fd).size;
+    if (!size) return [];
+    const chunk = 64 * 1024;
+    // The header row decides the column order.
+    const head = Buffer.alloc(Math.min(chunk, size));
+    fs.readSync(fd, head, 0, head.length, 0);
+    const firstLine = head.toString('utf8').split(/\r?\n/)[0];
+    const fileHeader = parseCsvLine(firstLine);
+    const hasHeader = fileHeader.some(header => headers.includes(header));
+    const sourceHeaders = hasHeader ? fileHeader : headers;
+    const headerBytes = hasHeader ? Buffer.byteLength(firstLine) + 1 : 0;
+    // Read backwards until enough complete lines are in hand, or the header is reached.
+    let position = size;
+    let pieces = [];
+    let lines = [];
+    while (position > headerBytes) {
+      const start = Math.max(headerBytes, position - chunk);
+      const piece = Buffer.alloc(position - start);
+      fs.readSync(fd, piece, 0, piece.length, start);
+      pieces.unshift(piece);
+      position = start;
+      lines = Buffer.concat(pieces).toString('utf8').split(/\r?\n/);
+      // The first line may be cut off unless the read reached the header.
+      if (position > headerBytes) lines = lines.slice(1);
+      if (lines.filter(Boolean).length > limit) break;
+    }
+    return lines.filter(Boolean).slice(-limit).map(line => {
+      const cells = parseCsvLine(line);
+      const row = {};
+      headers.forEach(header => {
+        const index = sourceHeaders.indexOf(header);
+        row[header] = index >= 0 ? (cells[index] ?? '') : '';
+      });
+      return row;
+    });
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function writeRows(filePath, headers, rows) {
   ensureDir(filePath);
   const lines = [headers.join(',')];
@@ -127,6 +173,7 @@ function nextId(rows) {
 
 module.exports = {
   readRows,
+  readTailRows,
   writeRows,
   appendRow,
   updateRows,

@@ -266,7 +266,7 @@ fn header_map() -> JsValue {
 
 #[wasm_bindgen_test]
 fn validate_headers_with_config_treats_null_as_defaults() {
-    let reason = validate_headers_with_config(header_map(), JsValue::NULL, JsValue::UNDEFINED).unwrap();
+    let reason = validate_headers_with_config(header_map(), JsValue::NULL, JsValue::UNDEFINED, JsValue::UNDEFINED).unwrap();
     let reason: Option<String> = from_value(reason).unwrap();
     assert!(reason.is_none());
 }
@@ -275,7 +275,7 @@ fn validate_headers_with_config_treats_null_as_defaults() {
 fn validate_headers_with_config_reports_a_missing_accept_header() {
     let headers = to_value(&serde_json::json!({ "HTTP_USER_AGENT": "Mozilla/5.0" })).unwrap();
     let required = to_value(&vec!["HTTP_ACCEPT"]).unwrap();
-    let reason = validate_headers_with_config(headers, required, JsValue::NULL).unwrap();
+    let reason = validate_headers_with_config(headers, required, JsValue::NULL, JsValue::UNDEFINED).unwrap();
     let reason: Option<String> = from_value(reason).unwrap();
     assert_eq!(reason.as_deref(), Some("Missing required headers: accept"));
 }
@@ -283,7 +283,7 @@ fn validate_headers_with_config_reports_a_missing_accept_header() {
 #[wasm_bindgen_test]
 fn validate_headers_with_config_enforces_lowercase_custom_headers_from_js() {
     let required = to_value(&vec!["x-required-security-header"]).unwrap();
-    let reason = validate_headers_with_config(header_map(), required, JsValue::NULL).unwrap();
+    let reason = validate_headers_with_config(header_map(), required, JsValue::NULL, JsValue::UNDEFINED).unwrap();
     let reason: Option<String> = from_value(reason).unwrap();
     assert_eq!(
         reason.as_deref(),
@@ -300,7 +300,7 @@ fn validate_headers_with_config_enforces_lowercase_custom_headers_from_js() {
     }))
     .unwrap();
     let required = to_value(&vec!["x-required-security-header"]).unwrap();
-    let reason = validate_headers_with_config(headers, required, JsValue::NULL).unwrap();
+    let reason = validate_headers_with_config(headers, required, JsValue::NULL, JsValue::UNDEFINED).unwrap();
     let reason: Option<String> = from_value(reason).unwrap();
     assert_eq!(reason, None);
 }
@@ -308,9 +308,9 @@ fn validate_headers_with_config_enforces_lowercase_custom_headers_from_js() {
 #[wasm_bindgen_test]
 fn validate_headers_with_config_rejects_invalid_arguments() {
     let required = to_value(&"not-a-list").unwrap();
-    assert!(validate_headers_with_config(header_map(), required, JsValue::NULL).is_err());
+    assert!(validate_headers_with_config(header_map(), required, JsValue::NULL, JsValue::UNDEFINED).is_err());
     let score = to_value(&"not-a-number").unwrap();
-    assert!(validate_headers_with_config(header_map(), JsValue::NULL, score).is_err());
+    assert!(validate_headers_with_config(header_map(), JsValue::NULL, score, JsValue::UNDEFINED).is_err());
 }
 
 #[wasm_bindgen_test]

@@ -20,10 +20,26 @@ public class FileStorage implements StorageBackend {
 
     private final Path filePath;
     private final Map<String, Entry> data = new ConcurrentHashMap<>();
+    /** The file as last verified and read, or written, so an unchanged file isn't read again. */
+    private FileStamp loaded;
 
     public FileStorage(String filePath) {
         this.filePath = Path.of(filePath).toAbsolutePath().normalize();
-        StorageFileLock.withLock(this.filePath, () -> { load(); return null; });
+        StorageFileLock.withLock(this.filePath, () -> { refresh(); return null; });
+    }
+
+    /**
+     * Reads and verifies the file again only if it changed since this instance last did, or
+     * wrote it. Its stamp includes the change time, which writers can't set back.
+     */
+    private synchronized void refresh() {
+        FileStamp current = FileStamp.of(filePath);
+        if (current != null && current.equals(loaded)) {
+            return;
+        }
+        loaded = null;
+        load();
+        loaded = current;
     }
 
     private synchronized void load() {
@@ -61,7 +77,9 @@ public class FileStorage implements StorageBackend {
                     out.writeObject(new java.util.HashMap<>(data));
                 }
             });
+            loaded = FileStamp.of(filePath);
         } catch (Exception ex) {
+            loaded = null;
             throw new IllegalStateException("Unable to persist file storage", ex);
         }
     }
@@ -78,8 +96,8 @@ public class FileStorage implements StorageBackend {
 
     @Override
     public synchronized Object get(String key) {
-        return StorageFileLock.withLock(filePath, () -> {
-            load();
+        return StorageFileLock.withReadLock(filePath, () -> {
+            refresh();
             cleanupExpired();
             Entry entry = data.get(key);
             if (entry == null) return null;
@@ -90,7 +108,7 @@ public class FileStorage implements StorageBackend {
     @Override
     public synchronized boolean set(String key, Object value, Integer ttlSeconds) {
         return StorageFileLock.withLock(filePath, () -> {
-            load();
+            refresh();
             cleanupExpired();
             Entry entry = new Entry();
             entry.value = value;
@@ -104,7 +122,7 @@ public class FileStorage implements StorageBackend {
     @Override
     public synchronized boolean delete(String key) {
         return StorageFileLock.withLock(filePath, () -> {
-            load();
+            refresh();
             boolean removed = data.remove(key) != null;
             if (removed) save();
             return removed;
@@ -118,8 +136,8 @@ public class FileStorage implements StorageBackend {
 
     @Override
     public synchronized List<String> getAllKeys(String globPattern) {
-        return StorageFileLock.withLock(filePath, () -> {
-            load();
+        return StorageFileLock.withReadLock(filePath, () -> {
+            refresh();
             cleanupExpired();
             List<String> keys = new ArrayList<>();
             String pattern = globPattern == null || globPattern.isBlank() ? "*" : globPattern;

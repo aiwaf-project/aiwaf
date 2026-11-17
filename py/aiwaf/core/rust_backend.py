@@ -52,7 +52,8 @@ def _to_rust_header_name(name):
     return f"HTTP_{name}"
 
 
-def validate_headers(headers, required_headers=None, min_score=None) -> str | None:
+def validate_headers(headers, required_headers=None, min_score=None, max_user_agent_length=None) -> str | None:
+    """``max_user_agent_length`` is the app's AIWAF_MAX_USER_AGENT_LENGTH; by default 500."""
     if aiwaf_rust is None:
         return None
     try:
@@ -62,6 +63,12 @@ def validate_headers(headers, required_headers=None, min_score=None) -> str | No
             if required_headers is not None else None
         )
         if hasattr(aiwaf_rust, "validate_headers_with_config"):
+            if max_user_agent_length is not None and max_user_agent_length != 500:
+                try:
+                    return aiwaf_rust.validate_headers_with_config(
+                        rust_headers, rust_required, min_score, max_user_agent_length=int(max_user_agent_length))
+                except TypeError:
+                    pass  # An older aiwaf-rust, whose cap is fixed at 500.
             return aiwaf_rust.validate_headers_with_config(
                 rust_headers,
                 rust_required,

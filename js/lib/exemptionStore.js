@@ -85,7 +85,7 @@ module.exports = {
     const normalized = String(ip || '').trim();
     if (await initialize()) {
       try {
-        return db('ip_exemptions').where('ip_address', normalized).del();
+        return await db('ip_exemptions').where('ip_address', normalized).del();
       } catch (err) {
         dbAvailable = false;
       }
@@ -100,7 +100,7 @@ module.exports = {
   async listIps() {
     if (await initialize()) {
       try {
-        return db('ip_exemptions').select('*').orderBy('created_at', 'desc');
+        return await db('ip_exemptions').select('*').orderBy('created_at', 'desc');
       } catch (err) {
         dbAvailable = false;
       }
@@ -146,7 +146,7 @@ module.exports = {
     const normalized = String(pathPrefix || '').trim();
     if (await initialize()) {
       try {
-        return db('path_exemptions').where('path_prefix', normalized).del();
+        return await db('path_exemptions').where('path_prefix', normalized).del();
       } catch (err) {
         dbAvailable = false;
       }
@@ -161,7 +161,7 @@ module.exports = {
   async listPaths() {
     if (await initialize()) {
       try {
-        return db('path_exemptions').select('*').orderBy('created_at', 'desc');
+        return await db('path_exemptions').select('*').orderBy('created_at', 'desc');
       } catch (err) {
         dbAvailable = false;
       }

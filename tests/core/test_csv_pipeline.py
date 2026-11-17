@@ -862,3 +862,39 @@ def test_a_failing_store_is_logged_and_requests_carry_on(tmp_path, caplog):
         assert _store_get(pipeline, "/admin-backup.php", "203.0.113.91", exists=False) == 403
         assert _store_get(pipeline, "/b", "203.0.113.91") == 403
     assert "store read failed (exemptions)" in caplog.text and "store write failed (block)" in caplog.text
+
+
+@needs_route_facts
+def test_route_plans_are_computed_once_per_path_and_view_and_bounded(tmp_path, monkeypatch):
+    from aiwaf.core import route_plan
+
+    pipeline = _adapter(tmp_path, enabled=["rate_limit", "header_validation"],
+                        path_rules=[{"PREFIX": "/api/", "RATE_LIMIT": {"MAX": 1}, "DISABLE": ["header_validation"]}])
+    calls = []
+    real = route_plan.get_route_execution_plan
+    monkeypatch.setattr(route_plan, "get_route_execution_plan", lambda *a, **k: calls.append(a[0]) or real(*a, **k))
+
+    def view():
+        pass
+    view._aiwaf_exempt_middlewares = {"rate_limit"}
+    first = pipeline._route("/api/x", "GET", None, b"", b"")
+    assert pipeline._route("/api/x", "GET", None, b"", b"") == first and calls == ["/api/x"]
+    assert "header_validation" in first[0] and first[1]["rate_max"] == 1
+    # The same path through a view with its own exemptions has its own plan.
+    assert "rate_limit" in pipeline._route("/api/x", "GET", view, b"", b"")[0]
+    # Returned values are copies, so changing one can't change the cached plan.
+    first[0].add("geo_block")
+    assert "geo_block" not in pipeline._route("/api/x", "GET", None, b"", b"")[0]
+    unhashable = type("View", (), {"__hash__": None})()
+    pipeline._route("/api/y", "GET", unhashable, b"", b"")
+    pipeline._route("/api/y", "GET", unhashable, b"", b"")
+    assert calls.count("/api/y") == 2
+    for index in range(4100):
+        pipeline._route(f"/p/{index}", "GET", None, b"", b"")
+    assert len(pipeline._plans) == 4096
+
+
+@pytest.mark.parametrize("backend, created", [("memory", False), ("csv", True)])
+def test_the_rate_file_exists_only_when_rates_are_counted_in_it(tmp_path, backend, created):
+    engine(tmp_path, enabled=["rate_limit"], rate_backend=backend)
+    assert (tmp_path / "rate_buckets.csv").exists() is created

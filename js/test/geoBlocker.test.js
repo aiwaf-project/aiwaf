@@ -111,4 +111,25 @@ describe('geoBlocker MMDB lookup', () => {
     });
     expect(openSync).toHaveBeenCalledWith(packaged);
   });
+
+  it('gives the native pipeline a synchronous lookup: database first, then the header, cached', () => {
+    jest.isolateModules(() => {
+      const gets = jest.fn(ip => (ip === '203.0.113.10' ? { country: { iso_code: 'us' } } : null));
+      jest.doMock('maxmind', () => ({ openSync: () => ({ get: gets }) }));
+      const { createCountryLookup } = require('../lib/geoBlocker');
+      const lookup = createCountryLookup({ AIWAF_GEO_MMDB_PATH: mmdbPath }, 'default');
+      expect(gets).not.toHaveBeenCalled();
+      const from = (ip, headers = {}) => ({ socket: { remoteAddress: ip }, headers });
+      expect(lookup(from('203.0.113.10'))).toBe('US');
+      expect(lookup(from('203.0.113.10'))).toBe('US');
+      expect(gets).toHaveBeenCalledTimes(1);
+      expect(lookup(from('203.0.113.11', { 'x-country-code': 'fr' }))).toBe('FR');
+      expect(lookup(from('203.0.113.12'))).toBe('');
+      // Without a cache, every request is looked up.
+      const uncached = createCountryLookup({ AIWAF_GEO_MMDB_PATH: mmdbPath, AIWAF_GEO_CACHE_SECONDS: 0 }, 'default');
+      uncached(from('203.0.113.10'));
+      uncached(from('203.0.113.10'));
+      expect(gets).toHaveBeenCalledTimes(5);
+    });
+  });
 });

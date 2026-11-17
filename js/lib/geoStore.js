@@ -71,7 +71,7 @@ module.exports = {
 
     if (await initialize()) {
       try {
-        return db('geo_blocked_countries').where('country_code', normalized).del();
+        return await db('geo_blocked_countries').where('country_code', normalized).del();
       } catch (err) {
         dbAvailable = false;
       }
@@ -86,7 +86,7 @@ module.exports = {
   async listBlockedCountries() {
     if (await initialize()) {
       try {
-        return db('geo_blocked_countries').select('*').orderBy('country_code', 'asc');
+        return await db('geo_blocked_countries').select('*').orderBy('country_code', 'asc');
       } catch (err) {
         dbAvailable = false;
       }

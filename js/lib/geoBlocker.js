@@ -92,7 +92,65 @@ function tryLoadMmdbReader(mmdbPath) {
   }
 }
 
+function mmdbPath(opts) {
+  const packagedDefault = path.resolve(__dirname, '..', 'geolock', 'ipinfo_lite.mmdb');
+  const monorepoDefault = path.resolve(__dirname, '..', '..', 'py', 'aiwaf', 'core', 'geolock', 'ipinfo_lite.mmdb');
+  return opts.AIWAF_GEO_MMDB_PATH
+    ? path.resolve(opts.AIWAF_GEO_MMDB_PATH)
+    : (fs.existsSync(packagedDefault) ? packagedDefault : monorepoDefault);
+}
+
+/**
+ * A country lookup for the native pipeline, resolving as the regular geo check does: the
+ * app's geoResolver when there is one (its promise is returned), otherwise the MMDB database,
+ * then the x-country-code header, cached per address for AIWAF_GEO_CACHE_SECONDS.
+ */
+function createCountryLookup(opts = {}, trustedProxies, resolver = null) {
+  // Opened on the first lookup, so converting options alone doesn't open the database.
+  let reader;
+  const cacheSeconds = Number.isFinite(Number(opts.AIWAF_GEO_CACHE_SECONDS)) ? Number(opts.AIWAF_GEO_CACHE_SECONDS) : 3600;
+  const cache = new Map();
+  const remember = (ip, country) => {
+    if (!ip || !country || cacheSeconds <= 0) return country;
+    // Bounded: a flood of new addresses drops the oldest entries instead of growing forever.
+    if (cache.size >= 50000) cache.delete(cache.keys().next().value);
+    cache.set(ip, { country, expiresAt: Date.now() + cacheSeconds * 1000 });
+    return country;
+  };
+  return req => {
+    const ip = getRequestIp(req, trustedProxies);
+    const entry = ip && cache.get(ip);
+    if (entry) {
+      if (Date.now() <= entry.expiresAt) return entry.country;
+      cache.delete(ip);
+    }
+    if (typeof resolver === 'function') {
+      // As the regular check: the app's resolver alone, which may be asynchronous; a failure finds
+      // no country.
+      const settle = value => remember(ip, normalizeCountry(value));
+      try {
+        const result = resolver(req);
+        return result && typeof result.then === 'function' ? result.then(settle, () => '') : settle(result);
+      } catch (_) {
+        return '';
+      }
+    }
+    if (reader === undefined) reader = tryLoadMmdbReader(mmdbPath(opts));
+    if (reader && ip) {
+      try {
+        const result = reader.get(ip);
+        const country = normalizeCountry(result?.country?.iso_code || result?.registered_country?.iso_code);
+        if (country) return remember(ip, country);
+      } catch (_) {
+        // Fall through to the header, as the regular check does.
+      }
+    }
+    return remember(ip, normalizeCountry(req.headers?.['x-country-code']));
+  };
+}
+
 module.exports = {
+  createCountryLookup,
   init(opts = {}) {
     const packagedDefault = path.resolve(__dirname, '..', 'geolock', 'ipinfo_lite.mmdb');
     const monorepoDefault = path.resolve(

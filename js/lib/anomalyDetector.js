@@ -187,6 +187,12 @@ async function analyzeRecentBehaviorAccelerated(recentData = []) {
 }
 
 module.exports = {
+  /** Whether the regular anomaly check would use its model: AIWAF_MIN_AI_LOGS recent logs, counted now. */
+  async logsSufficient(opts = {}) {
+    const minimum = Number.isFinite(Number(opts.AIWAF_MIN_AI_LOGS)) ? Number(opts.AIWAF_MIN_AI_LOGS) : 10000;
+    return minimum <= 0 || await countRecentDbLogs(30) >= minimum;
+  },
+
   async init(opts = {}) {
     minAiLogs = Number.isFinite(Number(opts.AIWAF_MIN_AI_LOGS))
       ? Number(opts.AIWAF_MIN_AI_LOGS)

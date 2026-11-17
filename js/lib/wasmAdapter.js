@@ -315,7 +315,10 @@ async function validateHeaders(headers, config) {
     if (config && typeof mod.validate_headers_with_config === 'function') {
       const required = (config.requiredHeaders && config.requiredHeaders.length) ? config.requiredHeaders : null;
       const minScore = Number.isFinite(Number(config.minScore)) ? Number(config.minScore) : null;
-      result = mod.validate_headers_with_config(headerInput, required, minScore);
+      // An older aiwaf-wasm takes no cap, ignores it and keeps its own 500.
+      const maxUserAgent = Number.isInteger(config.maxUserAgentLength) && config.maxUserAgentLength >= 0
+        ? config.maxUserAgentLength : undefined;
+      result = mod.validate_headers_with_config(headerInput, required, minScore, maxUserAgent);
     } else {
       result = mod.validate_headers(headerInput);
     }

@@ -124,6 +124,7 @@ class CSVPipeline:
         config = dict(config or {})
         self._configure_routes(config)
         self.stores = stores
+        self._plans, self._plans_lock = OrderedDict(), threading.Lock()
         self._store_cache_seconds = float(config.pop("store_cache_seconds", 5))
         self._store_cache = {}
         # Blocklist and exemption answers, per IP and per IP and path, for the same few seconds.
@@ -257,23 +258,51 @@ class CSVPipeline:
             raise RuntimeError(f"These native pipeline features need a newer aiwaf-rust: {', '.join(missing)}. "
                                "Run: pip install -U aiwaf-rust")
 
+    def disabled_stages(self, path, endpoint=None):
+        """The stages path rules and the view's decorators turn off for this path and view."""
+        return set(self._planned(path, endpoint)[0])
+
+    def _planned(self, path, endpoint):
+        from .route_plan import get_route_execution_plan
+
+        # Path rules and a view's exemption decorators are fixed once the app runs, so the plan for
+        # a path and view is computed once. Route checks still inspect every request.
+        try:
+            key = (path, endpoint)
+            hash(key)
+        except TypeError:
+            key = None
+        with self._plans_lock:
+            planned = self._plans.get(key) if key is not None else None
+            if planned is not None:
+                self._plans.move_to_end(key)
+        if planned is None:
+            required = set(getattr(endpoint, "_aiwaf_required_middlewares", ()) or ())
+            full = bool(getattr(endpoint, "_aiwaf_exempt", False) or getattr(endpoint, "aiwaf_exempt", False))
+            exempt = set(getattr(endpoint, "_aiwaf_exempt_middlewares", ()) or ())
+            plan = get_route_execution_plan(path, self.path_rules, fully_exempt=full,
+                                            exempt_middlewares=exempt, required_middlewares=required)
+            planned = (frozenset(STAGES) - frozenset(plan.enabled_middlewares),
+                       self._effective_rate(_rate_overrides(plan.get_rate_limit_overrides())))
+            if key is not None:
+                with self._plans_lock:
+                    self._plans[key] = planned
+                    while len(self._plans) > 4096:
+                        self._plans.popitem(last=False)
+        return planned
+
     def _route(self, path, method, endpoint, query, body):
         """Stages turned off for this request, its rate limits, and any route-check rule."""
-        from .route_plan import get_route_execution_plan
         from .route_risks import observer_for
 
-        required = set(getattr(endpoint, "_aiwaf_required_middlewares", ()) or ())
-        full = bool(getattr(endpoint, "_aiwaf_exempt", False) or getattr(endpoint, "aiwaf_exempt", False))
-        exempt = set(getattr(endpoint, "_aiwaf_exempt_middlewares", ()) or ())
-        plan = get_route_execution_plan(path, self.path_rules, fully_exempt=full,
-                                        exempt_middlewares=exempt, required_middlewares=required)
-        disabled = set(STAGES) - set(plan.enabled_middlewares)
+        planned = self._planned(path, endpoint)
+        disabled, rate = planned
         rule = None
         if "ip_keyword_block" not in disabled and "ip_keyword_block" in self.profile.get("enabled", STAGES):
             observe = observer_for(self.injection_risk_mode, self.manifest_path, path, method)
             finding = observe(query, body) if observe else None
             rule = finding.rule if finding else None
-        return disabled, self._effective_rate(_rate_overrides(plan.get_rate_limit_overrides())), rule
+        return set(disabled), dict(rate), rule
 
     def begin(self, *, ip, path, method, headers, query, body, exists, methods,
               authenticated=False, endpoint=None, country="", exhausted=False, uuid=None):

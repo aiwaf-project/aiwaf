@@ -57,35 +57,45 @@ function settingsModel(opts) {
   } catch (_) { return { kind: 'unreadable', file }; }
 }
 
+// Profile values an older aiwaf-wasm can't take, with the feature that adds them and the value
+// the converter writes for the regular defaults. An older engine runs without them only then,
+// keeping the behavior it always had.
+// The regular header check skips these, unless AIWAF_STATIC_EXTENSIONS or AIWAF_STATIC_PATHS
+// replace them (js/lib/headerValidation.js).
+const REGULAR_STATIC_EXTENSIONS = ['.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.svg', '.woff', '.woff2', '.ttf'];
+const REGULAR_STATIC_PATHS = ['/static/', '/media/', '/assets/', '/favicon.ico'];
+const LEGACY_DEFAULTS = {
+  header_bytes_without_prefix: ['header_limits', true],
+  blocked_user_agents: ['header_limits', normalizeSettings({}).AIWAF_BLOCKED_USER_AGENTS.map(agent => String(agent).toLowerCase())],
+  login_prefixes: ['login_prefixes', [].concat(normalizeSettings({}).AIWAF_LOGIN_PATH_PREFIXES || [])],
+  header_max_bytes: ['header_limits'],
+  header_max_count: ['header_limits'],
+  header_max_user_agent: ['header_limits'],
+  header_max_accept: ['header_limits'],
+  exempt_keywords: ['keyword_exemptions'],
+  allowed_path_keywords: ['keyword_exemptions'],
+  post_only_suffixes: ['post_only_suffixes'],
+  required_headers_by_method: ['method_headers'],
+  // An older engine checks headers its own way when on, and not at all when off.
+  header_policy: ['header_policy', 'node', profile => {
+    if (profile.header_policy !== 'node_ua') return profile.header_policy === 'node';
+    profile.enabled = (profile.enabled || []).filter(stage => stage !== 'header_validation');
+    return true;
+  }],
+  header_skip_extensions: ['header_policy', REGULAR_STATIC_EXTENSIONS],
+  header_skip_paths: ['header_policy', REGULAR_STATIC_PATHS],
+  header_wasm_check: ['header_policy', true],
+  learn_context: ['learn_context', 'node'],
+  learn_scan_patterns: ['learn_context', [...require('./trainingLogic').SCANNING_PATTERNS]],
+  learn_static_keywords: ['learn_context', [...require('./featureUtils').STATIC_KW]],
+  suspicious_user_agents: ['user_agent_lists'],
+  legitimate_bots: ['user_agent_lists']
+};
 const STAGES = ['geo_block', 'ip_keyword_block', 'rate_limit', 'ai_anomaly', 'honeypot', 'uuid_tamper', 'header_validation', 'logging'];
 const PATTERN = /[*?[]/;
 // Options with no native equivalent, reported when they differ from the regular defaults.
 const NOT_CARRIED = {
-  AIWAF_ALLOWED_PATH_KEYWORDS: 'The native pipeline has its own legitimate_keywords list.',
-  AIWAF_EXEMPT_KEYWORDS: 'The native pipeline has no exempt keywords.',
-  AIWAF_LOGIN_PATH_PREFIXES: 'The native pipeline treats paths under /login and /admin/login as login forms.',
-  AIWAF_POST_ONLY_SUFFIXES: 'The native method policy is allowed_methods only.',
-  AIWAF_MAX_HEADER_BYTES: 'The native header limits are fixed.',
-  AIWAF_MAX_HEADER_COUNT: 'The native header limits are fixed.',
-  AIWAF_MAX_USER_AGENT_LENGTH: 'The native header limits are fixed.',
-  AIWAF_MAX_ACCEPT_LENGTH: 'The native header limits are fixed.',
-  AIWAF_BLOCKED_USER_AGENTS: 'The native header check has its own list of scanner user agents.',
-  AIWAF_GEO_MMDB_PATH: 'Pass a countryLookup(req) option to the native pipeline instead.',
-  AIWAF_GEO_CACHE_SECONDS: 'Country lookups come from countryLookup(req).',
-  AIWAF_GEO_CACHE_PREFIX: 'Country lookups come from countryLookup(req).',
-  AIWAF_MODEL_STORAGE: 'The native pipeline loads a model from a file only; pass a model option instead.',
-  AIWAF_MODEL_STORAGE_FALLBACK: 'The native pipeline loads a model from a file only; pass a model option instead.',
-  AIWAF_MODEL_CACHE_KEY: 'Pass a model option to the native pipeline instead.',
-  AIWAF_MODEL_CACHE_TTL: 'Pass a model option to the native pipeline instead.',
-  AIWAF_MIDDLEWARE_LOG_PATH: 'Native logs go to logPath, by default native_requests.csv in dataDir.',
-  AIWAF_MIDDLEWARE_LOG_DB: 'The native pipeline logs to a CSV file only.',
-  AIWAF_MIDDLEWARE_LOG_CSV: 'The native pipeline logs to a CSV file only.',
-  AIWAF_MIDDLEWARE_LOG_CSV_PATH: 'Native logs go to logPath, by default native_requests.csv in dataDir.',
-  AIWAF_CAPTURE_EXTENDED_REQUEST_INFO: 'The native log has fixed columns.',
-  AIWAF_EXTENDED_INFO_MAX_HEADERS: 'The native log has fixed columns.',
-  AIWAF_EXTENDED_INFO_MAX_VALUE_LENGTH: 'The native log has fixed columns.',
   AIWAF_DYNAMIC_KEYWORDS_DB: 'The native pipeline reads learned keywords from the keyword store.',
-  AIWAF_MIN_AI_LOGS: 'Training settings don\'t apply to request handling.',
   AIWAF_ROUTE_PLAN_VERSION: 'The native pipeline compiles path rules once at startup.',
   AIWAF_FORCE_JSON_ERRORS: 'Native responses are always JSON.'
 };
@@ -96,7 +106,14 @@ const CARRIED = ['WINDOW_SEC', 'MAX_REQ', 'FLOOD_REQ', 'AIWAF_MIN_FORM_TIME', 'A
   'AIWAF_GEO_BLOCK_ENABLED', 'AIWAF_GEO_ALLOW_COUNTRIES', 'AIWAF_GEO_BLOCK_COUNTRIES', 'AIWAF_HEADER_VALIDATION',
   'AIWAF_REQUIRED_HEADERS', 'AIWAF_HEADER_QUALITY_MIN_SCORE', 'AIWAF_EXEMPT_PATHS', 'AIWAF_EXEMPT_IPS',
   'AIWAF_MIDDLEWARES', 'AIWAF_DISABLE_MIDDLEWARES', 'AIWAF_MIDDLEWARE_LOGGING', 'AIWAF_PATH_RULES',
-  'AIWAF_PATH_MANIFEST', 'AIWAF_INJECTION_RISK_MODE', 'dynamicTopN', 'AIWAF_EXEMPTIONS_DB', 'AIWAF_TRUSTED_PROXIES'];
+  'AIWAF_PATH_MANIFEST', 'AIWAF_INJECTION_RISK_MODE', 'dynamicTopN', 'AIWAF_EXEMPTIONS_DB', 'AIWAF_TRUSTED_PROXIES',
+  'AIWAF_GEO_MMDB_PATH', 'AIWAF_GEO_CACHE_SECONDS', 'AIWAF_GEO_CACHE_PREFIX', 'AIWAF_LOGIN_PATH_PREFIXES',
+  'AIWAF_MAX_HEADER_BYTES', 'AIWAF_MAX_HEADER_COUNT', 'AIWAF_MAX_USER_AGENT_LENGTH', 'AIWAF_MAX_ACCEPT_LENGTH',
+  'AIWAF_BLOCKED_USER_AGENTS', 'AIWAF_ALLOWED_PATH_KEYWORDS', 'AIWAF_EXEMPT_KEYWORDS', 'AIWAF_POST_ONLY_SUFFIXES',
+  'AIWAF_MODEL_STORAGE', 'AIWAF_MODEL_STORAGE_FALLBACK', 'AIWAF_MODEL_CACHE_KEY', 'AIWAF_MODEL_CACHE_TTL',
+  'AIWAF_MIDDLEWARE_LOG_PATH', 'AIWAF_MIDDLEWARE_LOG_DB', 'AIWAF_MIDDLEWARE_LOG_CSV', 'AIWAF_MIDDLEWARE_LOG_CSV_PATH',
+  'AIWAF_CAPTURE_EXTENDED_REQUEST_INFO', 'AIWAF_EXTENDED_INFO_MAX_HEADERS', 'AIWAF_EXTENDED_INFO_MAX_VALUE_LENGTH',
+  'AIWAF_MIN_AI_LOGS'];
 // Where settingsCompat reads each number from, in the same order, so unreadable values can be reported.
 const NUMBER_SOURCES = {
   WINDOW_SEC: ['WINDOW_SEC', 'windowSec', 'AIWAF_WINDOW_SECONDS', 'env:AIWAF_RATE_WINDOW'],
@@ -148,6 +165,16 @@ function nativeOptionsFromSettings(rawOpts = {}) {
   profile.honeypot_field = opts.HONEYPOT_FIELD ? String(opts.HONEYPOT_FIELD) : '';
   profile.allowed_methods = opts.AIWAF_METHOD_POLICY_ENABLED === true
     ? (opts.AIWAF_ALLOWED_METHODS || []).map(method => String(method).toUpperCase()) : [];
+  // With the method policy, a GET to a post-only path is refused. The regular check lowercases
+  // the path, so a suffix with capitals never matches there.
+  const postOnly = opts.AIWAF_METHOD_POLICY_ENABLED === true
+    ? [].concat(opts.AIWAF_POST_ONLY_SUFFIXES || []).map(String).filter(suffix => suffix === suffix.toLowerCase()) : [];
+  if (postOnly.length) profile.post_only_suffixes = postOnly;
+  // A keyword exempt by name, or any keyword on a path with an allowed fragment, doesn't block.
+  for (const [key, setting] of [['exempt_keywords', 'AIWAF_EXEMPT_KEYWORDS'], ['allowed_path_keywords', 'AIWAF_ALLOWED_PATH_KEYWORDS']]) {
+    const values = [].concat(opts[setting] || []).map(value => String(value).toLowerCase());
+    if (values.length) profile[key] = values;
+  }
   const list = (value, setting) => {
     if (value == null) return [];
     if (Array.isArray(value)) return value.map(String);
@@ -164,15 +191,59 @@ function nativeOptionsFromSettings(rawOpts = {}) {
   }
   const required = opts.AIWAF_REQUIRED_HEADERS || [];
   if (required && typeof required === 'object' && !Array.isArray(required)) {
-    profile.required_headers = (required.DEFAULT || []).map(headerName);
-    note('AIWAF_REQUIRED_HEADERS', 'changed', 'Per-method lists aren\'t supported natively, so its DEFAULT list applies to every method.');
+    // Per method, falling back to DEFAULT, as the regular check reads them. It looks a method
+    // up as uppercase, so a lowercase key never applies there.
+    profile.required_headers = [].concat(required.DEFAULT || []).map(headerName);
+    const byMethod = Object.entries(required).filter(([method, list]) => method !== 'DEFAULT'
+      && method === method.toUpperCase() && list);
+    if (byMethod.length) {
+      profile.required_headers_by_method = Object.fromEntries(byMethod.map(([method, list]) => [method, [].concat(list).map(headerName)]));
+    }
   } else {
     profile.required_headers = [].concat(required).map(headerName);
   }
+  // The header caps, blocked user agents and login forms the regular checks use. A newer
+  // aiwaf-wasm takes them; an older one keeps its own, which the adapter allows only when these
+  // are the regular defaults (see LEGACY_DEFAULTS).
+  for (const [key, setting] of [['header_max_bytes', 'AIWAF_MAX_HEADER_BYTES'], ['header_max_count', 'AIWAF_MAX_HEADER_COUNT'],
+    ['header_max_user_agent', 'AIWAF_MAX_USER_AGENT_LENGTH'], ['header_max_accept', 'AIWAF_MAX_ACCEPT_LENGTH']]) {
+    if (same(opts[setting], defaults[setting])) continue;
+    if (Number.isInteger(opts[setting]) && opts[setting] >= 0) profile[key] = opts[setting];
+    else note(setting, 'not carried', 'The native header caps are whole numbers of zero or more, so the native default applies.');
+  }
+  // Node.js counts header names as sent (user-agent), without Python's HTTP_.
+  profile.header_bytes_without_prefix = true;
+  // Keywords are learned from 404s as the regular middleware learns them.
+  profile.learn_context = 'node';
+  profile.learn_scan_patterns = [...require('./trainingLogic').SCANNING_PATTERNS];
+  profile.learn_static_keywords = [...require('./featureUtils').STATIC_KW];
+  // Node.js's own header check, then aiwaf-wasm's, as the regular middleware runs them.
+  const wasmHeaderCheck = rawOpts.AIWAF_WASM_VALIDATION !== false && rawOpts.AIWAF_WASM_HEADER_VALIDATION !== false;
+  profile.header_policy = opts.AIWAF_HEADER_VALIDATION ? 'node' : 'node_ua';
+  profile.header_skip_extensions = [].concat(rawOpts.AIWAF_STATIC_EXTENSIONS || REGULAR_STATIC_EXTENSIONS).map(value => String(value).toLowerCase());
+  profile.header_skip_paths = [].concat(rawOpts.AIWAF_STATIC_PATHS || REGULAR_STATIC_PATHS).map(value => String(value).toLowerCase());
+  profile.header_wasm_check = wasmHeaderCheck;
+  // The app's own User-Agent lists, as JavaScript pattern sources the engine compiles
+  // case-insensitively. A RegExp with other flags behaves differently, so it isn't carried.
+  for (const [key, setting] of [['suspicious_user_agents', 'AIWAF_SUSPICIOUS_USER_AGENTS'], ['legitimate_bots', 'AIWAF_LEGITIMATE_BOTS']]) {
+    const items = rawOpts[setting];
+    if (!Array.isArray(items)) continue;
+    if (items.some(item => item instanceof RegExp && item.flags.replace('i', '') !== '')) {
+      note(setting, 'not carried', 'A pattern with flags other than i matches differently natively.');
+      continue;
+    }
+    profile[key] = items.map(item => (item instanceof RegExp ? item.source : String(item)));
+    note(setting, 'carried');
+  }
+  profile.blocked_user_agents = [].concat(opts.AIWAF_BLOCKED_USER_AGENTS || []).map(agent => String(agent).toLowerCase());
+  // The regular check lowercases the path, so a prefix with capitals never matches there. Unset,
+  // the regular options give it no login prefixes.
+  profile.login_prefixes = [].concat(opts.AIWAF_LOGIN_PATH_PREFIXES || []).map(String)
+    .filter(prefix => prefix === prefix.toLowerCase());
   // With no required headers, the regular check also skips the quality score.
   // Scores are whole numbers, so a fractional minimum is the next whole one.
   const minScore = Number(opts.AIWAF_HEADER_QUALITY_MIN_SCORE);
-  if (!profile.required_headers.length) profile.header_min_score = 0;
+  if (!profile.required_headers.length && !profile.required_headers_by_method) profile.header_min_score = 0;
   else if (Number.isFinite(minScore) && Math.abs(minScore) < 2 ** 31) profile.header_min_score = Math.ceil(minScore);
   else note('AIWAF_HEADER_QUALITY_MIN_SCORE', 'not carried', 'It isn\'t a usable score, so the native default applies.');
   profile.sql_mode = String(rawOpts.AIWAF_SQL_INJECTION_MODE ?? process.env.AIWAF_SQL_INJECTION_MODE ?? 'block').trim().toLowerCase();
@@ -205,18 +276,25 @@ function nativeOptionsFromSettings(rawOpts = {}) {
   const auto = isAutoSelection(requested);
   const explicit = key => Object.hasOwn(rawOpts, key) || process.env[key] !== undefined;
   const logging = opts.AIWAF_MIDDLEWARE_LOGGING || (auto && enabled.has('logging') && !explicit('AIWAF_MIDDLEWARE_LOGGING'));
-  if (!opts.AIWAF_HEADER_VALIDATION) enabled.delete('header_validation');
+  // With AIWAF_HEADER_VALIDATION off, the regular middleware still runs aiwaf-wasm's User-Agent
+  // check where the header stage applies, unless its aiwaf-wasm checks are off too.
+  if (!opts.AIWAF_HEADER_VALIDATION && !wasmHeaderCheck) enabled.delete('header_validation');
   if (!logging) enabled.delete('logging');
   profile.enabled = STAGES.filter(stage => enabled.has(stage));
-  if (enabled.has('logging')) {
-    note('AIWAF_MIDDLEWARE_LOGGING', 'changed', 'Requests are logged to native_requests.csv in dataDir, with the native log\'s columns.');
-  }
+  // Requests are logged by the regular request logger, beside the native pipeline, to the same
+  // JSONL, CSV or database log, with the same columns.
+  const regularLog = enabled.has('logging');
+  if (regularLog) profile.enabled = profile.enabled.filter(stage => stage !== 'logging');
   // The regular middleware's stores: the same blocks, exemptions, learned keywords and blocked
   // countries. An older aiwaf-wasm can't use them, and then the adapter keeps its own in dataDir.
   note('stores', 'carried');
 
   const options = {
-    stores: regularStores({ dynamicTopN: opts.dynamicTopN, exemptionsDb: opts.AIWAF_EXEMPTIONS_DB }),
+    stores: regularStores({ dynamicTopN: opts.dynamicTopN, exemptionsDb: opts.AIWAF_EXEMPTIONS_DB, extendedInfo: {
+      enabled: opts.AIWAF_CAPTURE_EXTENDED_REQUEST_INFO,
+      maxHeaders: opts.AIWAF_EXTENDED_INFO_MAX_HEADERS,
+      maxValueLength: opts.AIWAF_EXTENDED_INFO_MAX_VALUE_LENGTH
+    } }),
     storesFallback: 'csv',
     rateFailureMode: opts.AIWAF_RATE_CACHE_FAILURE_MODE,
     // Resolved as the regular middleware resolves it, with its default trusted proxies.
@@ -232,6 +310,12 @@ function nativeOptionsFromSettings(rawOpts = {}) {
       delete options.injectionRiskMode;
       note('AIWAF_INJECTION_RISK_MODE', 'not carried', 'It must be block, log or off, so the native default applies.');
     }
+  }
+  if (profile.enabled.includes('geo_block')) {
+    // Countries come from where the regular geo check finds them: its geoResolver, which the
+    // request waits for, or else the MMDB database, then the x-country-code header.
+    options.countryLookup = require('./geoBlocker').createCountryLookup(opts, options.trustedProxies, rawOpts.geoResolver);
+    if (typeof rawOpts.geoResolver === 'function') note('geoResolver', 'carried');
   }
   // The regular UUID check matches one segment under uuidRoutePrefix, and asks uuidResolver.
   const uuidPrefix = rawOpts.uuidRoutePrefix || '/user';
@@ -252,15 +336,16 @@ function nativeOptionsFromSettings(rawOpts = {}) {
     note('cache', 'not carried', 'Shared native rate limits need a node-redis or ioredis client, so rate limits are counted in each worker.');
   }
   if (opts.AIWAF_RATE_CACHE_FAILURE_MODE !== 'closed') note('AIWAF_RATE_CACHE_FAILURE_MODE', 'carried');
-  const model = settingsModel(opts);
-  if (model.kind === 'wasm') {
-    options.modelFile = model.file;
-    note('AIWAF_MODEL_PATH', 'carried');
-  } else if (model.kind === 'js' || model.kind === 'unreadable') {
-    note('AIWAF_MODEL_PATH', 'not carried', `${model.file} is in an older model format the native pipeline can't load. Retrain with: aiwaf train`);
-  } else if (model.kind === 'none' && opts.AIWAF_MODEL_PATH) {
-    note('AIWAF_MODEL_PATH', 'carried', 'No model file exists there yet, so anomaly detection runs without a model, as in the regular middleware.');
+  if (regularLog) options.regularLog = { ...opts, AIWAF_MIDDLEWARE_LOGGING: true };
+  // Anomalies are checked by the regular anomaly check, after the engine's stages, with the
+  // regular model, wherever the app keeps it and in whatever format.
+  const regularAnomaly = profile.enabled.includes('ai_anomaly');
+  if (regularAnomaly) {
+    options.regularAnomaly = opts;
+    profile.enabled = profile.enabled.filter(stage => stage !== 'ai_anomaly');
   }
+  // The regular anomaly check loads the model itself; without that stage no model is used.
+  if (opts.AIWAF_MODEL_PATH) note('AIWAF_MODEL_PATH', 'carried');
   for (const [key, reason] of Object.entries(NOT_CARRIED)) {
     if (!same(opts[key], defaults[key])) note(key, 'not carried', reason);
   }
@@ -303,4 +388,4 @@ function nativeOptionsFromSettings(rawOpts = {}) {
   };
 }
 
-module.exports = { nativeOptionsFromSettings, settingsModel, SHIPPED_MODEL_SHA256 };
+module.exports = { nativeOptionsFromSettings, settingsModel, SHIPPED_MODEL_SHA256, LEGACY_DEFAULTS };

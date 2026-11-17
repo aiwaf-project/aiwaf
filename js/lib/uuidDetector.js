@@ -9,10 +9,16 @@ let config = {
   uuidResolver: null
 };
 
+// The prefix is literal text: escaped, and compiled once per prefix.
+let prefixPattern = { prefix: null, regex: null };
 function extractUuid(req) {
   if (req?.params?.uuid) return String(req.params.uuid);
   const path = String(req.path || req.url || '');
-  const regex = new RegExp(`^${config.prefix}/([^/]+)$`);
+  if (prefixPattern.prefix !== config.prefix) {
+    const escaped = String(config.prefix).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    prefixPattern = { prefix: config.prefix, regex: new RegExp(`^${escaped}/([^/]+)$`) };
+  }
+  const regex = prefixPattern.regex;
   const match = path.match(regex);
   return match ? match[1] : null;
 }
