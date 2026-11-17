@@ -1,14 +1,10 @@
+const { loginPathPrefixes } = require('./honeypotDefaults');
+
 let config = {
   field: undefined,
   minFormTimeMs: 0,
   maxPageTimeMs: 3600 * 1000,
-  loginPathPrefixes: [
-    '/admin/login/',
-    '/login/',
-    '/accounts/login/',
-    '/auth/login/',
-    '/signin/'
-  ],
+  loginPathPrefixes: [...loginPathPrefixes],
   postOnlySuffixes: [
     '/create/',
     '/submit/',
@@ -42,7 +38,7 @@ module.exports = {
       field: opts.HONEYPOT_FIELD,
       minFormTimeMs: Math.max(0, Number(opts.AIWAF_MIN_FORM_TIME || 0) * 1000),
       maxPageTimeMs: Math.max(0, Number(opts.AIWAF_MAX_PAGE_TIME || 3600) * 1000),
-      loginPathPrefixes: (opts.AIWAF_LOGIN_PATH_PREFIXES || config.loginPathPrefixes).map(p => String(p)),
+      loginPathPrefixes: (opts.AIWAF_LOGIN_PATH_PREFIXES || loginPathPrefixes).map(p => String(p)),
       postOnlySuffixes: (opts.AIWAF_POST_ONLY_SUFFIXES || config.postOnlySuffixes).map(p => String(p)),
       allowedMethods: (opts.AIWAF_ALLOWED_METHODS || config.allowedMethods).map(m => String(m).toUpperCase()),
       methodPolicyEnabled: opts.AIWAF_METHOD_POLICY_ENABLED === true

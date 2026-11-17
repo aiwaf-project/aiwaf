@@ -1,3 +1,5 @@
+const { loginPathPrefixes } = require('./honeypotDefaults');
+
 function firstDefined(...values) {
   for (const value of values) {
     if (value !== undefined && value !== null) return value;
@@ -76,7 +78,7 @@ function normalizeSettings(rawOpts = {}) {
     HONEYPOT_FIELD: firstDefined(rawOpts.HONEYPOT_FIELD, rawOpts.honeypotField, legacy.honeypot?.field),
     AIWAF_MIN_FORM_TIME: toNumber(firstDefined(rawOpts.AIWAF_MIN_FORM_TIME, rawOpts.minFormTime, legacy.honeypot?.minFormTime, process.env.AIWAF_MIN_FORM_TIME), 0),
     AIWAF_MAX_PAGE_TIME: toNumber(firstDefined(rawOpts.AIWAF_MAX_PAGE_TIME, rawOpts.maxPageTime, legacy.honeypot?.maxPageTime, process.env.AIWAF_MAX_PAGE_TIME), 3600),
-    AIWAF_LOGIN_PATH_PREFIXES: toArray(firstDefined(rawOpts.AIWAF_LOGIN_PATH_PREFIXES, rawOpts.loginPathPrefixes, legacy.honeypot?.loginPathPrefixes, process.env.AIWAF_LOGIN_PATH_PREFIXES), undefined),
+    AIWAF_LOGIN_PATH_PREFIXES: toArray(firstDefined(rawOpts.AIWAF_LOGIN_PATH_PREFIXES, rawOpts.loginPathPrefixes, legacy.honeypot?.loginPathPrefixes, process.env.AIWAF_LOGIN_PATH_PREFIXES), [...loginPathPrefixes]),
     AIWAF_POST_ONLY_SUFFIXES: toArray(firstDefined(rawOpts.AIWAF_POST_ONLY_SUFFIXES, rawOpts.postOnlySuffixes, legacy.honeypot?.postOnlySuffixes, process.env.AIWAF_POST_ONLY_SUFFIXES), undefined),
     AIWAF_ALLOWED_METHODS: toArray(firstDefined(rawOpts.AIWAF_ALLOWED_METHODS, rawOpts.allowedMethods, legacy.honeypot?.allowedMethods, process.env.AIWAF_ALLOWED_METHODS), undefined),
     AIWAF_METHOD_POLICY_ENABLED: toBool(firstDefined(rawOpts.AIWAF_METHOD_POLICY_ENABLED, rawOpts.methodPolicyEnabled, legacy.honeypot?.methodPolicyEnabled, process.env.AIWAF_METHOD_POLICY_ENABLED), false),

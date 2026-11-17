@@ -395,6 +395,7 @@ pub fn validate_headers_node(
     min_score: i32,
     limits: &HeaderLimits,
     lists: Option<&UserAgentLists>,
+    verdict: Option<&str>,
 ) -> Option<String> {
     let mut total_chars = 0usize;
     for (key, value) in headers {
@@ -418,14 +419,27 @@ pub fn validate_headers_node(
         return Some(format!("Missing required headers: {}", display_header_name(missing)));
     }
     let lower = ua.to_lowercase();
+    // The host's own verdict on the User-Agent, from the app's lists matched in its own regex
+    // dialect: "legitimate" skips the rest, "suspicious:<pattern>" blocks, anything else neither.
+    if let Some(verdict) = verdict {
+        if verdict == "legitimate" {
+            return None;
+        }
+        if let Some(pattern) = verdict.strip_prefix("suspicious:") {
+            return Some(format!("Suspicious user agent: Pattern: {pattern}"));
+        }
+    }
     let legitimate = lists.and_then(|lists| lists.legitimate.as_ref());
-    if legitimate.map_or_else(
+    if verdict.is_some() {
+        // Decided above; the built-in and profile lists don't apply.
+    } else if legitimate.map_or_else(
         || LEGITIMATE_BOTS.iter().any(|bot| bot.is_match(&lower)),
         |bots| bots.iter().any(|bot| bot.is_match(&lower)),
     ) {
         return None;
     }
-    if let Some(patterns) = lists.and_then(|lists| lists.suspicious.as_ref()) {
+    if verdict.is_some() {
+    } else if let Some(patterns) = lists.and_then(|lists| lists.suspicious.as_ref()) {
         if let Some(pattern) = patterns.iter().find(|pattern| pattern.is_match(&lower)) {
             return Some(format!(
                 "Suspicious user agent: Pattern: {}",
@@ -439,7 +453,7 @@ pub fn validate_headers_node(
     {
         return Some(format!("Suspicious user agent: Pattern: {}", pattern));
     }
-    if lists.and_then(|lists| lists.suspicious.as_ref()).is_none() && lower == "mozilla/4.0" {
+    if verdict.is_none() && lists.and_then(|lists| lists.suspicious.as_ref()).is_none() && lower == "mozilla/4.0" {
         return Some("Suspicious user agent: Pattern: ^mozilla/4\\.0$".to_string());
     }
     if let Some(blocked) = limits

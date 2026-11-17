@@ -156,17 +156,36 @@ function calculateHeaderQuality(headers) {
   return score;
 }
 
+function toRegexList(items, fallback) {
+  if (!items) return fallback;
+  if (!Array.isArray(items)) return fallback;
+  return items.map(item => {
+    if (item instanceof RegExp) return item;
+    return new RegExp(String(item), 'i');
+  });
+}
+
+/**
+ * The regular check's verdict on a User-Agent from the app's lists (or the defaults), for the
+ * native pipeline: "legitimate", "suspicious:<pattern>" or "" for neither. The app's own
+ * RegExps are tested here, in JavaScript, so their flags and syntax mean what they mean in the
+ * regular check.
+ */
+function userAgentVerdict(opts = {}) {
+  const legitimateBots = toRegexList(opts.AIWAF_LEGITIMATE_BOTS, DEFAULT_LEGIT_BOTS);
+  const suspiciousUserAgents = toRegexList(opts.AIWAF_SUSPICIOUS_USER_AGENTS, DEFAULT_SUSPICIOUS_UA);
+  return userAgent => {
+    const ua = String(userAgent || '').toLowerCase();
+    if (legitimateBots.length && matchesPattern(legitimateBots, ua)) return 'legitimate';
+    const found = suspiciousUserAgents.length ? suspiciousUserAgents.find(pattern => pattern.test(ua)) : null;
+    return found ? `suspicious:${found.source}` : '';
+  };
+}
+
 module.exports = {
+  userAgentVerdict,
   init(opts = {}) {
     const requiredHeaders = opts.AIWAF_REQUIRED_HEADERS || [];
-    const toRegexList = (items, fallback) => {
-      if (!items) return fallback;
-      if (!Array.isArray(items)) return fallback;
-      return items.map(item => {
-        if (item instanceof RegExp) return item;
-        return new RegExp(String(item), 'i');
-      });
-    };
     config = {
       enabled: !!opts.AIWAF_HEADER_VALIDATION,
       requiredHeaders: Array.isArray(requiredHeaders)

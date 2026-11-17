@@ -281,12 +281,13 @@ module.exports = async function createNativeMiddleware(options = {}) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) throw new TypeError('Native adapter options must be an object');
   if (options.profile !== undefined && (!options.profile || typeof options.profile !== 'object' || Array.isArray(options.profile))) throw new TypeError('Native profile must be an object');
   const allowed = new Set(['profile', 'dataDir', 'logPath', 'logFsync', 'persistBlocks', 'model', 'countryLookup', 'authenticated', 'routeExists', 'onError', 'pathRules', 'manifestPath', 'injectionRiskMode', 'logger', 'uuidResolver', 'stores', 'storeCacheSeconds', 'storesFallback',
-    'rateCounter', 'rateCounterFallback', 'rateFailureMode', 'trustedProxies', 'modelFile', 'modelLoader', 'regularLog', 'modelGate', 'exact', 'regularAnomaly']);
+    'rateCounter', 'rateCounterFallback', 'rateFailureMode', 'trustedProxies', 'modelFile', 'modelLoader', 'regularLog', 'modelGate', 'exact', 'regularAnomaly', 'userAgentVerdict']);
   for (const key of Object.keys(options)) if (!allowed.has(key)) throw new Error(`Unknown native adapter option: ${key}`);
   if (options.uuidResolver != null && typeof options.uuidResolver !== 'function') throw new TypeError('uuidResolver must be a function');
   // countryLookup may return a promise; the request waits for it, as for uuidResolver.
   if (options.countryLookup != null && typeof options.countryLookup !== 'function') throw new TypeError('countryLookup must be a function');
   if (options.modelLoader != null && typeof options.modelLoader !== 'function') throw new TypeError('modelLoader must be a function');
+  if (options.userAgentVerdict != null && typeof options.userAgentVerdict !== 'function') throw new TypeError('userAgentVerdict must be a function');
   for (const key of ['authenticated','routeExists','onError']) {
     if (options[key] != null && (typeof options[key] !== 'function' || options[key].constructor.name === 'AsyncFunction')) throw new TypeError(`${key} must be synchronous`);
   }
@@ -371,6 +372,13 @@ module.exports = async function createNativeMiddleware(options = {}) {
     // runs without them only when they're the regular defaults, which it handled as before.
     const { LEGACY_DEFAULTS } = require('./nativeSettings');
     const given = Object.keys(LEGACY_DEFAULTS).filter(key => profile[key] !== undefined);
+    if (options.userAgentVerdict) {
+      // The app's User-Agent lists are matched here and passed per request.
+      const probe = await createRequestPipeline({});
+      const supported = typeof probe.native.supports === 'function' && probe.native.supports('user_agent_verdict');
+      probe.native.free();
+      if (!supported) throw new Error('userAgentVerdict needs a newer aiwaf-wasm. Run: npm install aiwaf-wasm@latest');
+    }
     if (given.length) {
       const probe = await createRequestPipeline({});
       const supports = feature => typeof probe.native.supports === 'function' && probe.native.supports(feature);
@@ -613,6 +621,7 @@ module.exports = async function createNativeMiddleware(options = {}) {
         authenticated: req[DEFER_BODY] ? false : !!synchronous(options.authenticated, req, false),
         exists: !!synchronous(options.routeExists, req, !!req.route), disabled,
         payload_exhausted: body.exhausted, defer_body: !!req[DEFER_BODY],
+        ...(options.userAgentVerdict ? { user_agent_verdict: options.userAgentVerdict(req.headers?.['user-agent']) } : {}),
         ...(Object.keys(rate).length ? { rate } : {}),
         ...(uuidExists === null ? {} : { uuid_exists: uuidExists }),
         ...(facts || {})

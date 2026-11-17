@@ -24,7 +24,7 @@ pub const STAGES: [&str; 8] = [
 ];
 static NEXT_CONTEXT: AtomicU64 = AtomicU64::new(1);
 /// Optional request facts this engine accepts, for `NativeRequestPipeline::supports`.
-pub const FEATURES: [&str; 13] = [
+pub const FEATURES: [&str; 14] = [
     "rate_overrides",
     "sql_monitor",
     "uuid_resolver",
@@ -38,6 +38,7 @@ pub const FEATURES: [&str; 13] = [
     "header_policy",
     "user_agent_lists",
     "learn_context",
+    "user_agent_verdict",
 ];
 
 #[derive(Deserialize)]
@@ -233,6 +234,11 @@ struct Request {
     /// such as Redis. Replaces the engine's own per-worker count.
     #[serde(default)]
     rate_count: Option<usize>,
+    /// The host's verdict on the User-Agent from the app's own pattern lists, matched in the
+    /// host's regex dialect: "legitimate", "suspicious:<pattern>" or "" for neither. Replaces
+    /// the lists in the "node" header policy.
+    #[serde(default)]
+    user_agent_verdict: Option<String>,
 }
 #[derive(Clone, Copy, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -372,6 +378,7 @@ impl Engine {
             min_score,
             &self.header_limits,
             self.agent_lists.as_ref(),
+            r.user_agent_verdict.as_deref(),
         )
         .or_else(|| {
             if !p.header_wasm_check {
@@ -1608,6 +1615,18 @@ mod tests {
         assert_eq!(agent(lists, "Evil/1.0 Mozilla"), 403);
         assert_eq!(agent(lists, "mymonitor/1 evil"), 0);
         assert!(Engine::new(r#"{"suspicious_user_agents":["(?<=x)y"]}"#).is_err());
+        // The host's verdict replaces the lists: curl passes when the host found nothing.
+        let verdict = |v: &str, ua: &str| {
+            let mut e = Engine::new(node).unwrap();
+            let mut r: Value =
+                serde_json::from_str(&request("a", "/docs", "GET", 100.0, json!(null))).unwrap();
+            r["headers"]["HTTP_USER_AGENT"] = json!(ua);
+            r["user_agent_verdict"] = json!(v);
+            begin(&mut e, r.to_string())["status"].clone()
+        };
+        assert_eq!(verdict("", "curl/8.0 Mozilla"), 0);
+        assert_eq!(verdict("suspicious:^evil", "Mozilla/5.0 Chrome/130"), 403);
+        assert_eq!(verdict("legitimate", "x"), 0);
     }
     #[test]
     fn exemptions_caps_geo_uuid_and_logging() {

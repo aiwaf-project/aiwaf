@@ -142,6 +142,9 @@ class NativeAIWAFMiddleware:
         # Saves each request the anomaly stage checks to RequestLog, as the regular anomaly
         # middleware does, for aiwaf train when there is no access log to read.
         self.save_request_log = bool(config.pop("save_request_log", False))
+        # With the regular logger middleware beside it: the stages listed before the logger,
+        # whose request blocks the logger never saw.
+        self.logger_outer = frozenset(config.pop("logger_outer_stages", ()) or ())
         # A LocMemCache keeps its values in this process only, as the engine's own memory does, so
         # timing and rate counts behave the same there without a Django cache call per request.
         if config["honeypot_backend"] == "django_cache" and _process_local(alias):
@@ -191,13 +194,34 @@ class NativeAIWAFMiddleware:
             country=(fact_value(lookup, ip) if lookup else lookup_country(ip, cache_prefix=self.geo_cache[0], cache_seconds=self.geo_cache[1])) if self.pipeline.needs_country else "", exhausted=exhausted,
             authenticated=is_authenticated_session_context(getattr(request, "user", None), getattr(request, "session", None)),
             uuid=None if uuid is None else str(uuid))
-        response = HttpResponse(payload, status=status, content_type="application/json") if status else self.get_response(request)
+        stage = getattr(ctx, "blocked_stage", None) if status else None
+        if stage == "uuid_tamper":
+            # The regular UUID check blocks in process_view, after every middleware's request
+            # hook has run, so the block passes back out through all of them.
+            request._aiwaf_view_block = (payload, status)
+            response = self.get_response(request)
+        elif status:
+            if stage in self.logger_outer:
+                request._aiwaf_skip_log = True
+            response = HttpResponse(payload, status=status, content_type="application/json")
+        else:
+            response = self.get_response(request)
         final_status, final_payload = self.pipeline.finish(ctx, response.status_code, response.get("Content-Length", "-"))
         if final_payload != "null":
+            if getattr(ctx, "blocked_stage", None) in self.logger_outer:
+                # Decided after the response: a logger listed after that stage saw the response.
+                request._aiwaf_logged_response = response
             return HttpResponse(final_payload, status=final_status, content_type="application/json")
         if self.save_request_log and not status:
             self._save_request_log(request, response, ip, endpoint, start)
         return response
+
+    def process_view(self, request, view_func, view_args, view_kwargs):
+        """A UUID block decided in __call__, returned here, where the regular check returns it."""
+        block = getattr(request, "_aiwaf_view_block", None)
+        if block is not None:
+            return HttpResponse(block[0], status=block[1], content_type="application/json")
+        return None
 
     def _save_request_log(self, request, response, ip, endpoint, start):
         """The row the regular anomaly middleware saves for a request it let through."""

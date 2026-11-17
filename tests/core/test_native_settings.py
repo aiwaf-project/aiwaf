@@ -118,9 +118,19 @@ def test_django_stages_come_from_the_regular_middleware_list():
     with_logging = convert({"AIWAF_MIDDLEWARE_LOGGING": True}, middleware=middleware)
     assert with_logging.config["enabled"] == ["header_validation", "rate_limit"]
     assert outcomes(with_logging)["AIWAF_MIDDLEWARE_LOGGING"] == "carried"
-    # Between them, it would see blocks from some stages and not others.
+    # Between them, it sees blocks from the stages after it, and the native pipeline says which
+    # stages come before it; an engine that can't name the blocking stage keeps the regular chain.
     between = [middleware[0], middleware[2], middleware[1]]
-    assert outcomes(convert({"AIWAF_MIDDLEWARE_LOGGING": True}, middleware=between))["AIWAF_MIDDLEWARE_LOGGING"] == "changed"
+    converted = convert({"AIWAF_MIDDLEWARE_LOGGING": True}, middleware=between)
+    assert outcomes(converted)["AIWAF_MIDDLEWARE_LOGGING"] == "carried"
+    assert converted.config["logger_outer_stages"] == ["rate_limit"]
+    import aiwaf.core.native_settings as module
+    supports = module._engine_supports
+    module._engine_supports = lambda feature: feature != "blocked_stage" and supports(feature)
+    try:
+        assert outcomes(convert({"AIWAF_MIDDLEWARE_LOGGING": True}, middleware=between))["AIWAF_MIDDLEWARE_LOGGING"] == "changed"
+    finally:
+        module._engine_supports = supports
     # After switching to the native middleware, there's no regular chain to copy.
     switched = convert(middleware=["aiwaf.django.csv_pipeline.NativeAIWAFMiddleware"])
     assert "enabled" not in switched.config and outcomes(switched)["MIDDLEWARE"] == "changed"

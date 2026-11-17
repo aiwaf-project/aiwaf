@@ -134,7 +134,7 @@ def train_from_logs(app, *, log_dir=None, disable_ai=False, force_ai=False,
                 if (kw < 2 and errors_count < 10 and burst < 15 and count < 100) or (kw == 0 and errors_count == 0):
                     continue
                 result['blocked_ai'] += block(ip, f'AI anomaly + suspicious patterns (kw:{kw:.1f}, 404s:{errors_count}, burst:{burst:.1f})')
-            destination = model_path or get('ai_anomaly.model_path', None)
+            destination = model_path or get('ai_anomaly.model_path', None) or get('AIWAF_MODEL_PATH', None)
             if destination:
                 Path(destination).parent.mkdir(parents=True, exist_ok=True)
                 dump_model_artifact(rust_model_artifact(model, columns, len(matrix), 'fastapi'), destination)

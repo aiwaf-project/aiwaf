@@ -303,6 +303,8 @@ pub struct NativePipelineRequest {
     started: std::time::Instant,
     /// A SQL finding allowed through because sql_mode is "monitor", for the adapter to log.
     sql_monitor: Option<String>,
+    /// The stage that blocked this request, when one did: in begin, or after the response.
+    blocked_stage: Mutex<String>,
 }
 
 #[pymethods]
@@ -310,6 +312,13 @@ impl NativePipelineRequest {
     #[getter]
     fn sql_monitor(&self) -> Option<String> {
         self.sql_monitor.clone()
+    }
+
+    /// The stage that blocked this request ("geo_block", "rate_limit" and so on), or None.
+    #[getter]
+    fn blocked_stage(&self) -> Option<String> {
+        let stage = self.blocked_stage.lock().unwrap_or_else(|e| e.into_inner());
+        (!stage.is_empty()).then(|| stage.clone())
     }
 
     /// With policy_store "host": the blocks and learned keywords to write, as ("block", [ip, reason])
@@ -598,6 +607,7 @@ impl NativeCSVPipeline {
         accepts_method: bool,
         authenticated: bool,
         monitored: &mut Option<String>,
+        stage: &std::cell::Cell<&'static str>,
     ) -> PyResult<(i32, Value, String)> {
         let p = &self.profile;
         let block = |reason: String, status: i32, message: Option<String>| -> PyResult<_> {
@@ -608,6 +618,7 @@ impl NativeCSVPipeline {
             Ok((status, payload, reason))
         };
         if f.active.contains("geo_block") {
+            stage.set("geo_block");
             let country = f.headers.get("AIWAF_COUNTRY").cloned().unwrap_or_default();
             let decision = if self.host() {
                 let dynamic = f.geo_countries.clone().unwrap_or_default();
@@ -626,6 +637,7 @@ impl NativeCSVPipeline {
             }
         }
         if f.active.contains("ip_keyword_block") {
+            stage.set("ip_keyword_block");
             if p.ip_blocking && self.is_blocklisted(py, f)? {
                 return Ok((
                     403,
@@ -698,6 +710,7 @@ impl NativeCSVPipeline {
             }
         }
         if f.active.contains("rate_limit") {
+            stage.set("rate_limit");
             let key = if p.rate_key_mode == "ip" {
                 format!("ratelimit:{}", f.ip)
             } else {
@@ -764,9 +777,11 @@ impl NativeCSVPipeline {
             }
         }
         if f.active.contains("ai_anomaly") && p.ip_blocking && self.is_blocklisted(py, f)? {
+            stage.set("ai_anomaly");
             return Ok((403, json!({"error":"blocked"}), "IP blocklisted".into()));
         }
         if f.active.contains("honeypot") && !(p.skip_authenticated && authenticated) {
+            stage.set("honeypot");
             let method_reason = if f.method == "GET"
                 && !accepts_get
                 && ["/create/", "/submit/", "/upload/", "/delete/", "/process/"]
@@ -905,6 +920,7 @@ impl NativeCSVPipeline {
             }
         }
         if f.active.contains("uuid_tamper") {
+            stage.set("uuid_tamper");
             if let Some(uuid) = &f.uuid {
                 if !uuid.is_empty() && !policy::policy_uuid(uuid.clone()) {
                     let score = self.uuid_score(py, &f.ip, f.now, p.uuid_malformed_weight)?;
@@ -916,6 +932,7 @@ impl NativeCSVPipeline {
         let skipped = p.header_skip_extensions.iter().any(|ext| path.ends_with(ext.as_str()))
             || p.header_skip_paths.iter().any(|prefix| path.starts_with(prefix.as_str()));
         if f.active.contains("header_validation") && !skipped {
+            stage.set("header_validation");
             let limits = &self.header_limits;
             let required = p
                 .required_headers_by_method
@@ -1126,6 +1143,7 @@ impl NativeCSVPipeline {
             "method_headers",
             "extra_user_agents",
             "learn_context",
+            "blocked_stage",
         ]
         .contains(&feature)
     }
@@ -1297,6 +1315,7 @@ impl NativeCSVPipeline {
             Ok(())
         })?;
         let mut sql_monitor = None;
+        let stage = std::cell::Cell::new("");
         let (status, payload, reason) = self.evaluate(
             py,
             &f,
@@ -1308,6 +1327,7 @@ impl NativeCSVPipeline {
             accepts_method,
             authenticated,
             &mut sql_monitor,
+            &stage,
         )?;
         self.processed.fetch_add(1, Ordering::Relaxed);
         let ctx = NativePipelineRequest {
@@ -1318,6 +1338,7 @@ impl NativeCSVPipeline {
             finished: AtomicBool::new(false),
             started,
             sql_monitor,
+            blocked_stage: Mutex::new(if status != 0 { stage.get().to_string() } else { String::new() }),
         };
         Ok((ctx, status, payload.to_string()))
     }
@@ -1368,6 +1389,7 @@ impl NativeCSVPipeline {
             if status == 404 && score >= p.uuid_threshold {
                 reason = format!("UUID tampering score={score}");
                 self.blocklist(py, &f, &reason)?;
+                *ctx.blocked_stage.lock().unwrap_or_else(|e| e.into_inner()) = "uuid_tamper".into();
                 final_status = 403;
                 payload = json!({"error":"blocked"});
             }
@@ -1408,6 +1430,7 @@ impl NativeCSVPipeline {
                     final_status = 403;
                     payload = json!({"error":"blocked"});
                     reason = block_reason;
+                    *ctx.blocked_stage.lock().unwrap_or_else(|e| e.into_inner()) = "ai_anomaly".into();
                 }
             }
             if p.learning && status == 404 && !f.exists && !f.exempt {

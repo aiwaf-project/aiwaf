@@ -2,7 +2,7 @@ from tempfile import TemporaryDirectory
 from unittest import skipUnless
 from unittest.mock import patch
 from django.http import JsonResponse
-from django.test import SimpleTestCase, TestCase, RequestFactory, override_settings
+from django.test import Client, SimpleTestCase, TestCase, RequestFactory, override_settings
 from django.urls import path
 from aiwaf.django.decorators import aiwaf_exempt
 
@@ -77,11 +77,17 @@ class NativePipelineRouteUuidTests(SimpleTestCase):
         from django.urls import resolve
         with TemporaryDirectory() as directory, override_settings(ROOT_URLCONF=__name__, AIWAF_CSV_PIPELINE={
                 'data_dir': directory, 'enabled': ['uuid_tamper'], 'manifest_path': directory + '/none.json'}):
+            # Through Django's handler: the block is returned from process_view, where the regular
+            # UUID check returns it.
+            with override_settings(MIDDLEWARE=['aiwaf.django.csv_pipeline.NativeAIWAFMiddleware']):
+                self.assertEqual(Client(REMOTE_ADDR='203.0.113.50').get('/items/not-a-uuid/').status_code, 403)
+                ok = Client(REMOTE_ADDR='203.0.113.51').get('/items/550e8400-e29b-41d4-a716-446655440000/')
+                self.assertEqual(ok.status_code, 200)
+            # Called without Django's handler, nothing calls process_view, as for the regular check.
             middleware = NativeAIWAFMiddleware(lambda request: resolve(request.path_info).func(request, **resolve(request.path_info).kwargs))
-            factory = RequestFactory(REMOTE_ADDR='203.0.113.50')
-            self.assertEqual(middleware(factory.get('/items/not-a-uuid/')).status_code, 403)
-            ok = RequestFactory(REMOTE_ADDR='203.0.113.51').get('/items/550e8400-e29b-41d4-a716-446655440000/')
-            self.assertEqual(middleware(ok).status_code, 200)
+            request = RequestFactory(REMOTE_ADDR='203.0.113.52').get('/items/not-a-uuid/')
+            middleware(request)
+            self.assertEqual(middleware.process_view(request, None, (), {}).status_code, 403)
 
 
 @skipUnless(aiwaf_rust and hasattr(aiwaf_rust, 'NativeCSVPipeline') and getattr(aiwaf_rust.NativeCSVPipeline, 'supports', None)

@@ -358,9 +358,13 @@ class NativeDefaultLoggerTests(SimpleTestCase):
             self.assertEqual(rows[1], rows[0])
             self.assertEqual(rows[1], [["/items", "200"], ["/items", "429"]])
 
-    def test_between_other_aiwaf_middleware_it_keeps_the_regular_chain(self):
+    def test_between_other_aiwaf_middleware_it_needs_an_engine_that_names_the_blocking_stage(self):
+        from aiwaf.core import native_settings
         from aiwaf.django.native_default import native_plan
 
         between = REGULAR[:3] + ["aiwaf.django.middleware_logger.AIWAFLoggerMiddleware"] + REGULAR[3:]
         with TemporaryDirectory() as directory, settings_for(directory, MIDDLEWARE=between, AIWAF_MIDDLEWARE_LOGGING=True):
-            self.assertIsNone(native_plan())
+            self.assertEqual(native_plan()[1]["logger_outer_stages"], ["ip_keyword_block"])
+            supports = native_settings._engine_supports
+            with patch.object(native_settings, "_engine_supports", lambda f: f != "blocked_stage" and supports(f)):
+                self.assertIsNone(native_plan())

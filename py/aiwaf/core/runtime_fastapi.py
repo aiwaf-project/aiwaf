@@ -224,6 +224,7 @@ class AIWAF:
             anomaly_cfg = self.config.get("ai_anomaly", {})
             self.app.add_middleware(
                 AIAnomalyMiddleware,
+                source_app=self.app,
                 enabled=anomaly_cfg.get("enabled", True),
                 path_rules=path_rules,
             )
@@ -258,6 +259,7 @@ class AIWAF:
             ipkw_cfg = self.config.get("ip_keyword_block", {})
             self.app.add_middleware(
                 IPAndKeywordBlockMiddleware,
+                source_app=self.app,
                 malicious_keywords=ipkw_cfg.get("malicious_keywords"),
                 sql_injection_mode=ipkw_cfg.get("sql_injection_mode"),
                 payload_max_bytes=ipkw_cfg.get("payload_max_bytes"),
@@ -306,11 +308,12 @@ class AIWAF:
             stages.remove("logging")
         conversion.config["enabled"] = stages
         if "ip_keyword_block" in stages or "ai_anomaly" in stages:
-            # The regular keyword check's legitimate words. It also looks for route words, on the
-            # middleware it wraps, which never has routes, so it finds none.
             from aiwaf.fast.middleware.ip_and_keyword_block_middleware import DEFAULT_LEGITIMATE
+            from aiwaf.fast.runtime_policy import route_keywords
 
-            conversion.config["legitimate_keywords"] = sorted(DEFAULT_LEGITIMATE)
+            keywords, prefixes = route_keywords(self.app)
+            conversion.config["legitimate_keywords"] = sorted(DEFAULT_LEGITIMATE | keywords)
+            conversion.config["safe_prefixes"] = sorted(prefixes)
         if "ai_anomaly" in stages:
             from aiwaf.core.native_settings import carry_learning
             from aiwaf.fast.middleware.anomaly_middleware import STATIC_KW
@@ -345,7 +348,7 @@ class AIWAF:
         try:
             # FastAPI builds middleware when the app starts, too late to choose the regular
             # middleware instead, so build one now to see that it can start.
-            NativeAIWAFMiddleware(self.app, config=dict(conversion.config), aiwaf_config=self.config, stores_ready=True)
+            NativeAIWAFMiddleware(self.app, config=dict(conversion.config), aiwaf_config=self.config, stores_ready=True, source_app=self.app)
         except Exception as error:
             log_native_fallback("FastAPI", error)
             return False
@@ -357,7 +360,7 @@ class AIWAF:
             self.app.add_middleware(AIWAFLoggingMiddleware, log_dir=logging_cfg.get("log_dir", "aiwaf_logs"),
                                     log_format=logging_cfg.get("log_format", "combined"), path_rules=path_rules)
         self.app.add_middleware(NativeAIWAFMiddleware, config=dict(conversion.config), aiwaf_config=self.config,
-                                stores_ready=True)
+                                stores_ready=True, source_app=self.app)
         return True
 
     def _add_lifecycle_events(self, app: FastAPI):

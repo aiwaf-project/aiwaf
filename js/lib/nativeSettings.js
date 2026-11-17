@@ -223,21 +223,13 @@ function nativeOptionsFromSettings(rawOpts = {}) {
   profile.header_skip_extensions = [].concat(rawOpts.AIWAF_STATIC_EXTENSIONS || REGULAR_STATIC_EXTENSIONS).map(value => String(value).toLowerCase());
   profile.header_skip_paths = [].concat(rawOpts.AIWAF_STATIC_PATHS || REGULAR_STATIC_PATHS).map(value => String(value).toLowerCase());
   profile.header_wasm_check = wasmHeaderCheck;
-  // The app's own User-Agent lists, as JavaScript pattern sources the engine compiles
-  // case-insensitively. A RegExp with other flags behaves differently, so it isn't carried.
-  for (const [key, setting] of [['suspicious_user_agents', 'AIWAF_SUSPICIOUS_USER_AGENTS'], ['legitimate_bots', 'AIWAF_LEGITIMATE_BOTS']]) {
-    const items = rawOpts[setting];
-    if (!Array.isArray(items)) continue;
-    if (items.some(item => item instanceof RegExp && item.flags.replace('i', '') !== '')) {
-      note(setting, 'not carried', 'A pattern with flags other than i matches differently natively.');
-      continue;
-    }
-    profile[key] = items.map(item => (item instanceof RegExp ? item.source : String(item)));
-    note(setting, 'carried');
-  }
+  // The app's own User-Agent lists are tested by the adapter, in JavaScript, exactly as the
+  // regular check tests them; the engine takes the verdict.
+  const ownAgentLists = ['AIWAF_SUSPICIOUS_USER_AGENTS', 'AIWAF_LEGITIMATE_BOTS'].filter(setting => Array.isArray(rawOpts[setting]));
+  for (const setting of ownAgentLists) note(setting, 'carried');
+  const userAgentVerdict = ownAgentLists.length ? require('./headerValidation').userAgentVerdict(opts) : null;
   profile.blocked_user_agents = [].concat(opts.AIWAF_BLOCKED_USER_AGENTS || []).map(agent => String(agent).toLowerCase());
-  // The regular check lowercases the path, so a prefix with capitals never matches there. Unset,
-  // the regular options give it no login prefixes.
+  // The regular check lowercases the path, so a prefix with capitals never matches there.
   profile.login_prefixes = [].concat(opts.AIWAF_LOGIN_PATH_PREFIXES || []).map(String)
     .filter(prefix => prefix === prefix.toLowerCase());
   // With no required headers, the regular check also skips the quality score.
@@ -337,6 +329,7 @@ function nativeOptionsFromSettings(rawOpts = {}) {
   }
   if (opts.AIWAF_RATE_CACHE_FAILURE_MODE !== 'closed') note('AIWAF_RATE_CACHE_FAILURE_MODE', 'carried');
   if (regularLog) options.regularLog = { ...opts, AIWAF_MIDDLEWARE_LOGGING: true };
+  if (userAgentVerdict) options.userAgentVerdict = userAgentVerdict;
   // Anomalies are checked by the regular anomaly check, after the engine's stages, with the
   // regular model, wherever the app keeps it and in whatever format.
   const regularAnomaly = profile.enabled.includes('ai_anomaly');

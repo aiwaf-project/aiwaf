@@ -84,7 +84,7 @@ class FastAPIStores(PipelineStores):
 
 class NativeAIWAFMiddleware:
     def __init__(self, app, config=None, *, model=None, country_lookup=None, authenticated=None, honeypot_cache=None,
-                 aiwaf_config=None, stores_ready=False):
+                 aiwaf_config=None, stores_ready=False, source_app=None):
         """``config="from_settings"`` converts ``aiwaf_config``, or the AIWAFConfig the regular middleware uses.
 
         ``stores_ready``: AIWAF(app) set up the stores already. Setting them up again when the app
@@ -95,11 +95,25 @@ class NativeAIWAFMiddleware:
         validate_fact_callback(country_lookup)
         validate_fact_callback(authenticated)
         self.app = app
+        from_settings = config == "from_settings" or isinstance(config, dict) and config.get("from_settings")
+        if from_settings and aiwaf_config is None:
+            from aiwaf.core.runtime_config import get_config
+            aiwaf_config = get_config()
         config = dict(resolve(config, "fastapi", aiwaf_config))
         # "fastapi" reads and writes the regular middleware's stores instead of native CSV files.
         store = config.pop("store", "csv")
         if store not in ("csv", "fastapi"):
             raise ValueError('The native "store" must be "csv" or "fastapi"')
+        if aiwaf_config is not None:
+            from .runtime_policy import load_trained_model, route_keywords
+            from .middleware.ip_and_keyword_block_middleware import DEFAULT_LEGITIMATE
+
+            if model is None and "ai_anomaly" in config.get("enabled", ("ai_anomaly",)):
+                model = load_trained_model(aiwaf_config)
+            if source_app is not None or from_settings:
+                keywords, prefixes = route_keywords(source_app if source_app is not None else app)
+                config["legitimate_keywords"] = sorted(DEFAULT_LEGITIMATE | keywords)
+                config["safe_prefixes"] = sorted(prefixes)
         self.pipeline = CSVPipeline(config, model=model, honeypot_cache=honeypot_cache,
                                     stores=FastAPIStores(aiwaf_config, ready=stores_ready) if store == "fastapi" else None)
         self.cache_io = self.pipeline.profile.get("honeypot_backend") == "cache"

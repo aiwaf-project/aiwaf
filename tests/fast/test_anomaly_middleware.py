@@ -6,11 +6,14 @@ def test_ai_anomaly_middleware_has_enabled_flag():
     middleware = AIAnomalyMiddleware(app=lambda scope, receive, send: None, enabled=True)
     assert middleware.enabled is True
 def test_path_exists_uses_known_route_templates():
-    from aiwaf.fast.middleware.anomaly_middleware import AIAnomalyMiddleware
+    from fastapi import FastAPI
 
-    middleware = AIAnomalyMiddleware.__new__(AIAnomalyMiddleware)
-    middleware._route_paths = {"/health"}
+    app = FastAPI()
+    app.add_api_route("/health", lambda: {})
+    app.add_api_route("/records/{record_id}", lambda: {}, methods=["POST"])
+    middleware = AIAnomalyMiddleware(app)
     assert middleware._path_exists("/health?ready=1")
+    assert middleware._path_exists("/records/42")
     assert not middleware._path_exists("/missing")
 
 

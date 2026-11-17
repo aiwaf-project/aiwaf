@@ -55,12 +55,18 @@ class AIWAFLoggerMiddleware(NativeDefault, MiddlewareMixin):
         if not self.log_enabled:
             return response
             
+        # Beside the native pipeline: a block by a stage listed before this middleware never
+        # reached it, and a block decided after the response replaced one it had already seen.
+        if getattr(request, "_aiwaf_skip_log", False):
+            return response
+        logged = getattr(request, "_aiwaf_logged_response", None) or response
+
         # Calculate response time
         start_time = getattr(request, '_aiwaf_start_time', time.time())
         response_time = time.time() - start_time
         
         if self.csv_enabled:
-            self._write_csv_log(request, response, response_time)
+            self._write_csv_log(request, logged, response_time)
 
         if self.log_to_db:
             _import_models()
@@ -71,11 +77,11 @@ class AIWAFLoggerMiddleware(NativeDefault, MiddlewareMixin):
                         ip_address=ctx["ip"],
                         method=ctx["method"],
                         path=ctx["path"][:500],  # Truncate long paths
-                        status_code=response.status_code,
+                        status_code=logged.status_code,
                         response_time=response_time,
                         user_agent=ctx["user_agent"][:2000],  # Truncate long user agents
                         referer=ctx["referer"][:500],  # Truncate long referers
-                        content_length=response.get('Content-Length', '-'),
+                        content_length=logged.get('Content-Length', '-'),
                         timestamp=timezone.now()
                     )
                 except Exception:

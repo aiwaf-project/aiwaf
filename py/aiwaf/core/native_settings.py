@@ -332,16 +332,21 @@ def _stages(result, framework, settings, middleware):
         enabled.discard("logging")
     if "logging" in enabled:
         # The regular logger middleware keeps logging, beside the native pipeline, to the same
-        # CSV file and RequestLog. It sees the same requests when it's listed before or after
-        # every other AIWAF middleware; between them, it would see blocks from some and not others.
+        # CSV file and RequestLog. Listed before or after every other AIWAF middleware, it sees the
+        # same requests as before. Listed between them, it doesn't see blocks from the stages
+        # listed before it, which the native pipeline reports with the stage that blocked.
         aiwaf = [path for path in middleware if path in _DJANGO_STAGES]
-        if aiwaf.index(DJANGO_LOGGER) in (0, len(aiwaf) - 1) and len(aiwaf) > 1:
+        position = aiwaf.index(DJANGO_LOGGER)
+        between = 0 < position < len(aiwaf) - 1
+        if len(aiwaf) > 1 and (not between or _engine_supports("blocked_stage")):
             enabled.discard("logging")
+            result.config["logger_outer_stages"] = sorted(
+                {_DJANGO_STAGES[path] for path in aiwaf[:position]} - {"logging"})
             result.note("AIWAF_MIDDLEWARE_LOGGING", "carried")
         else:
             result.note("AIWAF_MIDDLEWARE_LOGGING", "changed",
-                        "The regular logger middleware runs beside the native pipeline only when it's listed "
-                        "before or after every other AIWAF middleware.")
+                        "Listed between other AIWAF middleware, the regular logger needs a newer aiwaf-rust "
+                        "to log what it logs beside them: pip install -U aiwaf-rust")
     result.config["enabled"] = sorted(enabled)
     result.note("MIDDLEWARE", "carried")
 
@@ -513,7 +518,7 @@ _FASTAPI_DIRECT = {
 _FASTAPI_STAGES = {"geo_block": "geo_block", "ip_keyword_block": "ip_keyword_block", "rate_limiting": "rate_limit",
                    "ai_anomaly": "ai_anomaly", "honeypot": "honeypot", "uuid_tamper": "uuid_tamper",
                    "header_validation": "header_validation", "logging_middleware": "logging"}
-_FASTAPI_HANDLED = {"storage.backend", "storage.data_dir", "header_validation.exempt_paths", "rate_limiting.exempt_ips",
+_FASTAPI_HANDLED = {"ai_anomaly.model_path", "AIWAF_MODEL_PATH", "storage.backend", "storage.data_dir", "header_validation.exempt_paths", "rate_limiting.exempt_ips",
                     "rate_limiting.cache_backend", "rate_limiting.redis_url", "path_rules", "PATH_RULES", "path_manifest", "PATH_MANIFEST",
                     "exemptions.private_ips_exempted", "exemptions.auto_exempt_patterns",
                     "exemptions.localhost_exempted"} | {f"{section}.enabled" for section in _FASTAPI_STAGES}

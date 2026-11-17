@@ -1,5 +1,4 @@
 """FastAPI IP/keyword blocking middleware."""
-import re
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.responses import JSONResponse
@@ -39,7 +38,7 @@ from aiwaf.core.route_risks import observer_for
 
 
 class IPAndKeywordBlockMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, path_rules=None, malicious_keywords=None, sql_injection_mode=None, payload_max_bytes=None):
+    def __init__(self, app, path_rules=None, malicious_keywords=None, sql_injection_mode=None, payload_max_bytes=None, source_app=None):
         super().__init__(app)
         self.sql_policy = SQLInjectionPolicy(sql_injection_mode, payload_max_bytes)
         self.path_rules = path_rules or []
@@ -58,11 +57,12 @@ class IPAndKeywordBlockMiddleware(BaseHTTPMiddleware):
         self.exempt_keywords = set()
         self.legitimate_path_keywords = set()
         self.safe_prefixes = set()
-        self._init_rich_policy(app)
+        self._source_app = source_app or app
+        self._init_rich_policy(self._source_app)
 
     def _init_rich_policy(self, app):
         try:
-            app_state = getattr(app, "app", app)
+            app_state = app
             state_obj = getattr(app_state, "state", None)
             cfg = getattr(state_obj, "aiwaf_config", None)
             if cfg is not None:
@@ -72,19 +72,8 @@ class IPAndKeywordBlockMiddleware(BaseHTTPMiddleware):
             pass
         # Conservative defaults mirroring Django baseline + route extraction.
         default_legitimate = set(DEFAULT_LEGITIMATE)
-        route_keywords = set()
-        safe_prefixes = set()
-        app_state = getattr(app, "app", app)
-        routes = getattr(getattr(app_state, "router", None), "routes", [])
-        for route in routes:
-            path = str(getattr(route, "path", "") or "")
-            for seg in re.findall(r"([a-zA-Z]\w{2,})", path.lower()):
-                route_keywords.add(seg)
-            cleaned = path.strip("/")
-            if cleaned:
-                first = cleaned.split("/")[0]
-                if first:
-                    safe_prefixes.add(first.lower())
+        from ..runtime_policy import route_keywords as discover_keywords
+        route_keywords, safe_prefixes = discover_keywords(app)
         self.legitimate_path_keywords = default_legitimate | route_keywords
         self.safe_prefixes = safe_prefixes
 
@@ -94,9 +83,14 @@ class IPAndKeywordBlockMiddleware(BaseHTTPMiddleware):
         if is_exempt(request):
             return await call_next(request)
 
+        if self._source_app is not request.app:
+            self._source_app = request.app
+            self._init_rich_policy(request.app)
+
         ip = get_ip(request)
         path = request.url.path.lower()
-        path_exists = request.scope.get("route") is not None
+        from ..csv_pipeline import route_facts
+        path_exists = route_facts(request.app.router, request.scope)[1]
 
         if BlocklistManager.is_blocked(ip):
             request.state.aiwaf_blocked = True

@@ -55,7 +55,7 @@ STATIC_KW = [
 
 
 class AIAnomalyMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, enabled: bool = True, path_rules=None):
+    def __init__(self, app, enabled: bool = True, path_rules=None, source_app=None):
         super().__init__(app)
         self.enabled = bool(enabled)
         self.path_rules = path_rules or []
@@ -65,8 +65,8 @@ class AIAnomalyMiddleware(BaseHTTPMiddleware):
         self.request_cache: Dict[str, Any] = {}  # Native snapshots or legacy tuple lists.
         self._history_lock = RLock()
         self._history_cleanup_at = 0.0
-        self._route_paths = set()
-        self._init_from_app(app)
+        self._source_app = source_app or app
+        self._init_from_app(self._source_app)
 
     def _init_from_app(self, app):
         # Pull settings from attached AIWAF config when available.
@@ -80,23 +80,14 @@ class AIAnomalyMiddleware(BaseHTTPMiddleware):
         except Exception:
             pass
 
-        # Collect route paths for best-effort "path exists" decisions on history entries.
-        try:
-            routes = getattr(getattr(app, "router", None), "routes", []) or []
-            for route in routes:
-                p = str(getattr(route, "path", "") or "")
-                if p:
-                    self._route_paths.add(p)
-        except Exception:
-            pass
+        from ..runtime_policy import load_trained_model
+        if self.model is None:
+            self.model = load_trained_model(getattr(getattr(app, "state", None), "aiwaf_config", None))
 
     def _path_exists(self, path: str) -> bool:
-        # Best-effort: exact match against known route templates.
-        try:
-            candidate = (path or "").split("?", 1)[0]
-            return candidate in self._route_paths
-        except Exception:
-            return False
+        from ..csv_pipeline import route_facts
+        scope = dict(type="http", path=(path or "").split("?", 1)[0], method="GET", root_path="", headers=[])
+        return route_facts(getattr(self._source_app, "router", None), scope)[1]
 
     async def dispatch(self, request, call_next):
         if not self.enabled:
@@ -105,6 +96,10 @@ class AIAnomalyMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         if is_exempt(request):
             return await call_next(request)
+
+        if self._source_app is not request.app:
+            self._source_app = request.app
+            self._init_from_app(request.app)
 
         ip = get_ip(request)
         if get_exemption_store().is_exempted(ip):

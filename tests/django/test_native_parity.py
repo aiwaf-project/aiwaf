@@ -315,3 +315,56 @@ class GeoParityTests(ParityTestCase):
 
         GeoBlockedCountry.objects.create(country_code="GB")
         self.assertCountriesAlike(["US", "GB", "CN"], AIWAF_GEO_BLOCK_ENABLED=True)
+
+
+
+LOGGER = "aiwaf.django.middleware_logger.AIWAFLoggerMiddleware"
+
+
+class LoggerParityTests(ParityTestCase):
+    """The regular logger middleware logs the same requests beside either pipeline, wherever it's listed."""
+
+    def logged(self, native, middleware, requests, **settings):
+        from aiwaf.core.logs import csv_log_path
+        from aiwaf.django.models import BlacklistEntry
+
+        BlacklistEntry.objects.all().delete()
+        ParityTestCase.base += 1
+        with TemporaryDirectory() as directory:
+            log = os.path.join(directory, "requests.log")
+            with settings_for(directory, MIDDLEWARE=middleware, ROOT_URLCONF=__name__, AIWAF_STORAGE_MODE="models",
+                              AIWAF_MIDDLEWARE_LOGGING=True, AIWAF_MIDDLEWARE_LOG=log, AIWAF_MIDDLEWARE_DB=False,
+                              AIWAF_NATIVE_PIPELINE=None if native else False, **settings):
+                probe = Client(REMOTE_ADDR=f"198.{50 + self.base // 250}.{self.base % 250}.250", **BROWSER)
+                self.assertEqual("NativeAIWAFMiddleware" in middleware_types(probe), native, middleware)
+                statuses = []
+                for index, (method, path) in enumerate(requests):
+                    client = Client(REMOTE_ADDR=f"198.{50 + self.base // 250}.{self.base % 250}.{index + 1}", **BROWSER)
+                    statuses.append(getattr(client, method)(path).status_code)
+                    if path == "/items":
+                        statuses.append(client.get(path).status_code)  # Over the rate limit of one.
+            with open(csv_log_path(log)) as file:
+                rows = [line.split(",")[3:5] for line in file.read().splitlines()[1:]]
+        # The probe's own request is the first row.
+        return statuses, rows[1:]
+
+    def assertLoggedAlike(self, middleware, **settings):
+        requests = [("get", "/items"), ("get", "/wp-login.php"), ("get", "/user/not-a-uuid/"), ("get", "/nothing")]
+        regular = self.logged(False, middleware, requests, AIWAF_RATE_MAX=1, AIWAF_RATE_FLOOD=10, **settings)
+        native = self.logged(True, middleware, requests, AIWAF_RATE_MAX=1, AIWAF_RATE_FLOOD=10, **settings)
+        if os.environ.get("AIWAF_PARITY_PRINT"):
+            print(middleware.index(LOGGER), regular)
+        self.assertEqual(native, regular)
+        return regular
+
+    def test_wherever_the_logger_is_listed(self):
+        stages = STAGES  # Sessions, authentication, then six AIWAF stages.
+        for position in range(2, len(stages) + 1):
+            middleware = stages[:position] + [LOGGER] + stages[position:]
+            self.assertLoggedAlike(middleware)
+
+    def test_the_logger_between_keyword_and_rate_checks(self):
+        statuses, rows = self.assertLoggedAlike(STAGES[:3] + [LOGGER] + STAGES[3:])
+        # The keyword block happened before the logger, the rate-limit block after it.
+        self.assertIn(["/items", "429"], rows)
+        self.assertNotIn(["/wp-login.php", "403"], rows)

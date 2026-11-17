@@ -1,5 +1,30 @@
 # Changelog
 
+## Python 1.2.4 / aiwaf-rust 0.2.12 / Node.js 1.2.3 / WASM 0.2.9 — prepared release
+
+- **Release note:** Python 1.2.3, aiwaf-rust 0.2.11 and aiwaf-wasm 0.2.8 are published; npm
+  `aiwaf` 1.2.3 isn't yet, so it ships the Node.js changes of both sections. Python 1.2.4 still
+  needs only aiwaf-rust 0.2.11, and npm `aiwaf` only aiwaf-wasm 0.2.8: the features below that
+  need the newer engines fall back to the regular middleware without them.
+- **Fix (FastAPI, regular and native):** load the trained JSON model configured by
+  `ai_anomaly.model_path` (or `AIWAF_MODEL_PATH`) at middleware startup. Missing or invalid
+  artifacts log a warning and leave model scoring disabled. Route discovery now uses the
+  application router, including mounted and parameterized paths, for keyword protections
+  and regular anomaly history checks.
+- Django: the regular logger middleware may be listed between other AIWAF middleware and still
+  run beside the native pipeline (with aiwaf-rust 0.2.12, whose request context now names the
+  stage that blocked). It logs what it logged beside the regular chain: not the blocks of
+  stages listed before it, and, for a block decided after the response by such a stage, the
+  response it saw. Native UUID blocks are now returned from `process_view`, where the regular
+  UUID check returns them, so other middleware's request hooks run first, as before, and a
+  logger listed anywhere records them.
+- **Fix (Node.js, regular and native):** restore default login prefixes for the relaxed
+  login form timing threshold. Explicit `AIWAF_LOGIN_PATH_PREFIXES: []` still disables them.
+- Node.js: `AIWAF_SUSPICIOUS_USER_AGENTS` and `AIWAF_LEGITIMATE_BOTS` are matched in JavaScript,
+  by the adapter, and the engine takes the verdict (with aiwaf-wasm 0.2.9; with 0.2.8, an app
+  with its own lists keeps the regular middleware). Patterns with any
+  flags, and JavaScript-only syntax such as lookbehind, now carry over.
+
 ## Python 1.2.3 / aiwaf-rust 0.2.11 / Node.js 1.2.3 / WASM 0.2.8 / Java 1.3.7 — prepared release
 
 - **Upgrade order:** publish aiwaf-rust 0.2.11 and aiwaf-wasm 0.2.8 before Python 1.2.3 and
@@ -171,8 +196,6 @@
 - **Fix (Flask):** when the anomaly model blocked a request after its view ran, the regular
   middleware returned a `(body, 403)` tuple from `after_request`, which Flask can't send, so the
   request failed with a 500. It now answers 403.
-- FastAPI's regular anomaly middleware never loads a trained model, so neither pipeline uses
-  one there; `aiwaf train` saves one that only Django, Flask and Node.js read.
 - Python: `AIWAF_REQUIRED_HEADERS` given per method (a dict with `DEFAULT`) carries over to the
   native pipeline in Django and Flask, with aiwaf-rust 0.2.11.
 - aiwaf-rust 0.2.11 and aiwaf-wasm 0.2.8: the header check takes the app's caps and blocked

@@ -84,6 +84,10 @@ def run(tmp_path, monkeypatch, native, cases, **values):
         return {"ok": True}
 
     aiwaf = AIWAF(app, config=config, native_pipeline=None if native else False)
+
+    @app.get("/later/{rest}")
+    async def later(rest: str):
+        return {"ok": True}
     # Countries stored as blocked, added once AIWAF has set up its storage.
     from aiwaf.core.runtime_storage import get_geo_block_store
 
@@ -160,6 +164,9 @@ LEARNING = [
      ("get", "/console-debug", {}), ("get", "/reports-archive", {}), ("get", "/legacy-filemanager", {}), ("get", "/items", {})],
     # FastAPI learns a segment that the query repeats beside script words.
     [("get", "/catalog-pages/browse?sort=catalog-pages alert", {})], [("get", "/catalog-pages", {})],
+    # Keyword blocks skip paths under the app's own route prefixes, including routes added after
+    # AIWAF(app).
+    [("get", "/items/catalog", {}), ("get", "/later/catalog", {}), ("get", "/elsewhere/catalog", {})],
 ]
 
 

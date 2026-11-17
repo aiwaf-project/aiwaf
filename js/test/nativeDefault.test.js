@@ -124,8 +124,10 @@ describe('the automatic choice', () => {
     };
     expect(await post('/members/signin/')).toBe(200);
     expect(await post('/login/')).toBe(403);
-    // Unset, the regular options give no login prefixes, so /login/ is checked like any form.
+    // Unset, default login prefixes relax timing; an explicit empty list disables that.
     send = await app({ AIWAF_MIN_FORM_TIME: 5, AIWAF_HEADER_VALIDATION: false });
+    expect(await post('/login/')).toBe(200);
+    send = await app({ AIWAF_MIN_FORM_TIME: 5, AIWAF_HEADER_VALIDATION: false, AIWAF_LOGIN_PATH_PREFIXES: [] });
     expect(await post('/login/')).toBe(403);
   });
 
@@ -308,7 +310,11 @@ describe('when the native pipeline can\'t start', () => {
     installed(aiwaf.NATIVE_DEFAULT_WASM);
     jest.spyOn(console, 'info').mockImplementation(() => {});
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
-    // A User-Agent pattern JavaScript accepts but the engine can't compile: only startup finds out.
+    // An engine without a feature the options need: only startup finds out.
+    const wasm = require('aiwaf-wasm');
+    const supports = wasm.NativeRequestPipeline.prototype.supports;
+    jest.spyOn(wasm.NativeRequestPipeline.prototype, 'supports')
+      .mockImplementation(function (feature) { return feature !== 'user_agent_verdict' && supports.call(this, feature); });
     const middleware = aiwaf({ AIWAF_HEADER_VALIDATION: true, AIWAF_SUSPICIOUS_USER_AGENTS: ['(?<=x)y'],
       AIWAF_PATH_MANIFEST: path.join(temp(), 'none.json') });
     const fallback = await middleware.ready;
@@ -414,6 +420,32 @@ describe('the regular and native pipelines answer alike', () => {
     await alike(17, { AIWAF_HEADER_VALIDATION: false }, cases);
   });
 
+  test('login forms, with the default prefixes and the app\'s own', async () => {
+    // A form posted 0.2 s after it was fetched: too fast, except on a login form.
+    const posts = async (mode, base, options) => {
+      const middleware = aiwaf({ MAX_REQ: 1000, FLOOD_REQ: 2000, AIWAF_PATH_MANIFEST: path.join(temp(), 'none.json'),
+        AIWAF_MIN_FORM_TIME: 5, ...(mode === 'regular' ? { AIWAF_NATIVE_PIPELINE: false } : {}), ...options });
+      if (middleware.ready) handles.push(await middleware.ready);
+      const app = express();
+      app.use(express.urlencoded({ extended: false }));
+      app.use(middleware);
+      app.use((_req, res) => res.json({ ok: true }));
+      const out = [];
+      for (const [index, url] of ['/login/', '/accounts/login/', '/Login/', '/form/', '/signin/next'].entries()) {
+        const headers = { ...browser, 'x-forwarded-for': `198.18.${base}.${index + 1}` };
+        await request(app).get(url).set(headers);
+        await new Promise(resolve => setTimeout(resolve, 200));
+        out.push((await request(app).post(url).set(headers).type('form').send('a=1')).status);
+      }
+      return out;
+    };
+    for (const [options, base] of [[{}, 33], [{ AIWAF_LOGIN_PATH_PREFIXES: [] }, 35], [{ AIWAF_LOGIN_PATH_PREFIXES: ['/form/'] }, 37]]) {
+      const regularAnswers = await posts('regular', base, options);
+      expect(await posts('native', base + 1, options)).toEqual(regularAnswers);
+      if (!options.AIWAF_LOGIN_PATH_PREFIXES) expect(regularAnswers).toEqual([200, 200, 200, 403, 200]);
+    }
+  }, 30000);
+
   test('an asynchronous geoResolver', async () => {
     const geoResolver = async req => req.headers['x-test-country'];
     const answers = await alike(7, { AIWAF_GEO_BLOCK_ENABLED: true, AIWAF_GEO_BLOCK_COUNTRIES: ['CN'], geoResolver },
@@ -443,8 +475,15 @@ describe('the regular and native pipelines answer alike', () => {
     // The regular middleware's aiwaf-wasm check still uses its own lists afterwards.
     expect(await alike(19, lists, cases)).toEqual([403, 403, 403, 403]);
     expect(await alike(23, { ...lists, AIWAF_WASM_HEADER_VALIDATION: false }, cases)).toEqual([200, 403, 403, 200]);
-    // A pattern with other flags matches differently natively, so it keeps the regular middleware.
-    expect(regular(aiwaf({ AIWAF_HEADER_VALIDATION: true, AIWAF_SUSPICIOUS_USER_AGENTS: [/evil/g] }))).toBe(true);
+    // Patterns are tested in JavaScript, so flags and JavaScript-only syntax mean the same in both.
+    const flagged = { AIWAF_HEADER_VALIDATION: true, AIWAF_WASM_HEADER_VALIDATION: false,
+      AIWAF_SUSPICIOUS_USER_AGENTS: [/^evil/m, /scan.ner/s, /\u{e9}clair/u, '(?<=bad-)agent', /tool/g], AIWAF_LEGITIMATE_BOTS: [/^monitor/m] };
+    // Header values can't hold newlines, so m and s match as they do without them.
+    const agents = ['Evil/1 Mozilla/5.0', 'Mozilla/5.0 scan-ner', 'Mozilla/5.0 \u00e9clair Chrome', 'Mozilla/5.0 bad-agent x',
+      'Mozilla/5.0 tool/1', 'Mozilla/5.0 tool/2', 'Mozilla/5.0 Chrome/130 Safari/537.36', 'monitor/2 tool'];
+    const answers = await alike(41, flagged, agents.map(agent => ['get', '/docs', { 'user-agent': agent }]));
+    expect(answers).toContain(403);
+    expect(answers[6]).toBe(200);
   });
 
   test('a block records the request\'s extended info when the app captures it', async () => {
