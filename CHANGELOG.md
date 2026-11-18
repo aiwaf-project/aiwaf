@@ -1,12 +1,11 @@
 # Changelog
 
-## Python 1.2.5 / aiwaf-rust 0.2.13 / Node.js 1.2.4 / WASM 0.2.10 / Java 1.3.8 — prepared release
+## Python 1.2.6 / aiwaf-rust 0.2.13 / Node.js 1.2.5 / WASM 0.2.10 / Java 1.3.9 — prepared release
 
 - **Release note:** publish aiwaf-rust 0.2.13 and aiwaf-wasm 0.2.10 first: they carry the
   route rules below, and Python requires `aiwaf-rust>=0.2.13`. npm `aiwaf` keeps
   `aiwaf-wasm ^0.2.9`, which picks up 0.2.10 once it's published (the lockfile can't name a
-  version before it exists). npm `aiwaf` 1.2.3 was staged but never released, and npm doesn't
-  reuse a version, so npm `aiwaf` 1.2.4 ships the Node.js changes of this section and the next.
+  version before it exists).
 - `AIWAF_PROFILE` (Python, Node.js and Java): `balanced` keeps every default; `strict` halves
   the rate and flood limits and turns on UUID scoring, header validation and the method policy
   where the runtime has them as settings; `monitor` is a dry run that logs "AIWAF monitor: would
@@ -19,7 +18,14 @@
   tricks (`//host`, `user@host`, `javascript:`), filter and quote breaks, `<!DOCTYPE`, nested
   quantifiers and `__proto__`. Plain absolute URLs pass the redirect rule, since the site's own
   host isn't known there.
-- Python requires `aiwaf-rust>=0.2.13` (was 0.2.11), and npm `aiwaf` `aiwaf-wasm ^0.2.9`
+
+## Python 1.2.5 / Node.js 1.2.4 / Java 1.3.8 — released
+
+- **Release note:** these need no new engine: Python requires `aiwaf-rust>=0.2.12` and npm
+  `aiwaf` `aiwaf-wasm ^0.2.9`, both already published. npm `aiwaf` 1.2.3 was staged but never
+  released, and npm doesn't reuse a version, so npm `aiwaf` 1.2.4 ships the Node.js changes of
+  this section and the next.
+- Python requires `aiwaf-rust>=0.2.12` (was 0.2.11), and npm `aiwaf` `aiwaf-wasm ^0.2.9`
   (was ^0.2.8), so the features of the previous section that needed the newer engines (the
   Django logger between other middleware, Node.js user-agent lists) work after an install
   instead of falling back to the regular middleware. Node.js picks the native pipeline by

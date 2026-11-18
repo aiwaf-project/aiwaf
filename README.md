@@ -39,15 +39,15 @@ the supported Redis backends when sharing limits across workers.
 
 Each package is versioned and released independently.
 
-Python 1.2.5, Rust/Python 0.2.13, Node.js 1.2.4, WASM 0.2.10, and Java 1.3.8 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
+Python 1.2.6, Rust/Python 0.2.13, Node.js 1.2.5, WASM 0.2.10, and Java 1.3.9 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
 
 | Runtime | Package | Repository version | Primary use |
 | --- | --- | ---: | --- |
-| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.2.5` | Django, Flask, and FastAPI protection |
-| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.2.4` | Express and Node framework middleware |
+| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.2.6` | Django, Flask, and FastAPI protection |
+| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.2.5` | Express and Node framework middleware |
 | Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.13` | Native Python acceleration and JSON model inference |
 | WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.10` | Rust detection and model primitives for JavaScript |
-| Java | `io.github.aiwaf-project:aiwaf-java` | `1.3.8` | Spring MVC and Jakarta Servlet protection |
+| Java | `io.github.aiwaf-project:aiwaf-java` | `1.3.9` | Spring MVC and Jakarta Servlet protection |
 
 Supported framework integrations include Django, Flask, FastAPI, Express, Fastify, Hapi, Koa, NestJS, Next.js API routes, AdonisJS, Sails.js, Spring MVC, and Jakarta Servlet.
 
@@ -331,7 +331,7 @@ pip install "aiwaf[django]"
 pip install "aiwaf[flask]"
 pip install "aiwaf[fastapi]"
 
-# Backward-compatible alias; Python 1.2.5 already installs aiwaf-rust
+# Backward-compatible alias; Python 1.2.6 already installs aiwaf-rust
 pip install "aiwaf[rust]"
 
 # Node.js middleware
@@ -341,13 +341,13 @@ npm install aiwaf
 npm install aiwaf-wasm
 ```
 
-Java 1.3.8, after it is published to Maven Central:
+Java 1.3.9, after it is published to Maven Central:
 
 ```xml
 <dependency>
   <groupId>io.github.aiwaf-project</groupId>
   <artifactId>aiwaf-java</artifactId>
-  <version>1.3.8</version>
+  <version>1.3.9</version>
 </dependency>
 ```
 
@@ -355,7 +355,7 @@ Java 1.3.8, after it is published to Maven Central:
 
 The Python package requires Python 3.10 or newer. Framework dependencies are optional, so install only the extra needed by the application.
 
-Python 1.2.5 requires `aiwaf-rust>=0.2.13`; the `rust` extra remains an installation
+Python 1.2.6 requires `aiwaf-rust>=0.2.13`; the `rust` extra remains an installation
 alias. Publish the matching Rust wheel with `NativeCSVPipeline` support before
 the Python release. The Rust release workflow builds Linux x86_64/aarch64,
 musl x86_64, macOS x86_64/arm64 and Windows x86_64 wheels and checks the native
@@ -1425,7 +1425,7 @@ cp -R ../licenses crates/aiwaf_wasm/pkg/
 
 ## Java package
 
-AIWAF Java 1.3.8 targets Java 17, Spring Framework 7.0, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
+AIWAF Java 1.3.9 targets Java 17, Spring Framework 7.0, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
 
 ### Core engine
 
@@ -1514,7 +1514,7 @@ UUID protection uses Python-compatible weighted signals: malformed input, valid 
 Generate a route manifest from the live Spring application rather than supplying controller methods manually:
 
 ```bash
-java -cp "your-app.jar:aiwaf-java-1.3.8.jar" \
+java -cp "your-app.jar:aiwaf-java-1.3.9.jar" \
   com.aiwaf.cli.AiwafConsole init \
   --app com.example.Application \
   --output .aiwaf/paths.json
@@ -1742,11 +1742,11 @@ Release versions and tags must match the relevant manifest.
 
 | Package | Manifest | Tag | Workflow |
 | --- | --- | --- | --- |
-| Python `aiwaf` | `pyproject.toml` | `python-v1.2.5` | `python-publish.yml` |
-| npm `aiwaf` | `js/package.json` | `js-v1.2.4` | `npm-publish.yml` |
+| Python `aiwaf` | `pyproject.toml` | `python-v1.2.6` | `python-publish.yml` |
+| npm `aiwaf` | `js/package.json` | `js-v1.2.5` | `npm-publish.yml` |
 | PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.13` | `rust-publish.yml` |
 | npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.10` | `wasm-publish.yml` |
-| Maven `aiwaf-java` | `java/pom.xml` | `java-v1.3.8` | `java-publish.yml` |
+| Maven `aiwaf-java` | `java/pom.xml` | `java-v1.3.9` | `java-publish.yml` |
 
 Python and Rust publish to PyPI with trusted publishing. The npm workflows use npm trusted publishing and stage packages for approval. Configure the trusted publisher with organization `aiwaf-project`, repository `aiwaf`, the exact workflow filename, and the environment used by that workflow.
 
@@ -1754,12 +1754,12 @@ Java publishing uses the protected `maven-publish` environment plus `GPG_PRIVATE
 
 Registry releases are immutable. Increment the relevant manifest version before publishing another release.
 
-This release is Python `aiwaf 1.2.5`, npm `aiwaf 1.2.4`, Java `aiwaf-java 1.3.8`,
-`aiwaf-rust 0.2.13` and `aiwaf-wasm 0.2.10`. Publish the two engines first: they carry the
-route rules for the new operations, and Python requires `aiwaf-rust>=0.2.13`. npm `aiwaf`
-keeps `aiwaf-wasm ^0.2.9`, which picks up 0.2.10 once it's published. npm `aiwaf` 1.2.3 was
-staged but never released, and npm doesn't reuse a version, so 1.2.4 also ships the Node.js
-changes listed under Python 1.2.4.
+This release is Python `aiwaf 1.2.6`, npm `aiwaf 1.2.5`, Java `aiwaf-java 1.3.9`,
+`aiwaf-rust 0.2.13` and `aiwaf-wasm 0.2.10`: `AIWAF_PROFILE` and the route checks for the new
+operations. Python 1.2.5, npm 1.2.4, Java 1.3.8, `aiwaf-rust 0.2.12` and `aiwaf-wasm 0.2.9` are
+already published. Publish the two engines first: they carry the new route rules, and Python
+requires `aiwaf-rust>=0.2.13`. npm `aiwaf` keeps `aiwaf-wasm ^0.2.9`, which picks up 0.2.10
+once it's published.
 
 ## Security and limitations
 
