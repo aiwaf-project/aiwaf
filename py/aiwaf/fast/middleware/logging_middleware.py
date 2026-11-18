@@ -136,3 +136,49 @@ class AIWAFLoggingMiddleware(BaseHTTPMiddleware):
         )
         with open(self.aiwaf_log_file, "a", encoding="utf-8") as f:
             f.write(line + "\n")
+
+
+class ASGIRequestLogger(AIWAFLoggingMiddleware):
+    """The same request logging as AIWAFLoggingMiddleware, as plain ASGI middleware.
+
+    Starlette's BaseHTTPMiddleware wraps every request in extra tasks and streams, which costs
+    more than the native pipeline itself. This writes the same files, in the same formats, at the
+    same moment: when the response starts, before its body is sent.
+    """
+
+    def __init__(self, app, log_dir="aiwaf_logs", log_format="combined", path_rules=None):
+        # BaseHTTPMiddleware's own setup isn't needed; only the logger's.
+        self.app = app
+        self.log_dir = Path(log_dir)
+        self.log_dir.mkdir(exist_ok=True)
+        self.log_format = log_format
+        self.path_rules = path_rules or []
+        self.access_log_file = self.log_dir / "access.log"
+        self.error_log_file = self.log_dir / "error.log"
+        self.aiwaf_log_file = self.log_dir / "aiwaf.log"
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        from types import SimpleNamespace
+        from starlette.datastructures import Headers
+        from starlette.requests import Request
+
+        request = Request(scope)
+        if not should_apply_middleware(request, "logging", self.path_rules):
+            return await self.app(scope, receive, send)
+        start_time = time.time()
+        request.state.aiwaf_blocked = getattr(request.state, "aiwaf_blocked", False)
+        request.state.aiwaf_block_reason = getattr(request.state, "aiwaf_block_reason", "")
+
+        async def logged_send(message):
+            if message["type"] == "http.response.start":
+                response = SimpleNamespace(status_code=message["status"], headers=Headers(raw=message.get("headers", [])))
+                self._log_access(request, response, start_time)
+                if response.status_code >= 400:
+                    self._log_error(request, response)
+                if getattr(request.state, "aiwaf_blocked", False):
+                    self._log_aiwaf_event(request)
+            await send(message)
+
+        await self.app(scope, receive, logged_send)

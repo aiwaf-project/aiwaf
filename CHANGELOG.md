@@ -18,6 +18,11 @@
   response it saw. Native UUID blocks are now returned from `process_view`, where the regular
   UUID check returns them, so other middleware's request hooks run first, as before, and a
   logger listed anywhere records them.
+- FastAPI: beside the native pipeline, requests are logged by a plain ASGI version of the
+  regular logging middleware, which writes the same files and lines without Starlette's
+  BaseHTTPMiddleware. In local benchmarks, AIWAF's own cost on a native FastAPI request with
+  request logging fell from about 0.38 ms to 0.22 ms (0.12 ms without logging), against about
+  1.7 ms for the regular middleware.
 - **Fix (Node.js, regular and native):** restore default login prefixes for the relaxed
   login form timing threshold. Explicit `AIWAF_LOGIN_PATH_PREFIXES: []` still disables them.
 - Node.js: `AIWAF_SUSPICIOUS_USER_AGENTS` and `AIWAF_LEGITIMATE_BOTS` are matched in JavaScript,

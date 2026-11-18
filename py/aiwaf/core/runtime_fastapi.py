@@ -354,10 +354,11 @@ class AIWAF:
             return False
         log_native_default("FastAPI")
         if regular_log:
-            # Registered first, innermost, where the regular chain puts it.
-            from aiwaf.fast.middleware.logging_middleware import AIWAFLoggingMiddleware
+            # Registered first, innermost, where the regular chain puts it. The same logging as
+            # the regular middleware's, as plain ASGI, which costs far less.
+            from aiwaf.fast.middleware.logging_middleware import ASGIRequestLogger
 
-            self.app.add_middleware(AIWAFLoggingMiddleware, log_dir=logging_cfg.get("log_dir", "aiwaf_logs"),
+            self.app.add_middleware(ASGIRequestLogger, log_dir=logging_cfg.get("log_dir", "aiwaf_logs"),
                                     log_format=logging_cfg.get("log_format", "combined"), path_rules=path_rules)
         self.app.add_middleware(NativeAIWAFMiddleware, config=dict(conversion.config), aiwaf_config=self.config,
                                 stores_ready=True, source_app=self.app)

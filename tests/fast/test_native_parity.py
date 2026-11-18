@@ -225,3 +225,50 @@ def test_what_the_trainer_reads_from_the_request_log(tmp_path, monkeypatch, log_
     if os.environ.get("AIWAF_PARITY_PRINT"):
         print(log_format, regular, native)
     assert native == regular
+
+
+def masked_logs(tmp_path, native):
+    """Every log file a pipeline wrote, without what differs between runs: times and addresses."""
+    import re
+
+    files = {}
+    for name in ("access.log", "error.log", "aiwaf.log"):
+        file = tmp_path / f"logs-{native}" / name
+        if file.exists():
+            text = file.read_text()
+            text = re.sub(r"\d{4}-\d\d-\d\dT[\d:.]+|\[\d\d/\w{3}/\d{4}:[\d:]+ \+0000\]|\[\d{4}-\d\d-\d\d [\d:]+\]", "<time>", text)
+            text = re.sub(r"\b198\.\d+\.\d+\.\d+\b", "<ip>", text)
+            text = re.sub(r'(\d+)ms\b|("response_time_ms": )\d+|,\d+,(?=[^,]*,[^,]*,[^,]*,[^,]*$)', lambda m: (m.group(2) or "") + "<ms>" if m.group(2) or m.group(1) else m.group(0), text)
+            files[name] = text
+    return files
+
+
+@pytest.mark.parametrize("log_format", ["combined", "json", "csv"])
+def test_the_log_files_match_line_for_line(tmp_path, monkeypatch, log_format):
+    import csv
+    import io
+    import json
+
+    monkeypatch.setitem(LOGGING, "on", True)
+    alike(tmp_path, monkeypatch, LOGGED + [[("get", "/user/not-a-uuid", {})]],
+          **{"logging_middleware.log_format": log_format})
+    logs = {native: masked_logs(tmp_path, native) for native in (False, True)}
+    raw = {native: (tmp_path / f"logs-{native}" / "access.log").read_text() for native in (False, True)}
+    if log_format == "csv":
+        # Compare the CSV rows without their times and response times.
+        def rows(text):
+            data = list(csv.DictReader(io.StringIO(text)))
+            return [{k: v for k, v in row.items() if k not in ("timestamp", "response_time_ms", "ip")} for row in data]
+        assert rows(raw[True]) == rows(raw[False])
+        for name in ("error.log", "aiwaf.log"):
+            assert logs[True].get(name) == logs[False].get(name)
+    elif log_format == "json":
+        def records(text):
+            return [{k: v for k, v in json.loads(line).items() if k not in ("timestamp", "response_time_ms", "ip")}
+                    for line in text.splitlines()]
+        assert records(raw[True]) == records(raw[False])
+        for name in ("error.log", "aiwaf.log"):
+            assert logs[True].get(name) == logs[False].get(name)
+    else:
+        assert logs[True] == logs[False]
+    assert logs[True]["access.log"]

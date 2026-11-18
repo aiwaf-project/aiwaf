@@ -33,7 +33,7 @@ def test_aiwaf_runs_as_native_when_everything_carries_over(monkeypatch, tmp_path
         app, aiwaf = build(monkeypatch, tmp_path)
     assert aiwaf.native is True
     # The native pipeline, and the regular request logger beside it, innermost.
-    from aiwaf.fast.middleware.logging_middleware import AIWAFLoggingMiddleware
+    from aiwaf.fast.middleware.logging_middleware import ASGIRequestLogger as AIWAFLoggingMiddleware
 
     assert [m.cls for m in app.user_middleware] in ([NativeAIWAFMiddleware], [NativeAIWAFMiddleware, AIWAFLoggingMiddleware])
     assert "running the native pipeline for FastAPI" in caplog.text
@@ -103,7 +103,7 @@ def test_a_chosen_log_format_is_written_by_the_regular_logger_beside_the_native_
     import json
     from aiwaf.core.runtime_config import AIWAFConfig
     from aiwaf.fast.csv_pipeline import NativeAIWAFMiddleware
-    from aiwaf.fast.middleware.logging_middleware import AIWAFLoggingMiddleware
+    from aiwaf.fast.middleware.logging_middleware import ASGIRequestLogger as AIWAFLoggingMiddleware
 
     config = AIWAFConfig(load_from_env=False)
     config.set("logging_middleware.enabled", True)
