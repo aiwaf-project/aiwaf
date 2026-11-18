@@ -1,6 +1,7 @@
 """
 Main AIWAF class - orchestrates all security middleware components
 """
+import os
 import logging
 import time
 from typing import Optional, Dict, Any, Set, List
@@ -86,6 +87,7 @@ class AIWAF:
             self.config = config
         else:
             self.config = initialize_config(config_file, **config_overrides)
+        self.profile = self._apply_profile(config_overrides.get("profile"))
         
         # Initialize storage
         storage_config = self.config.get_storage_config()
@@ -129,6 +131,37 @@ class AIWAF:
         
         logger.info("AIWAF integrated with FastAPI app")
     
+    def _apply_profile(self, chosen=None) -> str:
+        """AIWAF_PROFILE: its values replace those still at their built-in defaults."""
+        from aiwaf.core import profiles
+
+        name = profiles.activate(chosen or self.config.get(profiles.PROFILE_SETTING) or self.config.get("profile"))
+        defaults = AIWAFConfig(load_from_env=False)
+        nested = {
+            "AIWAF_RATE_MAX": "rate_limiting.max_requests",
+            "AIWAF_RATE_FLOOD": "rate_limiting.flood_threshold",
+            "AIWAF_HEADER_VALIDATION_ENABLED": "header_validation.enabled",
+            "AIWAF_SQL_INJECTION_MODE": "ip_keyword_block.sql_injection_mode",
+        }
+        values = profiles.settings_for(name, defaults.get("rate_limiting.max_requests", 20),
+                                       defaults.get("rate_limiting.flood_threshold", 40))
+        for setting, value in values.items():
+            if setting in nested:
+                if self.config.get(nested[setting]) == defaults.get(nested[setting]):
+                    self.config.set(nested[setting], value)
+            elif self.config.get(setting) is None and setting not in os.environ:
+                self.config.set(setting, value)
+        if name == "monitor":
+            profiles.LOGGER.warning("AIWAF monitor: nothing is blocked; what would be blocked is logged here")
+        return name
+
+    def _add(self, middleware, **options):
+        """Adds AIWAF middleware; in monitor mode it logs what it would block instead of blocking."""
+        from aiwaf.core import profiles
+        from aiwaf.fast.monitor import monitored
+
+        self.app.add_middleware(monitored(middleware) if profiles.monitoring() else middleware, **options)
+
     def _add_middleware(self):
         """Add middleware to the FastAPI app."""
         path_rules = get_effective_path_rules(
@@ -181,7 +214,7 @@ class AIWAF:
         # Geo -> IP/Keyword -> Rate -> AI -> Honeypot -> UUID -> Header -> Logging
         if "logging_middleware" in enabled and self.config.is_enabled("logging_middleware"):
             logging_cfg = self.config.get("logging_middleware", {})
-            self.app.add_middleware(
+            self._add(
                 AIWAFLoggingMiddleware,
                 log_dir=logging_cfg.get("log_dir", "aiwaf_logs"),
                 log_format=logging_cfg.get("log_format", "combined"),
@@ -193,7 +226,7 @@ class AIWAF:
             header_config = self.config.get_header_validation_config()
             
             # Add the middleware to FastAPI
-            self.app.add_middleware(
+            self._add(
                 HeaderValidationMiddleware,
                 enabled=header_config.get('enabled', True),
                 block_suspicious=header_config.get('block_suspicious', True),
@@ -208,11 +241,11 @@ class AIWAF:
             logger.info("Header validation middleware added")
 
         if "uuid_tamper" in enabled and self.config.is_enabled("uuid_tamper"):
-            self.app.add_middleware(UUIDTamperMiddleware, path_rules=path_rules)
+            self._add(UUIDTamperMiddleware, path_rules=path_rules)
 
         if "honeypot" in enabled and self.config.is_enabled("honeypot"):
             honeypot_cfg = self.config.get("honeypot", {})
-            self.app.add_middleware(
+            self._add(
                 HoneypotTimingMiddleware,
                 min_form_time=honeypot_cfg.get("min_form_time", 1.0),
                 max_page_time=honeypot_cfg.get("max_page_time", 240),
@@ -222,7 +255,7 @@ class AIWAF:
 
         if "ai_anomaly" in enabled and self.config.is_enabled("ai_anomaly"):
             anomaly_cfg = self.config.get("ai_anomaly", {})
-            self.app.add_middleware(
+            self._add(
                 AIAnomalyMiddleware,
                 source_app=self.app,
                 enabled=anomaly_cfg.get("enabled", True),
@@ -244,7 +277,7 @@ class AIWAF:
                     )
             except Exception:
                 cache_backend = None
-            self.app.add_middleware(
+            self._add(
                 RateLimitMiddleware,
                 max_requests=rate_cfg.get("max_requests", 20),
                 window_seconds=rate_cfg.get("window_seconds", 10),
@@ -257,7 +290,7 @@ class AIWAF:
 
         if "ip_keyword_block" in enabled and self.config.is_enabled("ip_keyword_block"):
             ipkw_cfg = self.config.get("ip_keyword_block", {})
-            self.app.add_middleware(
+            self._add(
                 IPAndKeywordBlockMiddleware,
                 source_app=self.app,
                 malicious_keywords=ipkw_cfg.get("malicious_keywords"),
@@ -273,7 +306,7 @@ class AIWAF:
             dynamic_block_countries=get_geo_block_store().get_countries(),
         )
         if "geo_block" in enabled and geo_runtime_enabled:
-            self.app.add_middleware(
+            self._add(
                 GeoBlockMiddleware,
                 enabled=geo_runtime_enabled,
                 allow_countries=geo_cfg.get("allow_countries", []),
@@ -340,6 +373,10 @@ class AIWAF:
         if "logging" in stages:
             log_dir = (self.config.get("logging_middleware", {}) or {}).get("log_dir", "aiwaf_logs")
             native_access_log(conversion, "logging_middleware", log_dir)
+        from aiwaf.core import profiles
+
+        if profiles.monitoring():
+            return False  # Monitor runs the regular middleware, whose every block can be logged instead.
         if not native_by_default(conversion, choice=self.native_pipeline, framework="FastAPI"):
             return False
         from aiwaf.core.native_settings import log_native_fallback

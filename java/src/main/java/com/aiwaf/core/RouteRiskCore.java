@@ -71,6 +71,23 @@ public final class RouteRiskCore {
                 rule("template_expression", "\\{\\{.{0,200}\\}\\}|\\{%.{0,200}%\\}|\\$\\{.{0,200}\\}|<%.{0,200}%>|#\\{.{0,200}\\}")));
         rules.put("deserialization", List.of(new Rule("deserialization_marker", Pattern.compile(
                 "^rO0AB|^aced0005|^gASV|!!python/|!!javax\\.|^O:\\d+:\"|__reduce__|_\\$\\$ND_FUNC\\$\\$_"))));
+        rules.put("xss", List.of(
+                rule("xss_markup", "<\\s*/?\\s*(?:script|iframe|object|embed|svg|math|img|body|link|meta|style|base|form|input|video|audio|details)\\b"),
+                rule("xss_event_handler", "[\\s\"'/]on[a-z]{3,}\\s*="),
+                rule("xss_script_url", "(?:java|vb)script\\s*:|data\\s*:\\s*text/html")));
+        rules.put("redirect", List.of(
+                rule("redirect_external", "^\\s*(?:[/\\\\]{2}|/\\s*\\\\|(?:java|vb)script\\s*:|data\\s*:|https?:(?:[^/\\\\]|[/\\\\][^/\\\\])|https?:[/\\\\]{2}[^/?#\\s]*@)")));
+        rules.put("ldap", List.of(
+                rule("ldap_filter", "\\)\\(|\\(\\s*[|&!]\\s*\\(|^\\s*\\*\\s*\\)|\\x00")));
+        rules.put("xpath", List.of(
+                rule("xpath_quote_break", "['\"]\\s*(?:or|and)\\s+['\"]?\\w+['\"]?\\s*!?=|['\"]\\s*\\]|['\"]\\s*\\|\\s*/"),
+                rule("xpath_tautology", "\\bor\\s+['\"]?1['\"]?\\s*=\\s*['\"]?1")));
+        rules.put("xxe", List.of(
+                rule("xxe_entity", "<!\\s*(?:DOCTYPE|ENTITY)")));
+        rules.put("redos", List.of(
+                rule("redos_nested_quantifier", "\\([^()]*[+*][^()]*\\)\\s*(?:[+*]|\\{\\d)")));
+        rules.put("prototype", List.of(
+                rule("prototype_key", "__proto__|\\bconstructor\\s*(?:[.\\]\"']\\s*)+\\[?\\s*[\"']?prototype|^\\s*(?:constructor|prototype)\\s*$")));
         return Map.copyOf(rules);
     }
 

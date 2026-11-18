@@ -22,7 +22,10 @@ LOGGER = logging.getLogger("aiwaf.injection_risk")
 MODE_SETTING = "AIWAF_INJECTION_RISK_MODE"
 
 # The operations a saved finding can name. The rules for each run in aiwaf-rust.
-SINKS = ("sql", "nosql", "command", "path", "ssrf", "code", "template", "deserialization")
+SINKS = (
+    "sql", "nosql", "command", "path", "ssrf", "code", "template", "deserialization", "xss", "redirect", "ldap", "xpath",
+    "xxe", "redos", "prototype",
+)
 
 _KEY_IN_SOURCE = re.compile(r"\['(.+?)'\]")
 

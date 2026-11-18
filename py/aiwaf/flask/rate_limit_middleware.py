@@ -19,12 +19,15 @@ from aiwaf.core.rate_limit import (
 _aiwaf_cache = {}
 _default_cache_backend = DictCacheBackend(_aiwaf_cache)
 
+from .monitor import monitored_init
+
 class RateLimitMiddleware:
     def __init__(self, app=None):
         self.app = app
         if app is not None:
             self.init_app(app)
 
+    @monitored_init
     def init_app(self, app):
         if not getattr(app, "_aiwaf_rate_cache_backend", None):
             app._aiwaf_rate_cache_backend = _resolve_rate_cache_backend(app)

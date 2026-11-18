@@ -13,18 +13,24 @@ def apply_legacy_settings() -> None:
         return
     _APPLIED = True
 
+    def set_if_missing(name, value):
+        if not hasattr(settings, name):
+            setattr(settings, name, value)
+            return True
+        return False
+
+    # AIWAF_PROFILE fills in what isn't set explicitly; Django's rate defaults are 20 and 40.
+    from aiwaf.core import profiles
+
+    profiles.apply({name: getattr(settings, name) for name in dir(settings) if name == profiles.PROFILE_SETTING},
+                   set_if_missing, rate_max=20, rate_flood=40)
+
     legacy = getattr(settings, "AIWAF_SETTINGS", None)
     if not isinstance(legacy, dict):
         _expand_middleware_all_alias()
         return
 
     logger = logging.getLogger("aiwaf.settings")
-
-    def set_if_missing(name, value):
-        if not hasattr(settings, name):
-            setattr(settings, name, value)
-            return True
-        return False
 
     # Storage mode compatibility
     storage_type = legacy.get("STORAGE_TYPE")

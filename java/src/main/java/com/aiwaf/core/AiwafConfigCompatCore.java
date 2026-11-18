@@ -12,15 +12,25 @@ public final class AiwafConfigCompatCore {
     private AiwafConfigCompatCore() {}
 
     public static AiwafConfig fromStructured(Map<String, Object> settings) {
-        AiwafConfig cfg = new AiwafConfig();
+        AiwafConfig cfg = new AiwafConfig().applyProfile(profileOf(settings, null));
         applyStructured(cfg, settings);
         return cfg;
     }
 
     public static AiwafConfig fromStructuredAndEnv(Map<String, Object> settings, Map<String, String> env) {
-        AiwafConfig cfg = fromStructured(settings);
+        AiwafConfig cfg = new AiwafConfig().applyProfile(profileOf(settings, env));
+        applyStructured(cfg, settings);
         applyEnv(cfg, env);
         return cfg;
+    }
+
+    /** The profile named in settings ("profile" or "AIWAF_PROFILE"), else in the environment. */
+    public static String profileOf(Map<String, Object> settings, Map<String, String> env) {
+        Object named = settings == null ? null : settings.getOrDefault("profile", settings.get("AIWAF_PROFILE"));
+        if (named != null && !String.valueOf(named).isBlank()) {
+            return String.valueOf(named);
+        }
+        return env == null ? null : env.get("AIWAF_PROFILE");
     }
 
     public static void applyStructured(AiwafConfig cfg, Map<String, Object> settings) {

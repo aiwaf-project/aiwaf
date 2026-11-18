@@ -44,6 +44,11 @@ class FlaskStores(PipelineStores):
 
 class NativeAIWAF:
     def __init__(self, app, config=None, *, model=None, country_lookup=None, authenticated=None, honeypot_cache=None):
+        from aiwaf.core import profiles
+
+        if profiles.activate(app.config.get(profiles.PROFILE_SETTING)) == "monitor":
+            raise RuntimeError("AIWAF_PROFILE=monitor runs the regular middleware: use AIWAF(app) or the regular "
+                               "middleware instead of NativeAIWAF.")
         validate_fact_callback(country_lookup)
         validate_fact_callback(authenticated)
         if app.extensions.get("aiwaf") or app.extensions.get("aiwaf_csv_pipeline"):

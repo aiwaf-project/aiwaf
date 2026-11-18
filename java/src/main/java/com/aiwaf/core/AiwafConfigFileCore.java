@@ -25,9 +25,10 @@ public final class AiwafConfigFileCore {
     }
 
     public static AiwafConfig load(Path path, Map<String, String> environment) throws IOException {
-        AiwafConfig config = new AiwafConfig();
-        if (path != null && Files.exists(path)) {
-            AiwafConfigCompatCore.applyStructured(config, read(path));
+        Map<String, Object> settings = path != null && Files.exists(path) ? read(path) : null;
+        AiwafConfig config = new AiwafConfig().applyProfile(AiwafConfigCompatCore.profileOf(settings, environment));
+        if (settings != null) {
+            AiwafConfigCompatCore.applyStructured(config, settings);
         }
         AiwafConfigCompatCore.applyEnv(config, environment);
         List<String> errors = validate(config);
@@ -71,6 +72,9 @@ public final class AiwafConfigFileCore {
             return errors;
         }
         String backend = config.storageBackend == null ? "" : config.storageBackend.trim().toLowerCase();
+        if (!AiwafConfig.PROFILES.contains(config.profile)) {
+            errors.add("profile must be strict, balanced or monitor");
+        }
         if (config.sqlInjectionMode == null || !Set.of("block", "monitor", "off").contains(config.sqlInjectionMode)) {
             errors.add("security.sql_injection_mode must be block, monitor, or off");
         }

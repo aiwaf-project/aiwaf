@@ -9,6 +9,10 @@ class BlocklistManager:
     @staticmethod
     def block(ip, reason, extended_request_info=None):
         """Add IP to blocklist, but only if it's not exempted"""
+        from ..core.profiles import skip_blocklist
+
+        if skip_blocklist(ip, reason):
+            return
         if not should_block_ip(
             getattr(settings, "AIWAF_ENABLE_IP_BLOCKING", True),
             is_ip_exempted,

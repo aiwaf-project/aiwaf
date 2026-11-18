@@ -72,8 +72,12 @@ class AIWAF:
         from aiwaf.core.native_settings import (carry_model, log_native_default, log_native_fallback,
                                                 native_access_log, native_by_default, native_config)
 
+        from aiwaf.core import profiles
+
         if use_database is True:
             return None  # A database chosen in code, which the converter can't see.
+        if profiles.monitoring():
+            return None  # Monitor runs the regular middleware, whose every block can be logged instead.
         names = {name: value for name, value in app.config.items() if name.startswith("AIWAF_")}
         conversion = native_config(names, "flask")
         # The same stages the regular middleware would register.
@@ -162,6 +166,10 @@ class AIWAF:
 
     def init_app(self, app, middlewares: Iterable[str] | None = None, disable_middlewares: Iterable[str] | None = None, use_database=None):
         self.app = app
+        from aiwaf.core import profiles
+
+        # AIWAF_PROFILE fills in what isn't set explicitly; Flask's rate defaults are 20 and 40.
+        profiles.apply(app.config, app.config.setdefault, rate_max=20, rate_flood=40)
         if app.config.get('AIWAF_USE_CSV', True) and use_database is not True:
             from aiwaf.core.policy_csv_storage import PolicyCSVStorage
             from .storage import _get_data_dir

@@ -171,6 +171,39 @@ public final class AiwafConfig {
     public int requestBodyInspectionBytes = 64 * 1024;
     public boolean requestBodyInspectionEnabled = true;
     public String sqlInjectionMode = "block";
+    /**
+     * AIWAF_PROFILE: balanced keeps the defaults; strict halves the rate limits and turns header,
+     * method and UUID checks on; monitor is a dry run, logging what would be blocked and blocking
+     * nothing. Settings given explicitly win, since the profile is applied first.
+     */
+    public String profile = "balanced";
+    public static final java.util.List<String> PROFILES = java.util.List.of("strict", "balanced", "monitor");
+
+    /** Sets a profile's values; call it before applying explicit settings. */
+    public AiwafConfig applyProfile(String name) {
+        String chosen = name == null || name.isBlank() ? "balanced" : name.trim().toLowerCase(java.util.Locale.ROOT);
+        if (!PROFILES.contains(chosen)) {
+            throw new IllegalArgumentException("AIWAF_PROFILE must be one of strict, balanced, monitor, not " + name);
+        }
+        profile = chosen;
+        if (chosen.equals("strict")) {
+            rateLimitMax = Math.max(1, rateLimitMax / 2);
+            rateLimitFloodThreshold = Math.max(2, rateLimitFloodThreshold / 2);
+            headerValidationEnabled = true;
+            methodValidationEnabled = true;
+            uuidScoreEnabled = true;
+            sqlInjectionMode = "block";
+            injectionRiskMode = "block";
+        } else if (chosen.equals("monitor")) {
+            sqlInjectionMode = "monitor";
+            injectionRiskMode = "log";
+        }
+        return this;
+    }
+
+    public boolean monitoring() {
+        return "monitor".equals(profile);
+    }
     /** How saved audit findings are used: "block" (default) blocks and logs matches, "log" only logs, "off" skips them. */
     public String injectionRiskMode = "block";
     public boolean allowCompressedRequestBodies = false;

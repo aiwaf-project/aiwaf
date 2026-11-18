@@ -65,6 +65,9 @@ function toPathRules(value, defaultValue = []) {
 
 function normalizeSettings(rawOpts = {}) {
   const legacy = rawOpts.AIWAF_SETTINGS || {};
+  // AIWAF_PROFILE supplies the defaults below; a setting given explicitly still wins.
+  const profile = require('./profiles').resolve(firstDefined(rawOpts.AIWAF_PROFILE, rawOpts.profile));
+  const preset = require('./profiles').defaultsFor(profile);
 
   const normalized = {
     ...rawOpts,
@@ -72,8 +75,8 @@ function normalizeSettings(rawOpts = {}) {
     dynamicTopN: toNumber(firstDefined(rawOpts.dynamicTopN, rawOpts.DYNAMIC_TOP_N, legacy.keywords?.dynamicTopN), 10),
 
     WINDOW_SEC: toNumber(firstDefined(rawOpts.WINDOW_SEC, rawOpts.windowSec, rawOpts.AIWAF_WINDOW_SECONDS, legacy.rate?.window, process.env.AIWAF_RATE_WINDOW), 60),
-    MAX_REQ: toNumber(firstDefined(rawOpts.MAX_REQ, rawOpts.maxReq, legacy.rate?.max, process.env.AIWAF_RATE_MAX), 100),
-    FLOOD_REQ: toNumber(firstDefined(rawOpts.FLOOD_REQ, rawOpts.floodReq, legacy.rate?.flood, process.env.AIWAF_RATE_FLOOD), 200),
+    MAX_REQ: toNumber(firstDefined(rawOpts.MAX_REQ, rawOpts.maxReq, legacy.rate?.max, process.env.AIWAF_RATE_MAX), preset.MAX_REQ ?? 100),
+    FLOOD_REQ: toNumber(firstDefined(rawOpts.FLOOD_REQ, rawOpts.floodReq, legacy.rate?.flood, process.env.AIWAF_RATE_FLOOD), preset.FLOOD_REQ ?? 200),
 
     HONEYPOT_FIELD: firstDefined(rawOpts.HONEYPOT_FIELD, rawOpts.honeypotField, legacy.honeypot?.field),
     AIWAF_MIN_FORM_TIME: toNumber(firstDefined(rawOpts.AIWAF_MIN_FORM_TIME, rawOpts.minFormTime, legacy.honeypot?.minFormTime, process.env.AIWAF_MIN_FORM_TIME), 0),
@@ -81,7 +84,7 @@ function normalizeSettings(rawOpts = {}) {
     AIWAF_LOGIN_PATH_PREFIXES: toArray(firstDefined(rawOpts.AIWAF_LOGIN_PATH_PREFIXES, rawOpts.loginPathPrefixes, legacy.honeypot?.loginPathPrefixes, process.env.AIWAF_LOGIN_PATH_PREFIXES), [...loginPathPrefixes]),
     AIWAF_POST_ONLY_SUFFIXES: toArray(firstDefined(rawOpts.AIWAF_POST_ONLY_SUFFIXES, rawOpts.postOnlySuffixes, legacy.honeypot?.postOnlySuffixes, process.env.AIWAF_POST_ONLY_SUFFIXES), undefined),
     AIWAF_ALLOWED_METHODS: toArray(firstDefined(rawOpts.AIWAF_ALLOWED_METHODS, rawOpts.allowedMethods, legacy.honeypot?.allowedMethods, process.env.AIWAF_ALLOWED_METHODS), undefined),
-    AIWAF_METHOD_POLICY_ENABLED: toBool(firstDefined(rawOpts.AIWAF_METHOD_POLICY_ENABLED, rawOpts.methodPolicyEnabled, legacy.honeypot?.methodPolicyEnabled, process.env.AIWAF_METHOD_POLICY_ENABLED), false),
+    AIWAF_METHOD_POLICY_ENABLED: toBool(firstDefined(rawOpts.AIWAF_METHOD_POLICY_ENABLED, rawOpts.methodPolicyEnabled, legacy.honeypot?.methodPolicyEnabled, process.env.AIWAF_METHOD_POLICY_ENABLED), preset.AIWAF_METHOD_POLICY_ENABLED ?? false),
 
     AIWAF_EXEMPT_PATHS: toArray(firstDefined(rawOpts.AIWAF_EXEMPT_PATHS, rawOpts.exemptPaths, legacy.exemptions?.paths, process.env.AIWAF_EXEMPT_PATHS), []),
     AIWAF_EXEMPT_IPS: toArray(firstDefined(rawOpts.AIWAF_EXEMPT_IPS, rawOpts.exemptIps, legacy.exemptions?.ips, process.env.AIWAF_EXEMPT_IPS), []),
@@ -134,7 +137,9 @@ function normalizeSettings(rawOpts = {}) {
     AIWAF_DISABLE_MIDDLEWARES: toArray(firstDefined(rawOpts.AIWAF_DISABLE_MIDDLEWARES, rawOpts.disableMiddlewares, rawOpts.disabledMiddlewares, legacy.middlewares?.disabled, process.env.AIWAF_DISABLE_MIDDLEWARES), []),
     AIWAF_PATH_RULES: toPathRules(firstDefined(rawOpts.AIWAF_PATH_RULES, rawOpts.pathRules, legacy.pathRules, process.env.AIWAF_PATH_RULES), []),
     AIWAF_PATH_MANIFEST: firstDefined(rawOpts.AIWAF_PATH_MANIFEST, rawOpts.pathManifest, legacy.pathManifest, process.env.AIWAF_PATH_MANIFEST, '.aiwaf/paths.json'),
-    AIWAF_INJECTION_RISK_MODE: firstDefined(rawOpts.AIWAF_INJECTION_RISK_MODE, rawOpts.injectionRiskMode, process.env.AIWAF_INJECTION_RISK_MODE, 'block'),
+    AIWAF_INJECTION_RISK_MODE: firstDefined(rawOpts.AIWAF_INJECTION_RISK_MODE, rawOpts.injectionRiskMode, process.env.AIWAF_INJECTION_RISK_MODE, preset.AIWAF_INJECTION_RISK_MODE, 'block'),
+    AIWAF_SQL_INJECTION_MODE: firstDefined(rawOpts.AIWAF_SQL_INJECTION_MODE, rawOpts.sqlInjectionMode, process.env.AIWAF_SQL_INJECTION_MODE, preset.AIWAF_SQL_INJECTION_MODE),
+    AIWAF_PROFILE: profile,
     AIWAF_ROUTE_PLAN_VERSION: firstDefined(rawOpts.AIWAF_ROUTE_PLAN_VERSION, rawOpts.routePlanVersion, legacy.routePlanVersion, process.env.AIWAF_ROUTE_PLAN_VERSION, 0),
     AIWAF_ACCESS_LOG: firstDefined(rawOpts.AIWAF_ACCESS_LOG, rawOpts.accessLog, process.env.AIWAF_ACCESS_LOG, process.env.NODE_LOG_PATH),
 

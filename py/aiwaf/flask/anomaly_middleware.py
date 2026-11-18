@@ -44,6 +44,8 @@ STATIC_KEYWORDS = {
 # Status code mapping for ML features
 STATUS_CODES = ['200', '201', '204', '301', '302', '400', '401', '403', '404', '405', '500', '502', '503']
 
+from .monitor import monitored_init
+
 class AIAnomalyMiddleware:
     """
     AI-powered anomaly detection middleware for Flask.
@@ -73,6 +75,7 @@ class AIAnomalyMiddleware:
         if app is not None:
             self.init_app(app)
 
+    @monitored_init
     def init_app(self, app):
         """Initialize the middleware with Flask app."""
         self.app = app

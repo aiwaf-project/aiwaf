@@ -32,6 +32,10 @@ class BlocklistManager:
         return is_ip_blocklisted(ip)
     @classmethod
     def block(cls, ip, reason=None, extended_request_info=None):
+        from ..core.profiles import skip_blocklist
+
+        if skip_blocklist(ip, reason):
+            return
         enabled = True
         if has_app_context():
             enabled = bool(current_app.config.get("AIWAF_ENABLE_IP_BLOCKING", True))

@@ -121,8 +121,16 @@ class NativeAIWAFMiddleware:
     def __init__(self, get_response, *, config=None, model=None):
         """``config`` and ``model`` are given when the regular middleware runs as this one."""
         self.get_response = get_response
+        from aiwaf.core import profiles
         from aiwaf.core.native_settings import resolve
         from .settings_compat import apply_legacy_settings
+
+        apply_legacy_settings()
+        if profiles.activate(getattr(settings, profiles.PROFILE_SETTING, None)) == "monitor":
+            from django.core.exceptions import ImproperlyConfigured
+
+            raise ImproperlyConfigured("AIWAF_PROFILE=monitor runs the regular middleware: list the regular AIWAF "
+                                       "middleware in MIDDLEWARE instead of NativeAIWAFMiddleware.")
 
         if config is None:
             # AIWAF_SETTINGS, the legacy nested form, maps onto the flat settings read below.

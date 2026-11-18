@@ -5,12 +5,15 @@ from .blocklist_manager import BlocklistManager
 from .exemption_decorators import should_apply_middleware
 from aiwaf.core.uuid_tamper import is_malformed_uuid, is_valid_uuid, record_uuid_signal
 
+from .monitor import monitored_init
+
 class UUIDTamperMiddleware:
     def __init__(self, app=None):
         self.app = app
         if app is not None:
             self.init_app(app)
 
+    @monitored_init
     def init_app(self, app):
         def _score_config():
             return {

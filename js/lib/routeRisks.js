@@ -8,7 +8,10 @@ const { bodyBytes } = require('./sqlInjection');
 const wasmChecks = require('./wasmChecks');
 
 // The operations a saved finding can name. The rules for each run in aiwaf-wasm.
-const SINKS = ['sql', 'nosql', 'command', 'path', 'ssrf', 'code', 'template', 'deserialization'];
+const SINKS = [
+  'sql', 'nosql', 'command', 'path', 'ssrf', 'code', 'template', 'deserialization', 'xss', 'redirect', 'ldap', 'xpath', 'xxe',
+  'redos', 'prototype'
+];
 
 /** Returns the first rule for this operation that matches the value. Needs aiwaf-wasm loaded. */
 function ruleFor(sink, value) {

@@ -155,6 +155,7 @@ module.exports = {
   async block(ip, reason = 'WAF blocked', options = {}) {
     const normalizedIp = String(ip || '').trim();
     if (!normalizedIp) return false;
+    if (require('./profiles').skipBlocklist(normalizedIp, reason)) return false;
     if (options.checkExemptions !== false) {
       try {
         const exemptionStore = require('./exemptionStore');

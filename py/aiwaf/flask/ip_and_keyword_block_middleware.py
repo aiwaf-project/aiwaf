@@ -23,6 +23,8 @@ _DEFAULT_QUERY_KEYS = extract_query_keys_from_flask_request
 from aiwaf.core.route_risks import observer_for
 
 
+from .monitor import monitored_init
+
 class IPAndKeywordBlockMiddleware:
     def __init__(self, app=None):
         self.app = app
@@ -80,6 +82,7 @@ class IPAndKeywordBlockMiddleware:
                 prefixes.add(first.lower())
         return prefixes
 
+    @monitored_init
     def init_app(self, app):
         self.sql_policy = SQLInjectionPolicy(app.config.get("AIWAF_SQL_INJECTION_MODE"), app.config.get("AIWAF_PAYLOAD_MAX_BYTES"))
         @app.before_request

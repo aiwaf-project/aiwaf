@@ -37,6 +37,10 @@ class BlocklistManager:
         Returns:
             True if blocked, False if exempted
         """
+        from .profiles import skip_blocklist
+
+        if skip_blocklist(ip, reason):
+            return False
         # Check if IP is exempted before blocking
         exemption_store = get_exemption_store()
         if not should_block_ip(True, exemption_store.is_exempted, ip):

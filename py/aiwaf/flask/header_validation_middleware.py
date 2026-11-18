@@ -14,12 +14,15 @@ def _get_min_quality_score(config_required_headers=None, method=None):
         return 0
     return default_min
 
+from .monitor import monitored_init
+
 class HeaderValidationMiddleware:
     def __init__(self, app=None):
         self.app = app
         if app is not None:
             self.init_app(app)
 
+    @monitored_init
     def init_app(self, app):
         @app.before_request
         def before_request():

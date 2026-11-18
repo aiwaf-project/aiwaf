@@ -90,16 +90,33 @@ public final class AiwafEngine {
     }
 
     public AiwafDecision evaluate(AiwafRequest req) {
-        return evaluateRequest(req, false);
+        return monitored(req, evaluateRequest(req, false));
     }
 
     /** Run request checks now; defer AI scoring until the handler response is available. */
     public AiwafDecision evaluateBeforeResponse(AiwafRequest req) {
-        return evaluateRequest(req, true);
+        return monitored(req, evaluateRequest(req, true));
+    }
+
+    private static final java.util.logging.Logger MONITOR_LOG = java.util.logging.Logger.getLogger("com.aiwaf.monitor");
+
+    /** AIWAF_PROFILE=monitor: a decision to block is logged, and the request is allowed. */
+    private AiwafDecision monitored(AiwafRequest req, AiwafDecision decision) {
+        if (decision == null || decision.allowed() || !config.monitoring()) {
+            return decision;
+        }
+        MONITOR_LOG.warning(() -> "AIWAF monitor: would block " + blankToDefault(req.method(), "-") + " "
+                + blankToDefault(req.path(), "-") + " from " + blankToDefault(req.ip(), "-") + " with "
+                + decision.statusCode() + " (" + decision.reason() + ")");
+        return new AiwafDecision(true, 200, "monitor: " + decision.reason());
     }
 
     /** Complete an allowed request using the handler's actual response status and elapsed time. */
     public AiwafDecision evaluateAfterResponse(AiwafRequest req, int statusCode, long responseTimeMs) {
+        return monitored(req, evaluateAfterHandler(req, statusCode, responseTimeMs));
+    }
+
+    private AiwafDecision evaluateAfterHandler(AiwafRequest req, int statusCode, long responseTimeMs) {
         long startedNs = System.nanoTime();
         long nowMillis = System.currentTimeMillis();
         String ip = blankToDefault(req.ip(), "127.0.0.1");
@@ -801,6 +818,10 @@ public final class AiwafEngine {
     }
 
     private void blockWithContext(String ip, AiwafRequest req, String reason) {
+        if (config.monitoring()) {
+            MONITOR_LOG.warning(() -> "AIWAF monitor: would add " + ip + " to the blocklist (" + reason + ")");
+            return;
+        }
         Map<String, Object> ext = config.storeExtendedBlockInfo ? extendedBlockInfo(req) : null;
         BlocklistManager.block(runtimeStorage, ip, reason, null, ext);
         telemetryIncrement("blocks.total");

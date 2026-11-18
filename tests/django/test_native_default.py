@@ -368,3 +368,77 @@ class NativeDefaultLoggerTests(SimpleTestCase):
             supports = native_settings._engine_supports
             with patch.object(native_settings, "_engine_supports", lambda f: f != "blocked_stage" and supports(f)):
                 self.assertIsNone(native_plan())
+
+
+class MonitorProfileTests(SimpleTestCase):
+    """AIWAF_PROFILE=monitor runs the regular middleware and logs what it would block."""
+
+    def setUp(self):
+        from aiwaf.core import profiles
+
+        patcher = patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("AIWAF_NATIVE_PIPELINE", None)
+        self.addCleanup(profiles.activate, "balanced")
+
+    def test_monitor_lets_through_what_it_would_block_and_says_why(self):
+        with TemporaryDirectory() as directory, settings_for(directory, AIWAF_PROFILE="monitor"):
+            client = Client(REMOTE_ADDR="198.51.100.161")
+            with self.assertLogs("aiwaf.monitor", "WARNING") as logs:
+                names = middleware_types(client)
+                statuses = [client.get("/items").status_code for _ in range(3)]
+                # A probe blocklists the IP for later requests; in monitor it isn't blocklisted.
+                statuses += [client.get("/.env").status_code, client.get("/items").status_code]
+            self.assertEqual(statuses, [200, 200, 200, 404, 200])
+            self.assertNotIn("NativeAIWAFMiddleware", names)
+            self.assertIn("MonitoredMiddleware", names)
+            output = "\n".join(logs.output)
+            self.assertIn("AIWAF monitor: would block GET /items from 198.51.100.161 with 429 (RateLimitMiddleware", output)
+            self.assertIn("AIWAF monitor: would add 198.51.100.161 to the blocklist (Keyword block", output)
+
+    def test_the_balanced_profile_still_blocks(self):
+        with TemporaryDirectory() as directory, settings_for(directory, AIWAF_PROFILE="balanced", AIWAF_NATIVE_PIPELINE=False):
+            client = Client(REMOTE_ADDR="198.51.100.162")
+            self.assertEqual([client.get("/items").status_code for _ in range(2)], [200, 429])
+
+    def test_an_explicit_native_pipeline_is_refused_in_monitor(self):
+        from django.core.exceptions import ImproperlyConfigured
+
+        from aiwaf.django.csv_pipeline import NativeAIWAFMiddleware
+        with TemporaryDirectory() as directory, settings_for(directory, AIWAF_PROFILE="monitor"):
+            with self.assertRaisesMessage(ImproperlyConfigured, "AIWAF_PROFILE=monitor runs the regular middleware"):
+                NativeAIWAFMiddleware(item)
+
+    def test_process_view_blocks_are_logged_and_let_through(self):
+        from django.core.exceptions import PermissionDenied
+        from django.http import HttpResponse
+        from django.test import RequestFactory
+
+        from aiwaf.django.native_default import MonitoredMiddleware
+
+        class Blocking:
+            def __init__(self, get_response):
+                self.get_response = get_response
+
+            def __call__(self, request):
+                return self.get_response(request)
+
+            def process_view(self, request, view, args, kwargs):
+                if request.path == "/denied":
+                    raise PermissionDenied("uuid tamper")
+                return HttpResponse("blocked", status=403) if request.path == "/blocked" else None
+
+            def process_exception(self, request, exception):
+                return HttpResponse("handled", status=500)
+
+        middleware = MonitoredMiddleware(Blocking, lambda request: HttpResponse("ok"))
+        factory = RequestFactory(REMOTE_ADDR="198.51.100.163")
+        with self.assertLogs("aiwaf.monitor", "WARNING") as logs:
+            for path in ("/blocked", "/denied", "/fine"):
+                self.assertIsNone(middleware.process_view(factory.get(path), item, (), {}))
+        self.assertEqual(middleware.process_exception(factory.get("/x"), ValueError()).status_code, 500)
+        self.assertEqual(middleware(factory.get("/x")).status_code, 200)
+        output = "\n".join(logs.output)
+        self.assertIn("would block GET /blocked from 198.51.100.163 with 403 (Blocking: blocked)", output)
+        self.assertIn("would block GET /denied from 198.51.100.163 with 403 (Blocking: uuid tamper)", output)

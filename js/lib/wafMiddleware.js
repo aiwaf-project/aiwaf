@@ -225,6 +225,18 @@ const recentRequests = limit => Promise.resolve().then(() => requestLogStore.rec
   .catch(error => { storeFailed('request log read', error); return []; });
 
 module.exports = function aiwaf(rawOpts = {}) {
+  const profiles = require('./profiles');
+  if (profiles.activate(rawOpts.AIWAF_PROFILE ?? rawOpts.profile) === 'monitor') {
+    // Monitor runs the regular middleware, whose every block can be logged instead.
+    if (rawOpts.AIWAF_NATIVE_PIPELINE !== undefined && rawOpts.AIWAF_NATIVE_PIPELINE !== false) {
+      throw new Error('AIWAF_PROFILE=monitor runs the regular middleware: leave AIWAF_NATIVE_PIPELINE unset.');
+    }
+    if (rawOpts.AIWAF_NATIVE_PIPELINE === undefined) {
+      staysRegular('AIWAF_PROFILE is monitor, which logs what it would block instead of blocking.');
+      console.warn('AIWAF monitor: nothing is blocked; what would be blocked is logged.');
+    }
+    rawOpts = { ...rawOpts, AIWAF_NATIVE_PIPELINE: false };
+  }
   if (rawOpts.AIWAF_NATIVE_PIPELINE === false) {
     const { AIWAF_NATIVE_PIPELINE: _off, ...regularOpts } = rawOpts;
     rawOpts = regularOpts;
@@ -388,6 +400,11 @@ module.exports = function aiwaf(rawOpts = {}) {
     markRequestStart(req);
 
     const deny = (status, code, reason, country = '') => {
+      if (opts.AIWAF_PROFILE === 'monitor') {
+        // A dry run: say what would be blocked, and let the request through.
+        require('./profiles').wouldBlock(method, path, ip, status, reason || code);
+        return next();
+      }
       middlewareLogger.markBlocked(res, reason || code, country);
       if (process.env.AIWAF_DEBUG_MIDDLEWARE) {
         console.error(`[AIWAF-BLOCK] status=${status} code=${code} reason=${reason} ip=${ip}`);

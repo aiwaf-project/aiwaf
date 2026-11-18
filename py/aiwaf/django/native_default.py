@@ -37,7 +37,11 @@ def native_plan():
     if not regular or NATIVE_MIDDLEWARE in middleware:
         return None
     from aiwaf.core.native_settings import DJANGO_LOGGER
+    from aiwaf.core import profiles
+
     apply_legacy_settings()
+    if profiles.activate(getattr(settings, profiles.PROFILE_SETTING, None)) == "monitor":
+        return None  # Monitor runs the regular middleware, whose every block can be logged instead.
     names = {name: getattr(settings, name) for name in dir(settings) if name.startswith("AIWAF_")}
     conversion = native_config(names, "django", middleware=middleware)
     from .csv_pipeline import _process_local
@@ -114,11 +118,89 @@ def _plan_key(middleware, config):
     return repr((tuple(middleware), sorted(config.items(), key=lambda item: item[0])))
 
 
+class MonitoredMiddleware:
+    """AIWAF_PROFILE=monitor: runs a middleware, and lets through each request it would block.
+
+    A middleware blocks by answering without passing the request on, by raising PermissionDenied,
+    or by answering from process_view. Each is logged as "AIWAF monitor: would block", and the
+    request goes on to the rest of the chain.
+    """
+
+    def __init__(self, cls, get_response):
+        self._get_response = get_response
+        self._name = cls.__name__
+        self._passed = f"_aiwaf_monitor_passed_{id(self)}"
+        middleware = object.__new__(cls)
+        middleware.__init__(self._passing)
+        self._middleware = middleware
+        for hook in ("process_view", "process_exception", "process_template_response"):
+            if hasattr(middleware, hook):
+                setattr(self, hook, self._wrap(getattr(middleware, hook), hook))
+
+    def _passing(self, request):
+        setattr(request, self._passed, True)
+        return self._get_response(request)
+
+    def _log(self, request, status, reason):
+        from aiwaf.core import profiles
+        from .utils import get_ip
+
+        profiles.would_block(getattr(request, "method", ""), getattr(request, "path", ""), get_ip(request), status,
+                             f"{self._name}: {reason}")
+
+    def __call__(self, request):
+        from django.core.exceptions import PermissionDenied
+
+        try:
+            response = self._middleware(request)
+        except PermissionDenied as error:
+            if getattr(request, self._passed, False):
+                raise
+            self._log(request, 403, str(error) or "permission denied")
+            return self._passing(request)
+        if not getattr(request, self._passed, False):
+            self._log(request, getattr(response, "status_code", "-"), _reason(response))
+            return self._passing(request)
+        return response
+
+    def _wrap(self, hook, name):
+        from django.core.exceptions import PermissionDenied
+
+        def monitored(request, *args, **kwargs):
+            if name != "process_view":
+                return hook(request, *args, **kwargs)
+            try:
+                response = hook(request, *args, **kwargs)
+            except PermissionDenied as error:
+                self._log(request, 403, str(error) or "permission denied")
+                return None
+            if response is not None:
+                self._log(request, getattr(response, "status_code", "-"), _reason(response))
+            return None
+
+        return monitored
+
+
+def _reason(response):
+    content = getattr(response, "content", b"")
+    try:
+        return content[:200].decode("utf-8", "replace") or "blocked"
+    except AttributeError:
+        return "blocked"
+
+
 class NativeDefault:
     """Mixed into each regular middleware class: listed in MIDDLEWARE, it may run as native."""
 
     def __new__(cls, *args, **kwargs):
         from django.conf import settings
+        from aiwaf.core import profiles
+        from .settings_compat import apply_legacy_settings
+
+        apply_legacy_settings()
+        profiles.activate(getattr(settings, profiles.PROFILE_SETTING, None))
+        if profiles.monitoring() and (args or "get_response" in kwargs):
+            return MonitoredMiddleware(cls, args[0] if args else kwargs["get_response"])
 
         path = f"{cls.__module__}.{cls.__qualname__}"
         if path in (getattr(settings, "MIDDLEWARE", None) or []):

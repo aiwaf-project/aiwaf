@@ -15,12 +15,15 @@ def _normalize_country_list(value):
     return normalize_country_list(value)
 
 
+from .monitor import monitored_init
+
 class GeoBlockMiddleware:
     def __init__(self, app=None):
         self.app = app
         if app is not None:
             self.init_app(app)
 
+    @monitored_init
     def init_app(self, app):
         @app.before_request
         def before_request():

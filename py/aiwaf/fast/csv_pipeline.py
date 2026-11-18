@@ -90,6 +90,11 @@ class NativeAIWAFMiddleware:
         ``stores_ready``: AIWAF(app) set up the stores already. Setting them up again when the app
         builds its middleware, at its first request, would empty in-memory stores.
         """
+        from aiwaf.core import profiles
+
+        if profiles.monitoring():
+            raise RuntimeError("AIWAF_PROFILE=monitor runs the regular middleware: use AIWAF(app) or the regular "
+                               "middleware instead of NativeAIWAFMiddleware.")
         from aiwaf.core.native_settings import resolve
 
         validate_fact_callback(country_lookup)

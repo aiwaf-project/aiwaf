@@ -39,14 +39,14 @@ the supported Redis backends when sharing limits across workers.
 
 Each package is versioned and released independently.
 
-Python 1.2.5, Rust/Python 0.2.12, Node.js 1.2.4, WASM 0.2.9, and Java 1.3.8 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
+Python 1.2.5, Rust/Python 0.2.13, Node.js 1.2.4, WASM 0.2.10, and Java 1.3.8 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
 
 | Runtime | Package | Repository version | Primary use |
 | --- | --- | ---: | --- |
 | Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.2.5` | Django, Flask, and FastAPI protection |
 | Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.2.4` | Express and Node framework middleware |
-| Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.12` | Native Python acceleration and JSON model inference |
-| WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.9` | Rust detection and model primitives for JavaScript |
+| Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.13` | Native Python acceleration and JSON model inference |
+| WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.10` | Rust detection and model primitives for JavaScript |
 | Java | `io.github.aiwaf-project:aiwaf-java` | `1.3.8` | Spring MVC and Jakarta Servlet protection |
 
 Supported framework integrations include Django, Flask, FastAPI, Express, Fastify, Hapi, Koa, NestJS, Next.js API routes, AdonisJS, Sails.js, Spring MVC, and Jakarta Servlet.
@@ -67,6 +67,24 @@ Supported framework integrations include Django, Flask, FastAPI, Express, Fastif
 - Required Rust runtime for Python 1.1.4 and optional WebAssembly acceleration for Node.js
 
 The runtimes share policy intent and training feature names, but their framework adapters and model implementations remain language-native. Model artifacts are not generally interchangeable across languages.
+
+## Profiles
+
+`AIWAF_PROFILE` sets sensible defaults with one setting, in Django and Flask settings,
+FastAPI's `AIWAFConfig` (or `AIWAF(app, profile=...)`), the Node.js options, the Java config
+(`profile`) or the environment. A setting you give explicitly always wins over the profile.
+
+| Profile | What it does |
+| --- | --- |
+| `balanced` (default) | Every default as it is. |
+| `strict` | Halves the rate and flood limits (Django, Flask, FastAPI and Java: 10 and 20 a window; Node.js: 50 and 100), turns on UUID scoring, header validation and the method policy where the runtime has them as settings, and keeps the SQL and route checks blocking. |
+| `monitor` | A dry run. Every check runs, and what it would block is logged instead, as `AIWAF monitor: would block GET /.env from 203.0.113.9 with 403 (...)`. Nothing is blocked and no IP is added to the blocklist. |
+
+Use `monitor` to try AIWAF on real traffic before turning it on. Its log lines go to the
+`aiwaf.monitor` logger in Python, `console.warn` in Node.js and `com.aiwaf.monitor` in Java.
+Monitor runs the regular middleware, where every block decision can be logged instead: the
+automatic native pipeline stays off, and a native pipeline chosen explicitly refuses to start.
+Java's request body size limit still applies.
 
 ## Client IP addresses and proxies
 
@@ -235,6 +253,25 @@ values too. A match blocks the request with `403` and logs an event like this:
 {"event": "aiwaf.injection_risk", "mode": "block", "method": "GET", "route": "/files", "sink": "path", "input": "name", "rule": "path_traversal", "confidence": "medium"}
 ```
 
+| Operation | Rules: what a value must contain to match |
+| --- | --- |
+| `sql` | The SQL tokenizer: a value that closes its SQL literal and continues as SQL |
+| `command` | `command_chain`, `command_substitution`: `;`, `&` or `\|` and a command, `$(...)`, backticks |
+| `path` | `path_traversal`, `path_sensitive_location`, `path_null_byte` |
+| `ssrf` | `ssrf_scheme`, `ssrf_internal_host`: `file://` and similar, private and metadata hosts |
+| `nosql`, `code`, `template`, `deserialization` | operators like `$ne`, `eval(`, `{{ }}`, serialized object markers |
+| `xss` | `xss_markup`, `xss_event_handler`, `xss_script_url`: `<script`, `onerror=`, `javascript:` |
+| `redirect` | `redirect_external`: `//host`, `/\host`, `javascript:`, `user@host` and `https:host` targets |
+| `ldap` | `ldap_filter`: `)(`, `(|(`, a leading `*)` |
+| `xpath` | `xpath_quote_break`, `xpath_tautology`: `' or 'a'='a`, `or 1=1` |
+| `xxe` | `xxe_entity`: `<!DOCTYPE` or `<!ENTITY` |
+| `redos` | `redos_nested_quantifier`: `(a+)+` and similar |
+| `prototype` | `prototype_key`: `__proto__`, `constructor.prototype` |
+
+Every rule is checked against a shared list of ordinary values (names, addresses, prose with
+quotes and parentheses) that must never match. A plain absolute URL passes the redirect rule,
+because the site's own host isn't known there.
+
 ```bash
 aiwaf init --framework flask --app app:app                 # audits the current folder
 aiwaf init --framework flask --app app:app --source src    # audits another folder
@@ -318,7 +355,7 @@ Java 1.3.8, after it is published to Maven Central:
 
 The Python package requires Python 3.10 or newer. Framework dependencies are optional, so install only the extra needed by the application.
 
-Python 1.2.5 requires `aiwaf-rust>=0.2.12`; the `rust` extra remains an installation
+Python 1.2.5 requires `aiwaf-rust>=0.2.13`; the `rust` extra remains an installation
 alias. Publish the matching Rust wheel with `NativeCSVPipeline` support before
 the Python release. The Rust release workflow builds Linux x86_64/aarch64,
 musl x86_64, macOS x86_64/arm64 and Windows x86_64 wheels and checks the native
@@ -1707,8 +1744,8 @@ Release versions and tags must match the relevant manifest.
 | --- | --- | --- | --- |
 | Python `aiwaf` | `pyproject.toml` | `python-v1.2.5` | `python-publish.yml` |
 | npm `aiwaf` | `js/package.json` | `js-v1.2.4` | `npm-publish.yml` |
-| PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.12` | `rust-publish.yml` |
-| npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.9` | `wasm-publish.yml` |
+| PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.13` | `rust-publish.yml` |
+| npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.10` | `wasm-publish.yml` |
 | Maven `aiwaf-java` | `java/pom.xml` | `java-v1.3.8` | `java-publish.yml` |
 
 Python and Rust publish to PyPI with trusted publishing. The npm workflows use npm trusted publishing and stage packages for approval. Configure the trusted publisher with organization `aiwaf-project`, repository `aiwaf`, the exact workflow filename, and the environment used by that workflow.
@@ -1717,12 +1754,12 @@ Java publishing uses the protected `maven-publish` environment plus `GPG_PRIVATE
 
 Registry releases are immutable. Increment the relevant manifest version before publishing another release.
 
-This release is Python `aiwaf 1.2.5`, npm `aiwaf 1.2.4` and Java `aiwaf-java 1.3.8`, with
-the injection audit changes. Python 1.2.4, Java 1.3.7, `aiwaf-rust 0.2.12` and
-`aiwaf-wasm 0.2.9` are already published, and the engines are unchanged. Python now requires
-`aiwaf-rust>=0.2.12` and npm `aiwaf` `aiwaf-wasm ^0.2.9`, so every native feature is available
-after an install. npm `aiwaf` 1.2.3 was staged but never released, and npm doesn't reuse a
-version, so npm `aiwaf 1.2.4` also ships the Node.js changes listed under Python 1.2.4.
+This release is Python `aiwaf 1.2.5`, npm `aiwaf 1.2.4`, Java `aiwaf-java 1.3.8`,
+`aiwaf-rust 0.2.13` and `aiwaf-wasm 0.2.10`. Publish the two engines first: they carry the
+route rules for the new operations, and Python requires `aiwaf-rust>=0.2.13`. npm `aiwaf`
+keeps `aiwaf-wasm ^0.2.9`, which picks up 0.2.10 once it's published. npm `aiwaf` 1.2.3 was
+staged but never released, and npm doesn't reuse a version, so 1.2.4 also ships the Node.js
+changes listed under Python 1.2.4.
 
 ## Security and limitations
 

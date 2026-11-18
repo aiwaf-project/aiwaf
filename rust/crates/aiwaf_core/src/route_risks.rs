@@ -21,7 +21,10 @@ const COMMANDS: &str = "cat|curl|wget|nc|ncat|bash|sh|zsh|cmd|powershell|rm|id|w
 const NOSQL: &str = "where|ne|eq|gt|gte|lt|lte|in|nin|regex|exists|or|and|nor|not|expr";
 
 /// The operations a saved finding can name.
-pub const SINKS: &[&str] = &["sql", "nosql", "command", "path", "ssrf", "code", "template", "deserialization"];
+pub const SINKS: &[&str] = &[
+    "sql", "nosql", "command", "path", "ssrf", "code", "template", "deserialization", "xss", "redirect", "ldap", "xpath",
+    "xxe", "redos", "prototype",
+];
 
 /// One match: the manifest route, the operation, the manifest's parameter name and the rule.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,6 +54,24 @@ fn rules() -> &'static Vec<(&'static str, &'static str, Regex)> {
             rule("code", "code_expression", r"(?i)__import__|(?-u:\b)(?:eval|exec|compile)\s*\(|(?-u:\b)require\s*\(|(?-u:\b)process\.(?:env|exit|mainModule)|java\.lang\.|Runtime\.getRuntime|(?-u:\b)T\s*\(\s*java".into()),
             rule("template", "template_expression", r"(?i)\{\{.{0,200}\}\}|\{%.{0,200}%\}|\$\{.{0,200}\}|<%.{0,200}%>|#\{.{0,200}\}".into()),
             rule("deserialization", "deserialization_marker", r#"^rO0AB|^aced0005|^gASV|!!python/|!!javax\.|^O:\d+:"|__reduce__|_\$\$ND_FUNC\$\$_"#.into()),
+            // Markup that runs script, event handlers and script URLs.
+            rule("xss", "xss_markup", r#"(?i)<\s*/?\s*(?:script|iframe|object|embed|svg|math|img|body|link|meta|style|base|form|input|video|audio|details)(?-u:\b)"#.into()),
+            rule("xss", "xss_event_handler", r#"(?i)[\s"'/]on[a-z]{3,}\s*="#.into()),
+            rule("xss", "xss_script_url", r#"(?i)(?:java|vb)script\s*:|data\s*:\s*text/html"#.into()),
+            // Redirect targets that leave the site by a trick: // and its backslash variants, script and
+            // data URLs, user@host URLs and https:host. Plain absolute URLs pass: the site's own host isn't known here.
+            rule("redirect", "redirect_external", r#"(?i)^\s*(?:[/\\]{2}|/\s*\\|(?:java|vb)script\s*:|data\s*:|https?:(?:[^/\\]|[/\\][^/\\])|https?:[/\\]{2}[^/?#\s]*@)"#.into()),
+            // Filter syntax that closes the expected value and starts another condition.
+            rule("ldap", "ldap_filter", r#"(?i)\)\(|\(\s*[|&!]\s*\(|^\s*\*\s*\)|\x00"#.into()),
+            // A quote that closes the expected literal, and the classic always-true condition.
+            rule("xpath", "xpath_quote_break", r#"(?i)['"]\s*(?:or|and)\s+['"]?\w+['"]?\s*!?=|['"]\s*\]|['"]\s*\|\s*/"#.into()),
+            rule("xpath", "xpath_tautology", r#"(?i)(?-u:\b)or\s+['"]?1['"]?\s*=\s*['"]?1"#.into()),
+            // A document type or entity declaration, which external entities need.
+            rule("xxe", "xxe_entity", r#"(?i)<!\s*(?:DOCTYPE|ENTITY)"#.into()),
+            // A repeated group that repeats, as in (a+)+, which can take exponential time.
+            rule("redos", "redos_nested_quantifier", r#"(?i)\([^()]*[+*][^()]*\)\s*(?:[+*]|\{\d)"#.into()),
+            // Keys that reach an object's prototype.
+            rule("prototype", "prototype_key", r#"(?i)__proto__|(?-u:\b)constructor\s*(?:[.\]"']\s*)+\[?\s*["']?prototype|^\s*(?:constructor|prototype)\s*$"#.into()),
         ]
     })
 }

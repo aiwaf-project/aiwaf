@@ -29,12 +29,15 @@ def _is_authenticated_request() -> bool:
         return False
 
 
+from .monitor import monitored_init
+
 class HoneypotTimingMiddleware:
     def __init__(self, app=None):
         self.app = app
         if app is not None:
             self.init_app(app)
 
+    @monitored_init
     def init_app(self, app):
         def _view_accepts_method(method: str) -> bool:
             return flask_route_accepts_method(app, request.path, method)
