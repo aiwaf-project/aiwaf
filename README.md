@@ -39,12 +39,12 @@ the supported Redis backends when sharing limits across workers.
 
 Each package is versioned and released independently.
 
-Python 1.2.5, Rust/Python 0.2.12, Node.js 1.2.3, WASM 0.2.9, and Java 1.3.8 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
+Python 1.2.5, Rust/Python 0.2.12, Node.js 1.2.4, WASM 0.2.9, and Java 1.3.8 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
 
 | Runtime | Package | Repository version | Primary use |
 | --- | --- | ---: | --- |
 | Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.2.5` | Django, Flask, and FastAPI protection |
-| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.2.3` | Express and Node framework middleware |
+| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.2.4` | Express and Node framework middleware |
 | Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.12` | Native Python acceleration and JSON model inference |
 | WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.9` | Rust detection and model primitives for JavaScript |
 | Java | `io.github.aiwaf-project:aiwaf-java` | `1.3.8` | Spring MVC and Jakarta Servlet protection |
@@ -1706,7 +1706,7 @@ Release versions and tags must match the relevant manifest.
 | Package | Manifest | Tag | Workflow |
 | --- | --- | --- | --- |
 | Python `aiwaf` | `pyproject.toml` | `python-v1.2.5` | `python-publish.yml` |
-| npm `aiwaf` | `js/package.json` | `js-v1.2.3` | `npm-publish.yml` |
+| npm `aiwaf` | `js/package.json` | `js-v1.2.4` | `npm-publish.yml` |
 | PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.12` | `rust-publish.yml` |
 | npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.9` | `wasm-publish.yml` |
 | Maven `aiwaf-java` | `java/pom.xml` | `java-v1.3.8` | `java-publish.yml` |
@@ -1717,12 +1717,12 @@ Java publishing uses the protected `maven-publish` environment plus `GPG_PRIVATE
 
 Registry releases are immutable. Increment the relevant manifest version before publishing another release.
 
-This release is Python `aiwaf 1.2.5`, npm `aiwaf 1.2.3` and Java `aiwaf-java 1.3.8`, with
+This release is Python `aiwaf 1.2.5`, npm `aiwaf 1.2.4` and Java `aiwaf-java 1.3.8`, with
 the injection audit changes. Python 1.2.4, Java 1.3.7, `aiwaf-rust 0.2.12` and
 `aiwaf-wasm 0.2.9` are already published, and the engines are unchanged. Python now requires
 `aiwaf-rust>=0.2.12` and npm `aiwaf` `aiwaf-wasm ^0.2.9`, so every native feature is available
-after an install. npm `aiwaf 1.2.3` was never published, so it also ships the Node.js changes
-listed under Python 1.2.4.
+after an install. npm `aiwaf` 1.2.3 was staged but never released, and npm doesn't reuse a
+version, so npm `aiwaf 1.2.4` also ships the Node.js changes listed under Python 1.2.4.
 
 ## Security and limitations
 

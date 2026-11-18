@@ -1,10 +1,11 @@
 # Changelog
 
-## Python 1.2.5 / Node.js 1.2.3 / Java 1.3.8 — prepared release
+## Python 1.2.5 / Node.js 1.2.4 / Java 1.3.8 — prepared release
 
 - **Release note:** Python 1.2.4, Java 1.3.7, aiwaf-rust 0.2.12 and aiwaf-wasm 0.2.9 are
   published, and the engines are unchanged, so this release needs no new engine. npm `aiwaf`
-  1.2.3 was never published: it ships the Node.js changes of this section and the next.
+  1.2.3 was staged but never released, and npm doesn't reuse a version, so npm `aiwaf` 1.2.4
+  ships the Node.js changes of this section and the next.
 - Python requires `aiwaf-rust>=0.2.12` (was 0.2.11), and npm `aiwaf` `aiwaf-wasm ^0.2.9`
   (was ^0.2.8), so the features of the previous section that needed the newer engines (the
   Django logger between other middleware, Node.js user-agent lists) work after an install
