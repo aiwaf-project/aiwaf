@@ -202,6 +202,16 @@ describe('route risks', () => {
     expect(routes['/y'].injection_risks).toBeUndefined();
   });
 
+  test('findings in a helper file link through the Next.js route file that called it', () => {
+    const finding = {
+      file: 'lib/sql.js', entry_file: 'pages/api/users/[id].js', line: 2, function: 'handler -> search',
+      sink: 'sql', call: 'db.query', source: 'req.query.id', confidence: 'high'
+    };
+    const manifest = { routes: { '/api/users/:id': {}, '/other': {} } };
+    expect(applyReport({ findings: [finding] }, manifest)).toEqual({ routes: 1, linked: 1, unlinked: 0 });
+    expect(manifest.routes['/api/users/:id'].injection_risks).toHaveLength(1);
+  });
+
   test('routers link under one mount prefix, and never by a guess', () => {
     const source = "router.get('/x', (req, res) => { exec(req.query.id); });";
     expect(linked(source, { '/api/x': {} }).counts.linked).toBe(1);

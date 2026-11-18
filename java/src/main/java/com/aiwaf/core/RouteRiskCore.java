@@ -357,7 +357,8 @@ public final class RouteRiskCore {
             boolean matched = false;
             for (Map.Entry<String, Object> route : routes.entrySet()) {
                 if (route.getValue() instanceof Map<?, ?> data
-                        && viewMatches(String.valueOf(data.get("view")), entry, finding.file())) {
+                        && viewMatches(String.valueOf(data.get("view")), entry,
+                                finding.entryFile() == null || finding.entryFile().isEmpty() ? finding.file() : finding.entryFile())) {
                     matched = true;
                     String input = inputFromSource(finding.source());
                     Map<String, String> risk = new LinkedHashMap<>();

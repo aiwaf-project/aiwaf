@@ -158,7 +158,7 @@ function applyAutoMiddlewareDefaults(opts, enabled, rawOpts = {}) {
 
 // The first aiwaf-wasm with every engine feature from_settings relies on: stores, shared rate
 // counts, path-rule limits, monitor mode and UUID resolvers.
-const NATIVE_DEFAULT_WASM = '0.2.8';
+const NATIVE_DEFAULT_WASM = '0.2.9';
 
 function installedWasmVersion() {
   const fs = require('fs');

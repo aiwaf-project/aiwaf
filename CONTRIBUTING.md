@@ -32,13 +32,14 @@ python scripts/check_rust_source_build.py
 
 `python aiwaf_test.py` rebuilds `aiwaf-rust` from `rust/` before running Python tests, so tests always use your current code. Use `--no-rust-build` to skip the build and test the installed copy. If you run `pytest` or `manage.py test` directly, rerun the `maturin develop` command after changing anything in `rust/`.
 
-Run every Python and JavaScript test group from the repository root:
+Run every Python, JavaScript, Rust and Java test group from the repository root. The Java group
+needs a JDK 17 or newer and Maven; add `--no-java` to skip it:
 
 ```bash
 python aiwaf_test.py
 ```
 
-Use `--python-only` or `--js-only` for one language. The runner keeps Django in a separate process so its global application state does not leak into the other Python adapters.
+Use `--python-only`, `--js-only` or `--java-only` for one language. The runner keeps Django in a separate process so its global application state does not leak into the other Python adapters.
 
 Run coverage with callable-level auditing, or run the native adapter contracts
 independently:

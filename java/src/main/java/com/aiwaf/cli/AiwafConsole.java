@@ -349,8 +349,10 @@ public final class AiwafConsole {
         boolean includeTests = false;
         boolean failOnFindings = false;
         String manifest = null;
+        String baseline = null;
         for (int index = 1; index < args.length; index++) {
             switch (args[index]) {
+                case "--baseline" -> baseline = index + 1 < args.length ? args[++index] : "";
                 case "--format" -> format = index + 1 < args.length ? args[++index] : "";
                 case "--output" -> output = index + 1 < args.length ? args[++index] : "";
                 case "--include-tests" -> includeTests = true;
@@ -359,16 +361,26 @@ public final class AiwafConsole {
                 default -> path = args[index];
             }
         }
-        if ((!format.equals("text") && !format.equals("json")) || "".equals(output) || "".equals(manifest)) {
-            System.err.println("Usage: aiwaf-cli audit [path] [--format text|json] [--output file] [--include-tests] [--fail-on-findings] [--manifest file]");
+        if (!List.of("text", "json", "sarif").contains(format) || "".equals(output) || "".equals(manifest) || "".equals(baseline)) {
+            System.err.println("Usage: aiwaf-cli audit [path] [--format text|json|sarif] [--output file] [--include-tests] "
+                    + "[--fail-on-findings] [--manifest file] [--baseline file]");
             return 2;
         }
         try {
+            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
             com.aiwaf.core.JavaSourceAnalysisCore.Report report =
                     com.aiwaf.core.JavaSourceAnalysisCore.analyze(java.nio.file.Path.of(path), includeTests);
-            String content = format.equals("json")
-                    ? new com.fasterxml.jackson.databind.ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(report.toMap())
-                    : report.toText();
+            if (baseline != null) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> earlier = mapper.readValue(java.nio.file.Path.of(baseline).toFile(), Map.class);
+                report = com.aiwaf.core.JavaSourceAnalysisCore.applyBaseline(report, earlier);
+            }
+            String content = switch (format) {
+                case "json" -> mapper.writerWithDefaultPrettyPrinter().writeValueAsString(report.toMap());
+                case "sarif" -> mapper.writerWithDefaultPrettyPrinter().writeValueAsString(
+                        com.aiwaf.core.JavaSourceAnalysisCore.toSarif(report));
+                default -> report.toText();
+            };
             if (output != null) {
                 java.nio.file.Files.writeString(java.nio.file.Path.of(output), content + System.lineSeparator());
             } else {

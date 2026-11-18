@@ -104,7 +104,7 @@ function fileRoute(filename) {
 function routesFor(finding, routes) {
   const entry = String(finding.function || '').split(' -> ')[0];
   const paths = Object.keys(routes);
-  const fromSource = (/^\S+ (\/\S*)$/.exec(entry) || [])[1] || fileRoute(finding.file);
+  const fromSource = (/^\S+ (\/\S*)$/.exec(entry) || [])[1] || fileRoute(finding.entry_file || finding.file);
   if (fromSource) {
     const wanted = trimRoute(fromSource);
     const exact = paths.filter(path => trimRoute(path) === wanted);

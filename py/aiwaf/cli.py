@@ -120,25 +120,31 @@ def _handle_audit(argv) -> int:
     """Report possible injection paths. This reads source files and runs no application code."""
     import argparse
 
-    from aiwaf.core.injection_analysis import analyze_path, format_report, to_json
+    import json
+
+    from aiwaf.core.injection_analysis import analyze_path, apply_baseline, format_report, to_json, to_sarif
 
     parser = argparse.ArgumentParser(
         prog="aiwaf audit",
         description="Report where request input reaches SQL, commands, files and other dangerous operations.",
     )
     parser.add_argument("path", nargs="?", default=".", help="File or folder to scan (default: current folder)")
-    parser.add_argument("--format", choices=["text", "json"], default="text")
+    parser.add_argument("--format", choices=["text", "json", "sarif"], default="text",
+                        help="sarif is for GitHub code scanning and other SARIF readers")
     parser.add_argument("--output", help="Write the report to this file")
     parser.add_argument("--include-tests", action="store_true", help="Also scan test files")
     parser.add_argument("--fail-on-findings", action="store_true", help="Exit with status 1 if anything is found")
     parser.add_argument("--manifest", help="Save findings to this route manifest for AIWAF_INJECTION_RISK_MODE=log")
+    parser.add_argument("--baseline", help="Leave out findings already in this earlier JSON report")
     args = parser.parse_args(argv)
     try:
         report = analyze_path(args.path, include_tests=args.include_tests)
-    except FileNotFoundError as error:
+        if args.baseline:
+            report = apply_baseline(report, json.loads(Path(args.baseline).read_text(encoding="utf-8")))
+    except (FileNotFoundError, ValueError) as error:
         print(error, file=sys.stderr)
         return 2
-    content = to_json(report) if args.format == "json" else format_report(report)
+    content = {"json": to_json, "sarif": to_sarif}.get(args.format, format_report)(report)
     if args.output:
         Path(args.output).write_text(content + "\n", encoding="utf-8")
     else:

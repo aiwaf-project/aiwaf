@@ -1,5 +1,70 @@
 # Changelog
 
+## Python 1.2.5 / Node.js 1.2.3 / Java 1.3.8 — prepared release
+
+- **Release note:** Python 1.2.4, Java 1.3.7, aiwaf-rust 0.2.12 and aiwaf-wasm 0.2.9 are
+  published, and the engines are unchanged, so this release needs no new engine. npm `aiwaf`
+  1.2.3 was never published: it ships the Node.js changes of this section and the next.
+- Python requires `aiwaf-rust>=0.2.12` (was 0.2.11), and npm `aiwaf` `aiwaf-wasm ^0.2.9`
+  (was ^0.2.8), so the features of the previous section that needed the newer engines (the
+  Django logger between other middleware, Node.js user-agent lists) work after an install
+  instead of falling back to the regular middleware. Node.js picks the native pipeline by
+  default with aiwaf-wasm 0.2.9 or newer.
+- Injection audit (Python, Node.js and Java): input is now followed through a helper's return value,
+  into a list, set or map filled in a loop (`append`, `add`, `push` and similar), and into
+  functions imported from other project files, through relative imports and `require()`. A
+  finding in another file names the handler's file in `entry_file`, which `--manifest` and
+  `init` use to link it to the route. Route values already parsed as numbers or UUIDs no longer
+  count as input: Python parameters typed `int`, `float`, `bool`, `UUID` and similar (also
+  inside `Optional`, `Annotated` or a union with `None`), Flask `<int:…>`, `<float:…>` and
+  `<uuid:…>` converters, and NestJS `ParseIntPipe`, `ParseFloatPipe`, `ParseBoolPipe` and
+  `ParseUUIDPipe`. Java follows calls into other scanned classes through field, parameter and
+  local variable types, static calls, and an interface or base class with one implementation, and
+  no longer counts Spring parameters typed as numbers, booleans, dates or UUIDs (also inside
+  `Optional`, `List` or `Set`, or as arrays) as input. Java findings gained `entryFile()`; the
+  old seven-field `Finding` constructor still works.
+- Injection audit: method calls on instances of the project's classes are followed into the
+  class, in all three languages: values built with `new`/a constructor, typed variables,
+  parameters and fields (NestJS constructor injection, FastAPI `Depends(Service)`, Spring fields),
+  and, in Java, other calls' return types and `var`. Java follows every implementation of an
+  interface, up to five. Node.js follows `tsconfig.json` or `jsconfig.json` `paths` and `baseUrl`
+  (with `extends`) and packages in the scanned folder, by their `package.json` `exports`, `module`
+  or `main`. A call that runs one of the project's own methods is no longer also guessed to be a
+  database or file call from its name, as `this.users.find(id)` was.
+- Injection audit, measured: `scripts/audit_benchmark.py` scores an audit report on an OWASP
+  Benchmark checkout. Before this release the Java audit scored +3.0 and the Python audit +4.0
+  on OWASP's scale (0 is guessing); both now score +100 on every injection category, with no
+  false alarms (1,572 Java and 677 Python cases). The benchmarks are small synthetic cases, so
+  this isn't proof of the same on real applications.
+- Injection audit, more operations (Python, Node.js and Java): `xss`, `redirect`, `ldap`,
+  `xpath`, `xxe` (only with external entities turned on) and `redos`, and `prototype`
+  pollution in Node.js. Header injection isn't reported: Node.js, Werkzeug, Django and servlet
+  containers reject newlines in header values.
+- Injection audit, fewer false alarms: checks that return or throw when a value fails
+  (`isalnum()`, regex tests, allowlists, `url_has_allowed_host_and_scheme`, `'..'` checks)
+  make it safe; encoders are safe only for what they encode for (`html.escape` and
+  `encodeForHTML` for HTML, `shlex.quote` for shells, `path.basename` for paths), where some
+  stopped every finding before; conditions and switches on values known before running, dict
+  and object keys, and list positions are followed. A call into the project's own method isn't
+  also guessed to be a database call from its name.
+- Injection audit, more input: GraphQL resolvers (Graphene, Strawberry, Ariadne, Apollo-style
+  resolver maps, NestJS `@Args`, TypeGraphQL, Spring `@Argument`, DGS `@InputArgument`), tRPC
+  `input`, Next.js server actions, Fetch API requests (`request.json()`, `formData()`,
+  `searchParams`), Spring WebFlux, and WebSocket messages (ws, Socket.IO, FastAPI, Channels,
+  Flask-SocketIO, `@MessageMapping`, `@OnMessage`). Input is followed through callbacks
+  (`.then()`, `.map()`, Java lambdas), objects that keep it in fields, values middleware keeps
+  on the request or `flask.g`, request and session attributes, `with open(...)`, `pathlib`
+  paths, `StringIO`, Base64 and `file:` URIs.
+- Injection audit, CI: `--format sarif` (SARIF 2.1.0 with stable fingerprints),
+  `--baseline report.json` to report only new findings, and `aiwaf: ignore` or
+  `aiwaf: ignore[sql]` comments. A helper called with the same input from many routes is
+  walked once: a 400-route test project with 512 shared database calls each takes 0.7 s in
+  Node.js, 1.1 s in Python (12.7 s before) and 1.7 s in Java.
+- Fix (Node.js audit): a project with very many findings no longer overflows the call stack.
+- Tests: `python aiwaf_test.py` runs the Java suite with Maven too, and `--java-only` runs it
+  alone. `--no-java` skips it on machines without a JDK 17+ and Maven. The monorepo CI workflow
+  sets up Java 17 and runs on changes under `java/`.
+
 ## Python 1.2.4 / aiwaf-rust 0.2.12 / Node.js 1.2.3 / WASM 0.2.9 — prepared release
 
 - **Release note:** Python 1.2.3, aiwaf-rust 0.2.11 and aiwaf-wasm 0.2.8 are published; npm

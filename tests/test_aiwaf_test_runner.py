@@ -12,6 +12,7 @@ import aiwaf_test
     (["--rust-only"], True),
     (["--js-only"], False),
     (["--wasm-only"], False),
+    (["--java-only"], False),
     (["--no-rust-build"], False),
     (["--python-only", "--no-rust-build"], False),
 ])
@@ -91,3 +92,34 @@ def test_no_rust_build_skips_the_build(monkeypatch):
     assert aiwaf_test.main(["--rust-only", "--no-rust-build"]) == 0
 
     assert all(not task.name.startswith("Rust /") for task in ran)
+
+
+def test_java_runs_with_maven_in_full_runs_and_alone(monkeypatch):
+    monkeypatch.setattr(aiwaf_test, "_java_problem", lambda: None)
+    ran = []
+    monkeypatch.setattr(aiwaf_test, "_run_task", lambda task: ran.append(task) or (True, 0.0))
+
+    assert aiwaf_test.main(["--java-only"]) == 0
+    java = [task for task in ran if task.name == aiwaf_test.JAVA_TASK]
+    assert len(java) == 1
+    assert java[0].command[1:] == ("-B", "-q", "-f", "java/pom.xml", "test")
+    assert not any(task.name.startswith(("Rust /", "WASM /", "Python /", "JavaScript /")) for task in ran)
+
+    ran.clear()
+    assert aiwaf_test.main(["--no-rust-build"]) == 0
+    assert ran[-1].name == aiwaf_test.JAVA_TASK
+
+    ran.clear()
+    assert aiwaf_test.main(["--no-rust-build", "--no-java"]) == 0
+    assert all(task.name != aiwaf_test.JAVA_TASK for task in ran)
+
+
+def test_missing_maven_fails_the_java_group_with_guidance(monkeypatch, capsys):
+    monkeypatch.setattr(aiwaf_test.shutil, "which", lambda name: None)
+    ran = []
+    monkeypatch.setattr(aiwaf_test, "_run_task", lambda task: ran.append(task) or (True, 0.0))
+
+    assert aiwaf_test.main(["--java-only"]) == 1
+
+    assert all(task.name != aiwaf_test.JAVA_TASK for task in ran)
+    assert "--no-java" in capsys.readouterr().err

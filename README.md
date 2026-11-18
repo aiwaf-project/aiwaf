@@ -39,15 +39,15 @@ the supported Redis backends when sharing limits across workers.
 
 Each package is versioned and released independently.
 
-Python 1.2.4, Rust/Python 0.2.12, Node.js 1.2.3, WASM 0.2.9, and Java 1.3.7 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
+Python 1.2.5, Rust/Python 0.2.12, Node.js 1.2.3, WASM 0.2.9, and Java 1.3.8 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
 
 | Runtime | Package | Repository version | Primary use |
 | --- | --- | ---: | --- |
-| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.2.4` | Django, Flask, and FastAPI protection |
+| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.2.5` | Django, Flask, and FastAPI protection |
 | Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.2.3` | Express and Node framework middleware |
 | Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.12` | Native Python acceleration and JSON model inference |
 | WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.9` | Rust detection and model primitives for JavaScript |
-| Java | `io.github.aiwaf-project:aiwaf-java` | `1.3.7` | Spring MVC and Jakarta Servlet protection |
+| Java | `io.github.aiwaf-project:aiwaf-java` | `1.3.8` | Spring MVC and Jakarta Servlet protection |
 
 Supported framework integrations include Django, Flask, FastAPI, Express, Fastify, Hapi, Koa, NestJS, Next.js API routes, AdonisJS, Sails.js, Spring MVC, and Jakarta Servlet.
 
@@ -91,10 +91,9 @@ If untrusted hosts can reach the application directly from your private network,
 
 ## Injection audit
 
-`audit` reads your source code and reports where request input can reach SQL, NoSQL,
-shell commands, file paths, outbound requests, code evaluation, templates or
-deserialization. It parses files without running them, and it doesn't change how
-requests are handled.
+`audit` reads your source code and reports where request input can reach a dangerous
+operation. It parses files without running them, and it doesn't change how requests are
+handled.
 
 ```bash
 aiwaf audit path/to/app                                    # Python
@@ -104,18 +103,57 @@ java -cp <classpath> com.aiwaf.cli.AiwafConsole audit src  # Java, needs a JDK
 
 | Language | Frameworks | Parser |
 | --- | --- | --- |
-| Python | Django, Flask, FastAPI | `ast` |
-| Node.js | Express, Fastify, Hapi, Koa, NestJS, Next.js, AdonisJS, Sails | `@babel/parser` |
-| Java | Spring, Jakarta Servlet, JAX-RS parameters | JDK Compiler Tree API |
+| Python | Django, Flask, FastAPI, Graphene, Strawberry, Ariadne, Channels, Flask-SocketIO | `ast` |
+| Node.js | Express, Fastify, Hapi, Koa, NestJS, Next.js (routes and server actions), Remix, tRPC, GraphQL resolvers, AdonisJS, Sails, ws and Socket.IO | `@babel/parser` |
+| Java | Spring MVC and WebFlux, Spring GraphQL, Netflix DGS, Jakarta Servlet, JAX-RS, Spring messaging and Jakarta WebSocket | JDK Compiler Tree API |
 
-All three accept `--format text|json`, `--output <file>`, `--include-tests` and
-`--fail-on-findings` and `--manifest <file>`. The exit status is 0 when the scan completes, 1 with
-`--fail-on-findings` when something is found, and 2 for a bad path or argument.
+It reports these operations:
+
+| Operation | Examples |
+| --- | --- |
+| `sql`, `nosql` | `cursor.execute`, `db.query`, `jdbcTemplate.update`, `collection.find` |
+| `command` | `os.system`, `exec`, `Runtime.exec`, `ProcessBuilder` |
+| `path` | `open`, `fs.readFile`, `new File`, `Path.read_text` |
+| `ssrf` | `requests.get`, `fetch`, `RestTemplate` |
+| `code`, `template`, `deserialization` | `eval`, `render_template_string`, `pickle.loads` |
+| `xss` | text returned from a Flask view, `res.send`, `ctx.body`, `response.getWriter()` |
+| `redirect` | `redirect`, `res.redirect`, `sendRedirect` |
+| `ldap`, `xpath` | `conn.search`, `client.search`, `xpath`, `XPath.evaluate` |
+| `xxe` | XML parsers with external entities turned on |
+| `redos` | regular expressions built from input |
+| `prototype` (Node.js) | `obj[key] = value` with a key from input, `_.merge` |
+
+It follows input through helpers, return values, other files and classes, objects that
+keep input in fields, middleware that keeps input on the request, and callbacks such as
+`.then()` and `.map()`. It understands checks: `if not name.isalnum(): return`, allowlists,
+regex tests and `'..'` checks make a value safe, and encoders such as `html.escape` make
+it safe only for what they encode for (HTML, not SQL). Values decided before the program
+runs, dict keys and list positions are followed, so `m['safe']` isn't confused with
+`m['input']`.
+
+On the [OWASP Benchmark](https://owasp.org/www-project-benchmark/), whose labelled test
+cases are real vulnerabilities or safe look-alikes, the Java audit finds every one of
+1,572 injection cases with no false alarms, and the Python audit every one of 677
+(scores of +100 on OWASP's scale). The benchmarks are small synthetic cases, so this isn't
+proof of the same on real applications; `scripts/audit_benchmark.py` repeats the
+measurement on a checkout of either.
+
+All three accept `--format text|json|sarif`, `--output <file>`, `--include-tests`,
+`--fail-on-findings`, `--manifest <file>` and `--baseline <file>`. The exit status is 0
+when the scan completes, 1 with `--fail-on-findings` when something is found, and 2 for a
+bad path or argument.
+
+- `--format sarif` writes SARIF 2.1.0, which GitHub code scanning and other tools read.
+- `--baseline report.json` leaves out findings already in an earlier JSON report, so CI
+  fails only on new ones. Findings match by file, operation, call, function and input,
+  not line, so moved code still matches.
+- A comment `aiwaf: ignore` on a finding's line or the line above leaves it out, and
+  `aiwaf: ignore[sql, xss]` leaves out only those operations. The report counts them.
 
 A finding is a path worth reading, not a confirmed vulnerability. A reverse proxy, for
 example, will report its upstream request because forwarding input is its job. A clean
-report doesn't prove the code is safe: input that crosses files, classes or dynamic
-calls can be missed, because helpers are only followed within one file or class.
+report doesn't prove the code is safe: reflection, dynamic calls and library code can be
+missed, and helpers are followed three calls deep.
 
 Java can also build a route manifest from source, without starting the application.
 This is how plain Servlet applications get a manifest:
@@ -256,7 +294,7 @@ pip install "aiwaf[django]"
 pip install "aiwaf[flask]"
 pip install "aiwaf[fastapi]"
 
-# Backward-compatible alias; Python 1.2.4 already installs aiwaf-rust
+# Backward-compatible alias; Python 1.2.5 already installs aiwaf-rust
 pip install "aiwaf[rust]"
 
 # Node.js middleware
@@ -266,13 +304,13 @@ npm install aiwaf
 npm install aiwaf-wasm
 ```
 
-Java 1.3.7, after it is published to Maven Central:
+Java 1.3.8, after it is published to Maven Central:
 
 ```xml
 <dependency>
   <groupId>io.github.aiwaf-project</groupId>
   <artifactId>aiwaf-java</artifactId>
-  <version>1.3.7</version>
+  <version>1.3.8</version>
 </dependency>
 ```
 
@@ -280,7 +318,7 @@ Java 1.3.7, after it is published to Maven Central:
 
 The Python package requires Python 3.10 or newer. Framework dependencies are optional, so install only the extra needed by the application.
 
-Python 1.2.4 requires `aiwaf-rust>=0.2.11`; the `rust` extra remains an installation
+Python 1.2.5 requires `aiwaf-rust>=0.2.12`; the `rust` extra remains an installation
 alias. Publish the matching Rust wheel with `NativeCSVPipeline` support before
 the Python release. The Rust release workflow builds Linux x86_64/aarch64,
 musl x86_64, macOS x86_64/arm64 and Windows x86_64 wheels and checks the native
@@ -1103,7 +1141,7 @@ existence to `Boolean(req.route)`. Supply accurate facts when the firewall runs
 before Express resolves routes. Country headers are not implicitly trusted.
 
 **`aiwaf(options)` runs the native pipeline by default** when two things hold: the
-installed aiwaf-wasm is 0.2.8 or newer (it has every native feature), and every option
+installed aiwaf-wasm is 0.2.9 or newer (it has every native feature), and every option
 carries over exactly, so the conversion report below lists no differences. Otherwise it
 runs the regular middleware, as before. It logs one line when it picks the native
 pipeline. To keep the regular middleware, set `AIWAF_NATIVE_PIPELINE: false` in the
@@ -1350,7 +1388,7 @@ cp -R ../licenses crates/aiwaf_wasm/pkg/
 
 ## Java package
 
-AIWAF Java 1.3.7 targets Java 17, Spring Framework 7.0, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
+AIWAF Java 1.3.8 targets Java 17, Spring Framework 7.0, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
 
 ### Core engine
 
@@ -1439,7 +1477,7 @@ UUID protection uses Python-compatible weighted signals: malformed input, valid 
 Generate a route manifest from the live Spring application rather than supplying controller methods manually:
 
 ```bash
-java -cp "your-app.jar:aiwaf-java-1.3.7.jar" \
+java -cp "your-app.jar:aiwaf-java-1.3.8.jar" \
   com.aiwaf.cli.AiwafConsole init \
   --app com.example.Application \
   --output .aiwaf/paths.json
@@ -1635,14 +1673,11 @@ python aiwaf_test.py --python-only
 python aiwaf_test.py --rust-only
 python aiwaf_test.py --js-only
 python aiwaf_test.py --wasm-only
+python aiwaf_test.py --java-only
 ```
 
-Java is tested separately:
-
-```bash
-cd java
-mvn test
-```
+Full runs include the Java suite, which needs a JDK 17 or newer and Maven. Use `--no-java`
+to skip it on a machine without them, or run it directly with `mvn -f java/pom.xml test`.
 
 ### Direct package commands
 
@@ -1670,11 +1705,11 @@ Release versions and tags must match the relevant manifest.
 
 | Package | Manifest | Tag | Workflow |
 | --- | --- | --- | --- |
-| Python `aiwaf` | `pyproject.toml` | `python-v1.2.4` | `python-publish.yml` |
+| Python `aiwaf` | `pyproject.toml` | `python-v1.2.5` | `python-publish.yml` |
 | npm `aiwaf` | `js/package.json` | `js-v1.2.3` | `npm-publish.yml` |
 | PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.12` | `rust-publish.yml` |
 | npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.9` | `wasm-publish.yml` |
-| Maven `aiwaf-java` | `java/pom.xml` | `java-v1.3.7` | `java-publish.yml` |
+| Maven `aiwaf-java` | `java/pom.xml` | `java-v1.3.8` | `java-publish.yml` |
 
 Python and Rust publish to PyPI with trusted publishing. The npm workflows use npm trusted publishing and stage packages for approval. Configure the trusted publisher with organization `aiwaf-project`, repository `aiwaf`, the exact workflow filename, and the environment used by that workflow.
 
@@ -1682,11 +1717,12 @@ Java publishing uses the protected `maven-publish` environment plus `GPG_PRIVATE
 
 Registry releases are immutable. Increment the relevant manifest version before publishing another release.
 
-This release is Python `aiwaf 1.2.4` with `aiwaf-rust 0.2.12`, and npm `aiwaf 1.2.3` with
-`aiwaf-wasm 0.2.9`. Python 1.2.3, `aiwaf-rust 0.2.11` and `aiwaf-wasm 0.2.8` are already
-published. Python 1.2.4 still requires only `aiwaf-rust>=0.2.11`, and npm `aiwaf` only
-`aiwaf-wasm ^0.2.8`; publish the new engines first so the features that need them are
-available. Java 1.3.7 has no changes in this release.
+This release is Python `aiwaf 1.2.5`, npm `aiwaf 1.2.3` and Java `aiwaf-java 1.3.8`, with
+the injection audit changes. Python 1.2.4, Java 1.3.7, `aiwaf-rust 0.2.12` and
+`aiwaf-wasm 0.2.9` are already published, and the engines are unchanged. Python now requires
+`aiwaf-rust>=0.2.12` and npm `aiwaf` `aiwaf-wasm ^0.2.9`, so every native feature is available
+after an install. npm `aiwaf 1.2.3` was never published, so it also ships the Node.js changes
+listed under Python 1.2.4.
 
 ## Security and limitations
 

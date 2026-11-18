@@ -340,6 +340,23 @@ class RouteRiskCoreTest {
     }
 
     @Test
+    void findingsInAServiceLinkThroughTheControllerThatCalledIt() throws IOException {
+        audit("com/acme/svc/UserService.java", "package com.acme.svc; public class UserService { "
+                + "public void search(String term) { Runtime.getRuntime().exec(term); } }");
+        JavaSourceAnalysisCore.Report report = audit("com/acme/web/App.java", """
+                package com.acme.web;
+                @RestController
+                class App {
+                    private final UserService users;
+                    @GetMapping("/search")
+                    String view(@RequestParam("q") String value) { users.search(value); return "ok"; }
+                }
+                """);
+        assertTrue(report.findings().get(0).file().endsWith("com/acme/svc/UserService.java"));
+        assertEquals(new RouteRiskCore.Counts(1, 1, 0), RouteRiskCore.applyReport(report, routes("/search", "com.acme.web.App.view")));
+    }
+
+    @Test
     void sameNamedClassesElsewhereDoNotLink() throws IOException {
         JavaSourceAnalysisCore.Report report = audit("com/acme/App.java", VIEW);
         assertEquals(new RouteRiskCore.Counts(0, 0, 1), RouteRiskCore.applyReport(report, routes("/search", "org.other.App.view")));

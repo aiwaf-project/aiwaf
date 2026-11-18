@@ -10,6 +10,9 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.Arguments;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -144,6 +147,256 @@ class JavaSourceAnalysisCoreTest {
                 }
                 """);
         assertEquals("App.view -> outer -> run", report.findings().get(0).function());
+    }
+
+    @Test
+    void aHelpersReturnValueCarriesItsInput() throws IOException {
+        JavaSourceAnalysisCore.Report report = analyze("""
+                @RestController
+                class App {
+                    @GetMapping("/u") String v(@RequestParam String n) { jdbcTemplate.queryForList(build(n)); return "ok"; }
+                    @GetMapping("/s") String s(@RequestParam String n) { jdbcTemplate.queryForList("x" + clean(n)); return "ok"; }
+                    private String build(String n) { Runnable r = () -> { return; }; return "SELECT " + n; }
+                    private int clean(String n) { return Integer.parseInt(n); }
+                }
+                """);
+        assertEquals(List.of("App.v"), report.findings().stream().map(JavaSourceAnalysisCore.Finding::function).toList());
+    }
+
+    @Test
+    void aCollectionBuiltInALoopCarriesItsInput() throws IOException {
+        assertEquals(List.of("sql"), analyze("""
+                @RestController
+                class App {
+                    @GetMapping("/u") String v(@RequestParam List<String> ids) {
+                        List<String> parts = new ArrayList<>();
+                        for (String id : ids) { parts.add(id); }
+                        jdbcTemplate.queryForList("SELECT " + String.join(",", parts));
+                        return "ok";
+                    }
+                }
+                """).findings().stream().map(JavaSourceAnalysisCore.Finding::sink).toList());
+    }
+
+    @Test
+    void valuesSpringConvertsToNumbersOrUuidsAreNotInput() throws IOException {
+        JavaSourceAnalysisCore.Report report = analyze("""
+                @RestController
+                class App {
+                    @GetMapping("/a/{id}") String a(@PathVariable Long id) { jdbcTemplate.queryForList("SELECT " + id); return ""; }
+                    @GetMapping("/b") String b(@RequestParam int page, @RequestParam UUID token, @RequestParam Optional<Integer> n,
+                                               @RequestParam List<Long> ids, @RequestParam long[] more) {
+                        jdbcTemplate.queryForList("SELECT " + page + token + n + ids + more);
+                        return "";
+                    }
+                    @GetMapping("/c") String c(@RequestParam String name, @RequestParam Optional<String> other) {
+                        jdbcTemplate.queryForList("SELECT " + name + other);
+                        return "";
+                    }
+                }
+                """);
+        assertEquals(List.of("App.c"), report.findings().stream().map(JavaSourceAnalysisCore.Finding::function).toList());
+    }
+
+    @Test
+    void callsIntoOtherClassesAreFollowedAndNameTheHandlersFile() throws IOException {
+        Files.createDirectories(directory.resolve("svc"));
+        Files.writeString(directory.resolve("svc/UserService.java"), """
+                class UserService {
+                    void search(String term) { jdbcTemplate.queryForList("SELECT * FROM t WHERE n = '" + term + "'"); }
+                    String harmless(String term) { return term; }
+                }
+                """);
+        Files.writeString(directory.resolve("svc/Queries.java"), "class Queries { static void run(String q) { statement.executeQuery(q); } }");
+        Files.writeString(directory.resolve("svc/Repo.java"), """
+                interface Repo { void find(String q); }
+                class RepoImpl implements Repo { public void find(String q) { jdbcTemplate.queryForList("SELECT " + q); } }
+                """);
+        JavaSourceAnalysisCore.Report report = analyze("""
+                @RestController
+                class App {
+                    private final UserService users;
+                    @Autowired private Repo repo;
+                    @GetMapping("/search") String s(@RequestParam String q) { users.search(q); return ""; }
+                    @GetMapping("/fields") String f(@RequestParam String q) { this.users.search(q); return ""; }
+                    @GetMapping("/harmless") String h(@RequestParam String q) { users.harmless(q); return ""; }
+                    @GetMapping("/static") String t(@RequestParam String q) { Queries.run(q); return ""; }
+                    @GetMapping("/repo") String r(@RequestParam String q) { repo.find(q); return ""; }
+                    @GetMapping("/local") String l(@RequestParam String q) { UserService other = make(); other.search(q); return ""; }
+                }
+                """);
+        assertEquals(List.of("App.t -> run", "App.r -> find", "App.f -> search", "App.l -> search", "App.s -> search"),
+                report.findings().stream().map(JavaSourceAnalysisCore.Finding::function).toList());
+        for (JavaSourceAnalysisCore.Finding finding : report.findings()) {
+            assertTrue(finding.entryFile().endsWith("/App.java"), finding.toString());
+            assertFalse(finding.file().endsWith("/App.java"), finding.toString());
+        }
+        @SuppressWarnings("unchecked")
+        Map<String, Object> first = ((List<Map<String, Object>>) report.toMap().get("findings")).get(0);
+        assertTrue(String.valueOf(first.get("entry_file")).endsWith("/App.java"));
+    }
+
+    @Test
+    void callsOnReturnedValuesAndEveryImplementationAreFollowed() throws IOException {
+        JavaSourceAnalysisCore.Report report = analyze("""
+                @RestController
+                class App {
+                    private final Services services;
+                    private final Store store;
+                    @GetMapping("/a") String a(@RequestParam String q) { services.users().search(q); return ""; }
+                    @GetMapping("/b") String b(@RequestParam String q) { var u = services.users(); u.search(q); return ""; }
+                    @GetMapping("/c") String c(@RequestParam String q) { var u = new UserDao(); u.search(q); return ""; }
+                    @GetMapping("/d") String d(@RequestParam String q) { store.save(q); return ""; }
+                    @GetMapping("/e") String e(@RequestParam String q) { ((UserDao) any()).search(q); return ""; }
+                    @GetMapping("/f") String f(@RequestParam String q) { new UserDao().execute(q); return ""; }
+                }
+                class Services { UserDao users() { return new UserDao(); } }
+                class UserDao {
+                    void search(String q) { jdbcTemplate.queryForList("SELECT " + q); }
+                    void execute(String q) { log.info(q); }
+                }
+                interface Store { void save(String v); }
+                class SqlStore implements Store { public void save(String v) { statement.executeUpdate("INSERT " + v); } }
+                class FileStore implements Store { public void save(String v) { new File(v); } }
+                class MemoryStore implements Store { public void save(String v) { map.put(v, v); } }
+                """);
+        assertEquals(List.of("App.a -> search", "App.b -> search", "App.c -> search", "App.e -> search", "App.d -> save", "App.d -> save"),
+                report.findings().stream().map(JavaSourceAnalysisCore.Finding::function).toList());
+        assertEquals(List.of("sql", "sql", "sql", "sql", "sql", "path"),
+                report.findings().stream().map(JavaSourceAnalysisCore.Finding::sink).toList());
+    }
+
+    @Test
+    void interfacesWithManyImplementationsAreNotFollowed() throws IOException {
+        StringBuilder source = new StringBuilder("""
+                @RestController
+                class App {
+                    private final Store store;
+                    @GetMapping("/d") String d(@RequestParam String q) { store.save(q); return ""; }
+                }
+                interface Store { void save(String v); }
+                """);
+        for (int index = 0; index < 6; index++) {
+            source.append("class Store").append(index).append(" implements Store { public void save(String v) { new File(v); } }\n");
+        }
+        assertEquals(0, analyze(source.toString()).findings().size());
+    }
+
+    static Stream<Arguments> flowCases() {
+        return Stream.of(
+                Arguments.of("response writer", List.of("xss"), "response.getWriter().println(value);"),
+                Arguments.of("encoded for HTML", List.of(), "response.getWriter().println(ESAPI.encoder().encodeForHTML(value));"),
+                Arguments.of("encoded for HTML, then used in SQL", List.of("sql"), "String v = ESAPI.encoder().encodeForHTML(value); jdbcTemplate.update(\"DELETE \" + v);"),
+                Arguments.of("redirect", List.of("redirect"), "response.sendRedirect(value);"),
+                Arguments.of("LDAP search", List.of("ldap"), "ctx.search(\"ou=users\", \"(uid=\" + value + \")\", controls);"),
+                Arguments.of("LDAP search encoded", List.of(), "ctx.search(\"ou=users\", \"(uid=\" + ESAPI.encoder().encodeForLDAP(value) + \")\", controls);"),
+                Arguments.of("XPath", List.of("xpath"), "javax.xml.xpath.XPath xp = factory.newXPath(); xp.evaluate(\"/u[@id='\" + value + \"']\", doc);"),
+                Arguments.of("regular expression", List.of("redos"), "java.util.regex.Pattern.compile(value);"),
+                Arguments.of("regular expression quoted", List.of(), "java.util.regex.Pattern.compile(java.util.regex.Pattern.quote(value));"),
+                Arguments.of("XML parser", List.of("xxe"), "builder.parse(new java.io.ByteArrayInputStream(value.getBytes()));"),
+                Arguments.of("XML parser hardened", List.of(), "factory.setFeature(\"http://apache.org/xml/features/disallow-doctype-decl\", true); builder.parse(new java.io.ByteArrayInputStream(value.getBytes()));"),
+                Arguments.of("regex check that returns", List.of(), "if (!value.matches(\"[a-z]+\")) return \"\"; Runtime.getRuntime().exec(value);"),
+                Arguments.of("allowlist branch", List.of(), "if (ALLOWED.contains(value)) { jdbcTemplate.update(\"ORDER BY \" + value); }"),
+                Arguments.of("dot-dot check makes a path safe, not SQL", List.of("sql"), "if (value.contains(\"..\")) throw new IllegalArgumentException(); new java.io.File(value); jdbcTemplate.update(value);"),
+                Arguments.of("constant condition", List.of(), "String bar; int num = 106; if ((7 * 18) + num > 200) bar = \"safe\"; else bar = value; jdbcTemplate.update(bar);"),
+                Arguments.of("switch on a known value", List.of(), "String bar; switch (\"ABC\".charAt(1)) { case 'A': bar = value; break; case 'B': bar = \"bob\"; break; default: bar = value; } jdbcTemplate.update(bar);"),
+                Arguments.of("list position", List.of(), "java.util.List<String> l = new java.util.ArrayList<>(); l.add(\"safe\"); l.add(value); l.add(\"more\"); l.remove(0); jdbcTemplate.update(l.get(1));"),
+                Arguments.of("map key", List.of(), "java.util.Map<String, String> m = new java.util.HashMap<>(); m.put(\"a\", \"safe\"); m.put(\"b\", value); jdbcTemplate.update(m.get(\"a\"));"),
+                Arguments.of("map key read back", List.of("sql"), "java.util.Map<String, String> m = new java.util.HashMap<>(); m.put(\"a\", \"safe\"); m.put(\"b\", value); jdbcTemplate.update(m.get(\"b\"));"),
+                Arguments.of("lambda on input", List.of("command"), "java.util.Optional.of(value).ifPresent(v -> Runtime.getRuntime().exec(v));"));
+    }
+
+    // Each case: what it shows, the operations reported, and the code. Safe look-alikes report nothing.
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("flowCases")
+    void inputFlowsAndTheirSafeLookAlikes(String name, List<String> expected, String body) throws IOException {
+        String source = """
+                @RestController
+                class App {
+                    @GetMapping("/x")
+                    String view(@RequestParam String value, HttpServletResponse response) throws Exception {
+                        %s
+                        return "ok";
+                    }
+                }
+                """.formatted(body);
+        assertEquals(expected, analyze(source).findings().stream().map(JavaSourceAnalysisCore.Finding::sink).distinct().sorted().toList());
+    }
+
+    @Test
+    void frameworkInputAndStoredAttributesAreFollowed() throws IOException {
+        JavaSourceAnalysisCore.Report report = analyze("""
+                @Controller
+                class Gql {
+                    @QueryMapping String user(@Argument String id) { jdbcTemplate.queryForList("SELECT " + id); return ""; }
+                    @QueryMapping String count(@Argument int n) { jdbcTemplate.queryForList("SELECT " + n); return ""; }
+                    @DgsQuery String dgs(@InputArgument String q) { jdbcTemplate.queryForList("SELECT " + q); return ""; }
+                }
+                @Controller
+                class Chat {
+                    @MessageMapping("/chat") void send(String message, Principal user) { Runtime.getRuntime().exec(message); }
+                    @MessageMapping("/room/{id}") void room(@DestinationVariable String id) { jdbcTemplate.update("DELETE " + id); }
+                }
+                @ServerEndpoint("/ws")
+                class Socket { @OnMessage public void onMessage(String text, Session session) { new java.io.File(text); } }
+                class Handlers {
+                    Mono<ServerResponse> find(ServerRequest request) {
+                        String q = request.queryParam("q").orElse("");
+                        jdbcTemplate.queryForList("SELECT " + q);
+                        return request.bodyToMono(String.class).map(body -> { Runtime.getRuntime().exec(body); return body; }).then();
+                    }
+                }
+                class Later extends HttpServlet {
+                    protected void doGet(HttpServletRequest req, HttpServletResponse res) {
+                        String t = (String) req.getAttribute("term");
+                        jdbcTemplate.update("DELETE " + t);
+                    }
+                }
+                class Filter extends HttpServlet {
+                    protected void doGet(HttpServletRequest req, HttpServletResponse res) { req.setAttribute("term", req.getParameter("q")); }
+                }
+                """);
+        assertEquals(List.of("Chat.room", "Chat.send", "Gql.dgs", "Gql.user", "Handlers.find", "Handlers.find", "Later.doGet", "Socket.onMessage"),
+                report.findings().stream().map(JavaSourceAnalysisCore.Finding::function).sorted().toList());
+    }
+
+    @Test
+    void ignoreCommentsBaselinesAndSarif() throws IOException {
+        Path file = directory.resolve("App.java");
+        Files.writeString(file, """
+                @RestController
+                class App {
+                    @GetMapping("/x") String v(@RequestParam String a, @RequestParam String b, @RequestParam String c) throws Exception {
+                        Runtime.getRuntime().exec(a);
+                        Runtime.getRuntime().exec(b); // aiwaf: ignore[command]
+                        // aiwaf: ignore
+                        jdbcTemplate.update("DELETE " + c);
+                        jdbcTemplate.update("DELETE " + a); // aiwaf: ignore[xss]
+                        return "";
+                    }
+                }
+                """);
+        JavaSourceAnalysisCore.Report report = JavaSourceAnalysisCore.analyze(directory, false);
+        assertEquals(List.of(4L, 8L), report.findings().stream().map(JavaSourceAnalysisCore.Finding::line).toList());
+        assertEquals(2, report.suppressed());
+        assertEquals(2, report.toMap().get("suppressed"));
+        assertTrue(report.toText().contains("Left out 2 marked with an aiwaf: ignore comment."));
+
+        Map<String, Object> baseline = report.toMap();
+        Files.writeString(file, Files.readString(file).replace("return \"\";", "new java.io.File(b);\n        return \"\";"));
+        JavaSourceAnalysisCore.Report later = JavaSourceAnalysisCore.applyBaseline(JavaSourceAnalysisCore.analyze(directory, false), baseline);
+        assertEquals(List.of("path"), later.findings().stream().map(JavaSourceAnalysisCore.Finding::sink).toList());
+        assertEquals(2, later.baselined());
+        assertTrue(later.toText().contains("Left out 2 already in the baseline."));
+
+        Map<String, Object> sarif = JavaSourceAnalysisCore.toSarif(report);
+        assertEquals("2.1.0", sarif.get("version"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> run = ((List<Map<String, Object>>) sarif.get("runs")).get(0);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> results = (List<Map<String, Object>>) run.get("results");
+        assertEquals(List.of("aiwaf.command", "aiwaf.sql"), results.stream().map(item -> item.get("ruleId")).toList());
+        assertEquals("error", results.get(0).get("level"));
     }
 
     @Test

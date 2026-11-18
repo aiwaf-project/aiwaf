@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run every AIWAF Python and JavaScript test suite from one command."""
+"""Run every AIWAF Python, JavaScript, Rust and Java test suite from one command."""
 
 from __future__ import annotations
 
@@ -127,6 +127,20 @@ def _wasm_task() -> TestTask:
     return TestTask("JavaScript / real and mocked WASM adapters", (npm, "--prefix", "js", "run", "test:wasm"))
 
 
+JAVA_TASK = "Java / Maven"
+
+
+def _java_task() -> TestTask:
+    return TestTask(JAVA_TASK, (shutil.which("mvn") or "mvn", "-B", "-q", "-f", "java/pom.xml", "test"))
+
+
+def _java_problem() -> str | None:
+    if shutil.which("mvn") is None or shutil.which("javac") is None:
+        return ("The Java tests need a JDK 17 or newer and Maven, but mvn or javac wasn't found. "
+                "Install them, or use --no-java to skip the Java tests.")
+    return None
+
+
 def _layout_task() -> TestTask:
     return TestTask(
         "Monorepo / source-to-test module layout",
@@ -140,11 +154,11 @@ def _layout_task() -> TestTask:
 
 
 def _needs_rust_build(args: argparse.Namespace) -> bool:
-    return not (args.js_only or args.wasm_only or args.no_rust_build)
+    return not (args.js_only or args.wasm_only or args.java_only or args.no_rust_build)
 
 
 def _needs_wasm_build(args: argparse.Namespace) -> bool:
-    return not (args.python_only or args.rust_only or args.no_rust_build)
+    return not (args.python_only or args.rust_only or args.java_only or args.no_rust_build)
 
 
 def _wasm_build_task() -> TestTask:
@@ -262,6 +276,9 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     scope.add_argument(
         "--wasm-only", action="store_true", help="Run only the real and mocked WASM suites."
     )
+    scope.add_argument(
+        "--java-only", action="store_true", help="Run only the Java suite, with Maven."
+    )
     parser.add_argument(
         "--fail-fast",
         action="store_true",
@@ -279,6 +296,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--strict-function-coverage",
         action="store_true",
         help="Fail if any production Python callable is not entered; implies --coverage.",
+    )
+    parser.add_argument(
+        "--no-java",
+        action="store_true",
+        help="Skip the Java suite, for machines without a JDK and Maven.",
     )
     parser.add_argument(
         "--no-rust-build",
@@ -325,13 +347,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.js_only:
         tasks.append(_javascript_task(coverage_enabled))
         tasks.append(_wasm_task())
+    elif args.java_only:
+        tasks.append(_java_task())
     else:
         tasks.extend(_python_tasks(args.verbose))
         tasks.extend(_rust_tasks(args.verbose))
         tasks.append(_javascript_task(coverage_enabled))
         tasks.append(_wasm_task())
+        if not args.no_java:
+            tasks.append(_java_task())
 
-    python_selected = not args.js_only and not args.wasm_only
+    python_selected = not args.js_only and not args.wasm_only and not args.java_only
     if coverage_enabled and python_selected:
         subprocess.run(
             (sys.executable, "-m", "coverage", "erase"), cwd=ROOT, check=True
@@ -348,6 +374,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _print_summary(results)
 
     for task in tasks:
+        problem = _java_problem() if task.name == JAVA_TASK else None
+        if problem:
+            print(problem, file=sys.stderr, flush=True)
+            results.append((task.name, False, 0.0))
+            if args.fail_fast:
+                break
+            continue
         passed, duration = _run_task(task)
         results.append((task.name, passed, duration))
         if not passed and args.fail_fast:

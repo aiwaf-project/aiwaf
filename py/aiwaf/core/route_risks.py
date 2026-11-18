@@ -119,7 +119,8 @@ def _routes_for(finding: Mapping[str, Any], routes: Mapping[str, Any]) -> list[s
     entry = str(finding.get("function", "")).split(" -> ")[0]
     return [
         path for path, data in routes.items()
-        if isinstance(data, Mapping) and _view_matches(str(data.get("view", "")), entry, str(finding.get("file", "")))
+        if isinstance(data, Mapping) and _view_matches(str(data.get("view", "")), entry,
+                                                       str(finding.get("entry_file") or finding.get("file", "")))
     ]
 
 

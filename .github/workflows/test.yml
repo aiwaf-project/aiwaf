@@ -9,6 +9,7 @@ on:
       - "js/**"
       - "tests/**"
       - "aiwaf_test.py"
+      - "java/**"
       - "manage.py"
       - "conftest.py"
       - "pyproject.toml"
@@ -28,6 +29,7 @@ on:
       - "js/**"
       - "tests/**"
       - "aiwaf_test.py"
+      - "java/**"
       - "manage.py"
       - "conftest.py"
       - "pyproject.toml"
@@ -62,6 +64,13 @@ jobs:
           node-version: 26
           cache: npm
           cache-dependency-path: js/package-lock.json
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
 
       - name: Install Python packages with aiwaf-rust from source
         uses: ./.github/actions/setup-python-from-source
