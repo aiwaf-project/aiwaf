@@ -14,6 +14,13 @@ from aiwaf.core.storage_csv import file_lock
 from aiwaf.core.native_runtime import csv_function, csv_values
 
 
+def csv_path(log_file: str) -> str:
+    """Return the CSV companion path without changing parent directory names."""
+    if log_file.endswith('.csv') or not log_file.endswith('.log'):
+        return log_file
+    return f'{log_file[:-4]}.csv'
+
+
 def write_csv_log(csv_file: str, headers: list[str], row: dict, *, durable: bool = False) -> None:
     # Match DictWriter's rejection of extra fields before invoking a native writer.
     if row.keys() - headers:
