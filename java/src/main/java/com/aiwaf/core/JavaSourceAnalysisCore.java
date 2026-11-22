@@ -187,9 +187,14 @@ public final class JavaSourceAnalysisCore {
 
     /** suppressed counts findings left out by aiwaf: ignore comments, and baselined those in a baseline. */
     public record Report(int filesScanned, List<Finding> findings, List<Map<String, String>> errors, List<Route> routes,
-                         int suppressed, int baselined) {
+                         int suppressed, int baselined, List<JavaInputSchemaCore.Inputs> inputs) {
         public Report(int filesScanned, List<Finding> findings, List<Map<String, String>> errors, List<Route> routes) {
-            this(filesScanned, findings, errors, routes, 0, 0);
+            this(filesScanned, findings, errors, routes, 0, 0, List.of());
+        }
+
+        public Report(int filesScanned, List<Finding> findings, List<Map<String, String>> errors, List<Route> routes,
+                      int suppressed, int baselined) {
+            this(filesScanned, findings, errors, routes, suppressed, baselined, List.of());
         }
 
         public Map<String, Object> toMap() {
@@ -214,6 +219,16 @@ public final class JavaSourceAnalysisCore {
             }
             out.put("findings", items);
             out.put("errors", errors);
+            List<Map<String, Object>> handlers = new ArrayList<>();
+            for (JavaInputSchemaCore.Inputs entry : inputs) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("function", entry.function());
+                item.put("file", entry.file());
+                item.put("inputs", entry.inputs());
+                item.put("complete", entry.complete());
+                handlers.add(item);
+            }
+            out.put("inputs", handlers);
             if (suppressed > 0) {
                 out.put("suppressed", suppressed);
             }
@@ -266,6 +281,7 @@ public final class JavaSourceAnalysisCore {
         List<Finding> findings = new ArrayList<>();
         List<Route> routes = new ArrayList<>();
         Set<String> failed = new LinkedHashSet<>();
+        List<JavaInputSchemaCore.Inputs> inputs = new ArrayList<>();
         int parsed = 0;
         try (StandardJavaFileManager manager = compiler.getStandardFileManager(diagnostics, null, StandardCharsets.UTF_8)) {
             Iterable<? extends JavaFileObject> units = manager.getJavaFileObjectsFromPaths(files);
@@ -294,6 +310,10 @@ public final class JavaSourceAnalysisCore {
                 analyzer.register();
                 analyzers.add(analyzer);
             }
+            // What each handler reads, with types, labelled as its findings are.
+            List<CompilationUnitTree> readable = trees.stream()
+                    .filter(unit -> !failed.contains(Path.of(unit.getSourceFile().toUri()).toString().replace('\\', '/'))).toList();
+            inputs.addAll(JavaInputSchemaCore.inputs(readable, unit -> Path.of(unit.getSourceFile().toUri()).toString().replace('\\', '/')));
             // Again when input was found stored in a request or session attribute, for code read first.
             for (int pass = 0; pass < 3; pass++) {
                 int before = project.attributes.size();
@@ -321,7 +341,8 @@ public final class JavaSourceAnalysisCore {
                 kept.add(finding);
             }
         }
-        return new Report(parsed, List.copyOf(kept), List.copyOf(errors), List.copyOf(routes), findings.size() - kept.size(), 0);
+        return new Report(parsed, List.copyOf(kept), List.copyOf(errors), List.copyOf(routes), findings.size() - kept.size(), 0,
+                List.copyOf(inputs));
     }
 
     // aiwaf: ignore, or aiwaf: ignore[sql, xss], on a finding's line or the line before it.
@@ -370,7 +391,7 @@ public final class JavaSourceAnalysisCore {
         }
         List<Finding> kept = report.findings().stream().filter(finding -> !known.contains(fingerprint(finding))).toList();
         return new Report(report.filesScanned(), kept, report.errors(), report.routes(), report.suppressed(),
-                report.findings().size() - kept.size());
+                report.findings().size() - kept.size(), report.inputs());
     }
 
     private static final Map<String, String> SINK_TITLES = Map.ofEntries(
@@ -1848,6 +1869,25 @@ public final class JavaSourceAnalysisCore {
                 unit.report(call, label, "ssrf", display, first, "medium", entry);
             } else if (first != null && method.equals("uri") && containsAny(lower, "webclient", "client", "builder")) {
                 unit.report(call, label, "ssrf", display, first, "medium", entry);
+            } else if (first != null && method.equals("lookup") && (containsAny(lower, "ctx", "context", "jndi", "initialcontext")
+                    || String.valueOf(typeOf(select.getExpression())).endsWith("Context"))
+                    && !startsWithLiteral(arguments.get(0), "java:")) {
+                // JNDI lookups of a name from input load remote classes, as Log4Shell did.
+                unit.report(call, label, "code", display, first, "high", entry);
+            } else if (first != null && (qualified.equals("Class.forName") || qualified.startsWith("MVEL.")
+                    || qualified.equals("Ognl.getValue") || qualified.equals("Ognl.parseExpression")
+                    || ((method.equals("evaluate") || method.equals("parse") || method.equals("run"))
+                        && (lower.contains("groovy") || String.valueOf(typeOf(select.getExpression())).equals("GroovyShell")))
+                    || (method.equals("eval") && (lower.contains("elprocessor") || "ELProcessor".equals(typeOf(select.getExpression())))))) {
+                unit.report(call, label, "code", display, first, "high", entry);
+            } else if ((method.equals("createValueExpression") || method.equals("createMethodExpression")) && arguments.size() >= 2
+                    && taint(arguments.get(1)) != null) {
+                unit.report(call, label, "code", display, taint(arguments.get(1)), "high", entry);
+            } else if (qualified.equals("Velocity.evaluate") && arguments.size() >= 4 && taint(arguments.get(3)) != null) {
+                unit.report(call, label, "template", display, taint(arguments.get(3)), "high", entry);
+            } else if (first != null && (method.equals("fromXML") && containsAny(lower, "xstream", "xs")
+                    || qualified.equals("SerializationUtils.deserialize"))) {
+                unit.report(call, label, "deserialization", display, first, "high", entry);
             } else if (first != null && method.equals("eval") && lower.contains("engine")) {
                 unit.report(call, label, "code", display, first, "high", entry);
             } else if (first != null && method.equals("parseExpression")) {
@@ -1901,6 +1941,15 @@ public final class JavaSourceAnalysisCore {
             } else if (type.equals("BasicQuery")) {
                 unit.report(node, label, "nosql", "new BasicQuery", source, "medium", entry);
             }
+        }
+
+        /** A name built from a literal prefix, as in "java:comp/env/" + name, which stays in the local namespace. */
+        private static boolean startsWithLiteral(ExpressionTree value, String prefix) {
+            ExpressionTree current = value;
+            while (current instanceof BinaryTree binary && binary.getKind() == Tree.Kind.PLUS) {
+                current = binary.getLeftOperand();
+            }
+            return current instanceof LiteralTree literal && literal.getValue() instanceof String text && text.startsWith(prefix);
         }
 
         private static boolean containsAny(String value, String... parts) {

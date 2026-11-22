@@ -52,6 +52,39 @@ test('uploads pass unread and reach the app intact', async () => {
   expect(multipart.body.bytes).toBeGreaterThan(file.length);
 });
 
+test('multipart forms are checked by their start, part by part', async () => {
+  const app = await appWith();
+  expect((await post(app, '/upload').field('q', "' OR 1=1--")).status).toBe(403);
+  expect((await post(app, '/upload').attach('file', Buffer.from('x'), 'shell.jsp')).body).toEqual({ error: 'rce_script_upload' });
+  expect((await post(app, '/upload').field('__proto__[admin]', '1')).body).toEqual({ error: 'rce_prototype_pollution' });
+  expect((await post(app, '/upload').field('title', 'Holiday').attach('file', Buffer.from('ordinary'), 'beach.jpg')).status).toBe(200);
+});
+
+test('the engine reviews payload findings against the route inputs init saved', async () => {
+  const schema = JSON.parse(fs.readFileSync(path.join(__dirname, '../../tests/fixtures/route_schema_cases.json'), 'utf8'));
+  const manifestPath = path.join(temp(), 'paths.json');
+  fs.writeFileSync(manifestPath, JSON.stringify(schema.manifest));
+  const warn = jest.fn();
+  const enforced = await appWith({}, { manifestPath, routeSchemaMode: 'enforce', logger: { warn } });
+  const prose = { body: 'use sleep(5) in the query', post_id: 7 };
+  expect((await post(enforced, '/comments').send(prose)).body).toEqual({ body: prose });
+  expect(warn).toHaveBeenCalledWith(expect.objectContaining({ event: 'aiwaf.route_schema', action: 'relax', rule: 'sql_function', route: '/comments' }));
+  expect((await post(enforced, '/comments').send({ post_id: '7 OR 1=1' })).body).toEqual({ error: 'schema_type_mismatch' });
+  expect((await post(enforced, '/comments').send({ body: "x' OR '1'='1" })).status).toBe(403);
+  expect((await post(enforced, '/posts/use-sleep(5)-in-queries').send({})).status).toBe(200);
+  const monitored = await appWith({}, { manifestPath, logger: { warn() {} } });
+  expect((await post(monitored, '/comments').send(prose)).status).toBe(403);
+  await expect(appWith({}, { manifestPath, routeSchemaMode: 'strict' })).rejects.toThrow('AIWAF_ROUTE_SCHEMA_MODE');
+  // The public inspectPayload, which takes no path in the engine, is reviewed too.
+  const middleware = await createNative({ dataDir: temp(), manifestPath, routeSchemaMode: 'enforce', logger: { warn() {} },
+    profile: { enabled: ['ip_keyword_block'] } });
+  handles.push(middleware);
+  const request = body => ({ method: 'POST', url: '/comments', path: '/comments', headers: { 'content-type': 'application/json' }, body });
+  expect(middleware.inspectPayload(request(prose))).toBeNull();
+  expect(middleware.inspectPayload(request({ post_id: 'abc' }))).toMatchObject({ rule: 'schema_type_mismatch' });
+  expect(middleware.inspectPayload(request({ body: "x' OR '1'='1" }))).toMatchObject({ status: 403 });
+});
+
 test('unparsed JSON and form bodies are inspected, then parsed by the app as sent', async () => {
   const app = await appWith();
   const clean = { name: 'Ada', nested: { tags: ['a', 'b'] } };

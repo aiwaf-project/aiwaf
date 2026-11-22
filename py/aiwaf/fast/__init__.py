@@ -21,6 +21,7 @@ __all__ = [
     "AIAnomalyMiddleware",
     "UUIDTamperMiddleware",
     "AIWAFLoggingMiddleware",
+    "WebSocketGuard",
     "aiwaf_exempt",
     "aiwaf_exempt_from",
     "aiwaf_only",
@@ -37,6 +38,8 @@ def __getattr__(name):
         return getattr(import_module(".core", __name__), name)
     if name == "AIWAFConfig":
         return getattr(import_module(".config", __name__), name)
+    if name == "WebSocketGuard":
+        return getattr(import_module("aiwaf.core.websocket"), name)
     if name in {
         "IPAndKeywordBlockMiddleware",
         "RateLimitMiddleware",

@@ -16,10 +16,16 @@ import re
 from typing import Any, Mapping, Optional
 
 from .path_manifest import DEFAULT_MANIFEST_PATH, load_manifest, now_utc_iso, write_manifest
+from .input_schema import merge_into
 from .sql_injection import Finding, _as_bytes, rust
 
 LOGGER = logging.getLogger("aiwaf.injection_risk")
+SCHEMA_LOGGER = logging.getLogger("aiwaf.route_schema")
 MODE_SETTING = "AIWAF_INJECTION_RISK_MODE"
+# What the inputs init saved for each route do: enforce blocks a typed input sent with a value
+# of another type and lets through findings the schema clears; monitor only logs both.
+SCHEMA_SETTING = "AIWAF_ROUTE_SCHEMA_MODE"
+SCHEMA_MODES = ("enforce", "monitor", "off")
 
 # The operations a saved finding can name. The rules for each run in aiwaf-rust.
 SINKS = (
@@ -40,6 +46,9 @@ class RouteRisks:
 
     def __init__(self, manifest: Optional[Mapping[str, Any]]):
         self._checker = rust().RouteRiskChecker(json.dumps(manifest if isinstance(manifest, Mapping) else None))
+        routes = manifest.get("routes") if isinstance(manifest, Mapping) else None
+        self.has_inputs = isinstance(routes, Mapping) and any(
+            isinstance(entry, Mapping) and isinstance(entry.get("inputs"), Mapping) for entry in routes.values())
 
     @property
     def empty(self) -> bool:
@@ -50,6 +59,16 @@ class RouteRisks:
             query = bytes(query).decode("utf-8", errors="replace")
         events = self._checker.inspect(str(path or "/"), str(query or ""), _as_bytes(body))
         return [dict(zip(("route", "sink", "input", "rule", "confidence"), event)) for event in events]
+
+    def review(self, path: str, query: Any, body: Any, max_bytes: int, found: Optional[str]) -> Optional[tuple]:
+        """("mismatch", route, input, type), ("relax", route, rule, ""), or None. See aiwaf-rust."""
+        if isinstance(query, (bytes, bytearray)):
+            query = bytes(query).decode("utf-8", errors="replace")
+        return self._checker.review(str(path or "/"), str(query or ""), _as_bytes(body), int(max_bytes), found)
+
+    def review_path(self, path: str, max_bytes: int, found: str) -> Optional[tuple]:
+        """A finding from the URL path, reviewed against the route's parameters, as review does."""
+        return self._checker.review_path(str(path or "/"), int(max_bytes), str(found))
 
 
 _cache: dict[str, RouteRisks] = {}
@@ -62,24 +81,33 @@ def clear_cache() -> None:
 MODES = ("block", "log", "off")
 
 
-def observer_for(mode: Any, manifest_path: Any, path: str, method: str = ""):
+def observer_for(mode: Any, manifest_path: Any, path: str, method: str = "", schema_mode: Any = None):
     """Return a callable taking (query, body), or None when there's nothing to check.
 
-    The callable returns a blocking Finding in block mode, and None otherwise.
+    The callable returns a blocking Finding in block mode, and None otherwise. Its ``review``
+    attribute, when set, takes (query, body, finding, max_bytes) after the general check and
+    returns the finding to use: see ``AIWAF_ROUTE_SCHEMA_MODE``.
     """
     selected = str(mode if mode is not None else os.getenv(MODE_SETTING, "block")).strip().lower()
     if selected not in MODES:
         raise ValueError("AIWAF_INJECTION_RISK_MODE must be block, log, or off")
-    if selected == "off":
+    schema = str(schema_mode if schema_mode is not None else os.getenv(SCHEMA_SETTING, "monitor")).strip().lower()
+    if schema not in SCHEMA_MODES:
+        raise ValueError("AIWAF_ROUTE_SCHEMA_MODE must be enforce, monitor, or off")
+    if selected == "off" and schema == "off":
         return None
     location = str(manifest_path or DEFAULT_MANIFEST_PATH)
     risks = _cache.get(location)
     if risks is None:
         risks = _cache[location] = RouteRisks(load_manifest(location))
-    if risks.empty:
+    if risks.empty or (selected == "off" and not risks.has_inputs):
         return None
+    if not risks.has_inputs:
+        schema = "off"
 
     def observe(query: Any, body: Any) -> Optional[Finding]:
+        if selected == "off":
+            return None
         try:
             events = risks.inspect(path, query, body)
             for event in events:
@@ -90,6 +118,34 @@ def observer_for(mode: Any, manifest_path: Any, path: str, method: str = ""):
             return None
         return Finding(events[0]["rule"]) if events and selected == "block" else None
 
+    def review(query: Any, body: Any, finding: Optional[Finding], max_bytes: int) -> Optional[Finding]:
+        found = finding.rule if finding is not None and finding.status == 403 else None
+        return decide(lambda: risks.review(path, query, body, max_bytes, found), finding)
+
+    def review_path(request_path: str, finding: Finding, max_bytes: int) -> Optional[Finding]:
+        if finding.status != 403:
+            return finding
+        return decide(lambda: risks.review_path(request_path, max_bytes, finding.rule), finding)
+
+    def decide(run, finding: Optional[Finding]) -> Optional[Finding]:
+        try:
+            result = run()
+        except Exception:
+            SCHEMA_LOGGER.debug("Route schema review failed", exc_info=True)
+            return finding
+        if result is None:
+            return finding
+        action, route, name, kind = result
+        event = {"event": "aiwaf.route_schema", "mode": schema, "method": str(method), "route": route, "action": action}
+        event.update({"input": name, "type": kind} if action == "mismatch" else {"rule": name})
+        SCHEMA_LOGGER.warning("%s", json.dumps(event, sort_keys=True))
+        if schema != "enforce":
+            return finding
+        return Finding("schema_type_mismatch") if action == "mismatch" else None
+
+    if schema != "off":
+        observe.review = review
+        observe.review_path = review_path
     return observe
 
 
@@ -134,7 +190,8 @@ def apply_report(report: Mapping[str, Any], manifest: dict) -> dict[str, int]:
         raise ValueError("The manifest has no routes")
     for data in routes.values():
         if isinstance(data, dict):
-            data.pop("injection_risks", None)
+            for key in ("injection_risks", "inputs", "inputs_complete"):
+                data.pop(key, None)
     linked, unlinked = 0, 0
     collected: dict[str, dict[tuple, dict[str, str]]] = {}
     for finding in report.get("findings", ()):
@@ -146,13 +203,22 @@ def apply_report(report: Mapping[str, Any], manifest: dict) -> dict[str, int]:
             collected.setdefault(path, {})[(risk["sink"], risk["input"])] = risk
     for path, risks in collected.items():
         routes[path]["injection_risks"] = [risks[key] for key in sorted(risks)]
+    # What each route reads, with types. A route whose views weren't all found gets none.
+    typed = 0
+    for entry in report.get("inputs", ()):
+        for path in _routes_for(entry, routes):
+            merge_into(routes, path, entry)
+    for data in routes.values():
+        if isinstance(data, dict) and "inputs" in data:
+            typed += 1
     manifest["injection_audit"] = {
         "generated_at": now_utc_iso(),
         "files_scanned": int(report.get("files_scanned", 0)),
         "linked_findings": linked,
         "unlinked_findings": unlinked,
     }
-    return {"routes": len(collected), "linked": linked, "unlinked": unlinked}
+    manifest["injection_audit"]["routes_with_inputs"] = typed
+    return {"routes": len(collected), "linked": linked, "unlinked": unlinked, "inputs": typed}
 
 
 def audit_into_manifest(manifest: dict, source: Optional[str]) -> Optional[dict[str, int]]:
@@ -179,6 +245,8 @@ def describe_audit(manifest: Mapping[str, Any]) -> str:
         return "Injection checks: not run"
     routes = sum(1 for entry in manifest.get("routes", {}).values() if isinstance(entry, Mapping) and entry.get("injection_risks"))
     text = f"Injection checks: {routes} routes from {audit.get('files_scanned', 0)} files"
+    if audit.get("routes_with_inputs"):
+        text += f"; inputs and types for {audit['routes_with_inputs']} routes"
     if audit.get("unlinked_findings"):
         text += f" ({audit['unlinked_findings']} findings couldn't be tied to a route)"
     return text

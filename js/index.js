@@ -68,3 +68,7 @@ module.exports.extractNextRoutes = pathManifest.extractNextRoutes;
 module.exports.extractNestRoutes = pathManifest.extractNestRoutes;
 module.exports.generateExpressManifest = pathManifest.generateExpressManifest;
 module.exports.generateFrameworkManifest = pathManifest.generateFrameworkManifest;
+const webSocketGuard = require('./lib/webSocketGuard');
+module.exports.guardWebSocketServer = webSocketGuard.guardWebSocketServer;
+module.exports.guardSocketIo = webSocketGuard.guardSocketIo;
+module.exports.inspectMessage = webSocketGuard.inspectMessage;

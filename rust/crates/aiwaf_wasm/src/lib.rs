@@ -334,6 +334,36 @@ impl RouteRiskChecker {
         self.risks.is_empty()
     }
 
+    /// Reviews a request against its route's saved inputs, after the general check found
+    /// `found` (or ""). Returns JSON: {"action":"mismatch","route","input","type"},
+    /// {"action":"relax","route","rule"}, or null to keep the general check's answer.
+    pub fn review(&self, path: &str, query: &str, body: &[u8], max_bytes: usize, found: &str) -> String {
+        use aiwaf_core::route_risks::Review;
+        let found = (!found.is_empty()).then_some(found);
+        match self.risks.review(path, query, body, max_bytes, found) {
+            Some(Review::Mismatch { route, input, kind }) => {
+                serde_json::json!({"action": "mismatch", "route": route, "input": input, "type": kind}).to_string()
+            }
+            Some(Review::Relax { route, rule }) => serde_json::json!({"action": "relax", "route": route, "rule": rule}).to_string(),
+            None => "null".into(),
+        }
+    }
+
+    /// Reviews a finding from the URL path against its route's parameters, as `review` does.
+    pub fn review_path(&self, path: &str, max_bytes: usize, found: &str) -> String {
+        match self.risks.review_path(path, max_bytes, found) {
+            Some(review) => {
+                let mut event = review.event("", "");
+                let object = event.as_object_mut().unwrap();
+                for key in ["event", "mode", "method"] {
+                    object.remove(key);
+                }
+                event.to_string()
+            }
+            None => "null".into(),
+        }
+    }
+
     /// Returns the matches as a JSON array of {route, sink, input, rule, confidence}.
     pub fn inspect(&self, path: &str, query: &str, body: &[u8]) -> String {
         let events: Vec<serde_json::Value> = self

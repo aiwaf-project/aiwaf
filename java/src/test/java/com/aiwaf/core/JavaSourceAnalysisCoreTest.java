@@ -284,6 +284,15 @@ class JavaSourceAnalysisCoreTest {
 
     static Stream<Arguments> flowCases() {
         return Stream.of(
+                Arguments.of("JNDI lookup", List.of("code"), "new javax.naming.InitialContext().lookup(value);"),
+                Arguments.of("JNDI lookup in the local namespace", List.of(), "ctx.lookup(\"java:comp/env/\" + value);"),
+                Arguments.of("Class.forName", List.of("code"), "Class.forName(value).getDeclaredConstructor().newInstance();"),
+                Arguments.of("Groovy", List.of("code"), "new groovy.lang.GroovyShell().evaluate(value);"),
+                Arguments.of("MVEL", List.of("code"), "org.mvel2.MVEL.eval(value);"),
+                Arguments.of("EL expression", List.of("code"), "factory.createValueExpression(context, value, Object.class);"),
+                Arguments.of("Velocity", List.of("template"), "org.apache.velocity.app.Velocity.evaluate(ctx, writer, \"t\", value);"),
+                Arguments.of("XStream", List.of("deserialization"), "xstream.fromXML(value);"),
+                Arguments.of("SerializationUtils", List.of("deserialization"), "org.apache.commons.lang3.SerializationUtils.deserialize(value.getBytes());"),
                 Arguments.of("response writer", List.of("xss"), "response.getWriter().println(value);"),
                 Arguments.of("encoded for HTML", List.of(), "response.getWriter().println(ESAPI.encoder().encodeForHTML(value));"),
                 Arguments.of("encoded for HTML, then used in SQL", List.of("sql"), "String v = ESAPI.encoder().encodeForHTML(value); jdbcTemplate.update(\"DELETE \" + v);"),
@@ -533,7 +542,7 @@ class JavaSourceAnalysisCoreTest {
     void reportsUseTheSharedFormatAndAreReadable() throws IOException {
         JavaSourceAnalysisCore.Report report = analyze(spring("new File(value);"));
         Map<String, Object> map = report.toMap();
-        assertEquals(List.of("schema_version", "language", "files_scanned", "findings", "errors"), List.copyOf(map.keySet()));
+        assertEquals(List.of("schema_version", "language", "files_scanned", "findings", "errors", "inputs"), List.copyOf(map.keySet()));
         assertEquals("java", map.get("language"));
         @SuppressWarnings("unchecked")
         Map<String, Object> finding = ((List<Map<String, Object>>) map.get("findings")).get(0);

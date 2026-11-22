@@ -27,6 +27,10 @@ public final class BufferedServletRequest extends HttpServletRequestWrapper {
         if (declared > max) return new Result(request, "", true);
 
         String contentType = request.getContentType() == null ? "" : request.getContentType().toLowerCase(Locale.ROOT);
+        if (config.requestBodyInspectionEnabled && contentType.startsWith("multipart/form-data") && declared >= 0) {
+            // The container parses the form, and the payload check reads its parts.
+            return new Result(request, MultipartPreview.of(request, config.requestBodyInspectionBytes), false);
+        }
         if (!config.requestBodyInspectionEnabled || contentType.startsWith("multipart/")
                 || contentType.startsWith("application/x-www-form-urlencoded")) {
             if (declared < 0 && (contentType.startsWith("multipart/")
@@ -42,12 +46,25 @@ public final class BufferedServletRequest extends HttpServletRequestWrapper {
             return new Result(request, "", true);
         }
         BufferedServletRequest wrapped = new BufferedServletRequest(request, bytes);
-        int previewLength = Math.min(bytes.length, Math.max(0, config.requestBodyInspectionBytes));
-        String preview = bytes.length >= 4
-                && (bytes[0] & 0xff) == 0xac && (bytes[1] & 0xff) == 0xed
-                && bytes[2] == 0 && bytes[3] == 5
-                ? "aced0005"
-                : new String(bytes, 0, previewLength, charset(request));
+        // A compressed body, when allowCompressedRequestBodies lets one in, is checked inflated;
+        // the application still gets it as sent. One that can't be read can't be checked.
+        byte[] inspected = bytes;
+        String encoding = request.getHeader("Content-Encoding") == null ? "" : request.getHeader("Content-Encoding").trim().toLowerCase(Locale.ROOT);
+        if (!encoding.isEmpty() && !encoding.equals("identity")) {
+            byte[] inflated = encoding.equals("gzip") || encoding.equals("x-gzip") || encoding.equals("deflate")
+                    ? RceCore.inflate(bytes, config.requestBodyInspectionBytes + 1) : null;
+            if (inflated == null || inflated.length > config.requestBodyInspectionBytes) return new Result(request, "", true);
+            inspected = inflated;
+        }
+        int previewLength = Math.min(inspected.length, Math.max(0, config.requestBodyInspectionBytes));
+        boolean javaObject = inspected.length >= 4 && (inspected[0] & 0xff) == 0xac && (inspected[1] & 0xff) == 0xed
+                && inspected[2] == 0 && inspected[3] == 5;
+        // Other binary objects, as in pickle, are kept as base64, which the check decodes, since
+        // reading them as text would lose their bytes.
+        String preview = javaObject ? "aced0005"
+                : RceCore.classifyBinary(inspected) != null
+                ? java.util.Base64.getEncoder().encodeToString(java.util.Arrays.copyOf(inspected, Math.min(previewLength, 12000)))
+                : new String(inspected, 0, previewLength, charset(request));
         return new Result(wrapped, preview, false);
     }
 

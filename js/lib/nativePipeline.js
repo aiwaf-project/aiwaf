@@ -6,7 +6,7 @@ const { createRequestPipeline } = require('./wasmAdapter');
 const wasmChecks = require('./wasmChecks');
 const routeRisks = require('./routeRisks');
 const { ALL_MIDDLEWARES, createRoutePlan } = require('./pathRules');
-const { getEffectivePathRules } = require('./pathManifest');
+const { getEffectivePathRules, loadManifest } = require('./pathManifest');
 const { getRequestIp } = require('./runtimeUtils');
 
 // RATE_LIMIT names accepted in path rules, as in the regular rate limiter.
@@ -76,11 +76,11 @@ function readRows(file, expected) {
     return Object.fromEntries(expected.map((key, index) => [key, cells[index]]));
   });
 }
-// The content types whose bodies are inspected, as in Python. Uploads and other bodies
-// (multipart, binary) pass through unread, as in the regular middleware.
+// The content types whose bodies are inspected, as in Python. A multipart form is checked by
+// its first max bytes; other bodies (binary uploads) pass through unread.
 function inspectable(req) {
   const media = String(req.headers?.['content-type'] || '').split(';', 1)[0].trim().toLowerCase();
-  return ['application/json', 'application/x-www-form-urlencoded', 'application/xml', 'text/xml'].includes(media)
+  return ['application/json', 'application/x-www-form-urlencoded', 'application/xml', 'text/xml', 'multipart/form-data'].includes(media)
     || media.endsWith('+json') || media.endsWith('+xml');
 }
 function declaredBody(req) {
@@ -93,38 +93,16 @@ function readable(req) {
     && typeof req.read === 'function' && typeof req.unshift === 'function' && !req.readableEnded;
 }
 const PEEKED = Symbol('aiwaf.native.peeked-body');
-// Reads at most limit + 1 bytes of the body, then puts them back on the stream, so body
-// parsers after this adapter still read the whole body. Python's adapters do the same.
-function peekBody(req, limit) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    const expected = Number(req.headers?.['content-length']) || null;
-    const finish = () => {
-      req.removeListener('readable', onReadable);
-      req.removeListener('error', onError);
-      const prefix = Buffer.concat(chunks);
-      if (prefix.length) req.unshift(prefix);
-      resolve(prefix);
-    };
-    const onError = error => { req.removeListener('readable', onReadable); reject(error); };
-    function onReadable() {
-      let chunk;
-      while ((chunk = req.read()) !== null) {
-        chunks.push(chunk);
-        size += chunk.length;
-        if (size > limit || size === expected) return finish();
-      }
-      // The whole body is buffered: put it back before the stream emits 'end'.
-      if (req._readableState?.ended) finish();
-    }
-    req.on('error', onError);
-    req.on('readable', onReadable);
-  });
-}
+const { peekBody, isMultipart } = require('./bodyPeek');
 function safeBody(req, limit) {
   const peeked = req[PEEKED];
   if (peeked) {
+    // A large upload is checked by its start: its text fields and file headers come first.
+    if (isMultipart(req)) {
+      // The query is counted twice in the check, as sent and parsed.
+      const query = Buffer.byteLength(String(req.originalUrl || req.url || '').split('?').slice(1).join('?'));
+      return { body: peeked.subarray(0, Math.max(0, limit - 2 * query)).toString('utf8'), exhausted: false };
+    }
     if (peeked.length > limit) return { body: null, exhausted: true };
     const text = peeked.toString('utf8');
     // JSON is parsed here, as a body parser would, so it's checked exactly like a parsed body.
@@ -280,7 +258,7 @@ function synchronous(callback, req, fallback) {
 module.exports = async function createNativeMiddleware(options = {}) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) throw new TypeError('Native adapter options must be an object');
   if (options.profile !== undefined && (!options.profile || typeof options.profile !== 'object' || Array.isArray(options.profile))) throw new TypeError('Native profile must be an object');
-  const allowed = new Set(['profile', 'dataDir', 'logPath', 'logFsync', 'persistBlocks', 'model', 'countryLookup', 'authenticated', 'routeExists', 'onError', 'pathRules', 'manifestPath', 'injectionRiskMode', 'logger', 'uuidResolver', 'stores', 'storeCacheSeconds', 'storesFallback',
+  const allowed = new Set(['profile', 'dataDir', 'logPath', 'logFsync', 'persistBlocks', 'model', 'countryLookup', 'authenticated', 'routeExists', 'onError', 'pathRules', 'manifestPath', 'injectionRiskMode', 'routeSchemaMode', 'logger', 'uuidResolver', 'stores', 'storeCacheSeconds', 'storesFallback',
     'rateCounter', 'rateCounterFallback', 'rateFailureMode', 'trustedProxies', 'modelFile', 'modelLoader', 'regularLog', 'modelGate', 'exact', 'regularAnomaly', 'userAgentVerdict']);
   for (const key of Object.keys(options)) if (!allowed.has(key)) throw new Error(`Unknown native adapter option: ${key}`);
   if (options.uuidResolver != null && typeof options.uuidResolver !== 'function') throw new TypeError('uuidResolver must be a function');
@@ -406,6 +384,22 @@ module.exports = async function createNativeMiddleware(options = {}) {
       stores = null;
     } else if (!supported) throw new Error('stores needs a newer aiwaf-wasm. Run: npm install aiwaf-wasm@latest');
   }
+  // The manifest's saved inputs, which the engine reviews payload findings against, as the
+  // regular middleware does: see AIWAF_ROUTE_SCHEMA_MODE.
+  const schemaMode = String(options.routeSchemaMode ?? process.env.AIWAF_ROUTE_SCHEMA_MODE ?? 'monitor').trim().toLowerCase();
+  if (!['enforce', 'monitor', 'off'].includes(schemaMode)) throw new Error('AIWAF_ROUTE_SCHEMA_MODE must be enforce, monitor, or off');
+  const manifest = schemaMode === 'off' ? null : loadManifest(manifestPath || undefined);
+  if (Object.values((manifest && manifest.routes) || {}).some(entry => entry && entry.inputs && typeof entry.inputs === 'object')) {
+    const probe = await createRequestPipeline({});
+    const supported = typeof probe.native.supports === 'function' && probe.native.supports('route_schema');
+    probe.native.free();
+    if (supported) {
+      profile.route_schema_mode = schemaMode;
+      profile.route_manifest = manifest;
+    } else {
+      (options.logger || console).warn?.('AIWAF native: route schemas need a newer aiwaf-wasm, so they aren\'t reviewed. Run: npm install aiwaf-wasm@latest');
+    }
+  }
   // With stores, blocks and learned keywords live in the stores instead of dataDir.
   const persist = !stores && options.persistBlocks !== false;
   if (stores) profile.policy_store = 'host';
@@ -445,6 +439,13 @@ module.exports = async function createNativeMiddleware(options = {}) {
   const { native, setModel } = engine;
   const logger = options.logger || console;
   // Monitored SQL findings are logged as the regular middleware logs them, and never block.
+  // The engine's route schema review returns its log line with the result.
+  const reviewed = result => {
+    if (!result || !result.schema) return result;
+    try { logger.warn?.(result.schema); } catch (_) { /* Logging must not decide the outcome. */ }
+    const { schema, ...rest } = result;
+    return rest.rule ? rest : null;
+  };
   const monitored = finding => {
     if (finding?.mode !== 'monitor') return finding;
     logger.warn?.({ event: 'aiwaf.payload', rule: finding.rule, mode: 'monitor' });
@@ -533,15 +534,24 @@ module.exports = async function createNativeMiddleware(options = {}) {
   const report = error => { if (options.onError) options.onError(error); else console.error('AIWAF native finalization failed:', error.message); };
   // This pipeline takes no general settings, so these two come from the environment. Route
   // checks run in aiwaf-wasm, loaded here so requests can use them straight away.
-  const observeRisks = routeRisks.createObserver({ AIWAF_PATH_MANIFEST: manifestPath, AIWAF_INJECTION_RISK_MODE: options.injectionRiskMode });
-  if (observeRisks) await wasmChecks.load();
+  const observeRisks = routeRisks.createObserver({ AIWAF_PATH_MANIFEST: manifestPath, AIWAF_INJECTION_RISK_MODE: options.injectionRiskMode,
+    AIWAF_ROUTE_SCHEMA_MODE: 'off' });
+  // inspect_payload takes no path, so its findings are reviewed here against the route's saved
+  // inputs, as the engine reviews its own.
+  const schemaObserver = profile.route_schema_mode
+    ? routeRisks.createObserver({ AIWAF_PATH_MANIFEST: manifestPath, AIWAF_INJECTION_RISK_MODE: 'off',
+      AIWAF_ROUTE_SCHEMA_MODE: profile.route_schema_mode, logger })
+    : null;
+  if (observeRisks || schemaObserver) await wasmChecks.load();
   function payload(req) {
     const b = safeBody(req, maxBytes);
     const query = String(req.originalUrl || req.url || '').split('?').slice(1).join('?');
     if (b.exhausted && profile.sql_mode !== 'off') {
       return monitored({ status: 413, rule: 'payload_inspection_limit', mode: profile.sql_mode });
     }
-    return monitored(JSON.parse(native.inspect_payload(JSON.stringify([query, b.body, req.query ?? null]))));
+    let finding = JSON.parse(native.inspect_payload(JSON.stringify([query, b.body, req.query ?? null])));
+    if (schemaObserver?.review) finding = schemaObserver.review(req, finding, maxBytes, b.body);
+    return monitored(finding);
   }
   // A uuidResolver may be async, so only requests it applies to wait for it.
   const middleware = (req, res, next) => {
@@ -628,6 +638,7 @@ module.exports = async function createNativeMiddleware(options = {}) {
       })));
     } catch (error) { return next(error); }
     if (decision.monitor) monitored({ rule: decision.monitor, mode: 'monitor' });
+    if (decision.schema) reviewed(decision);
     pending.add(decision.context);
     req[contextKey] = decision.context;
     let done = false;
@@ -697,8 +708,8 @@ module.exports = async function createNativeMiddleware(options = {}) {
   middleware.diagnostics = () => JSON.parse(native.diagnostics());
   middleware.inspectBody = (req, body) => {
     const captured = safeBody({body,headers:{}},maxBytes);
-    return monitored(JSON.parse(native.inspect_body(req[contextKey], JSON.stringify(captured.body), captured.exhausted,
-      !!synchronous(options.authenticated,req,false), Date.now()/1000)));
+    return monitored(reviewed(JSON.parse(native.inspect_body(req[contextKey], JSON.stringify(captured.body), captured.exhausted,
+      !!synchronous(options.authenticated,req,false), Date.now()/1000))));
   };
   middleware.setModel = setModel;
   middleware.close = () => {

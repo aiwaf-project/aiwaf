@@ -102,7 +102,11 @@ public final class RouteRiskCore {
 
     public record CompiledRoute(Pattern pattern, List<String> names) {}
 
-    public record Counts(int routes, int linked, int unlinked) {}
+    public record Counts(int routes, int linked, int unlinked, int inputs) {
+        public Counts(int routes, int linked, int unlinked) {
+            this(routes, linked, unlinked, 0);
+        }
+    }
 
     public static String ruleFor(String sink, String value) {
         String text = value == null ? "" : value.length() > MAX_VALUE_CHARS ? value.substring(0, MAX_VALUE_CHARS) : value;
@@ -364,7 +368,9 @@ public final class RouteRiskCore {
         }
         Map<String, Object> routes = (Map<String, Object>) rawRoutes;
         for (Object entry : routes.values()) {
-            if (entry instanceof Map<?, ?> data) ((Map<String, Object>) data).remove("injection_risks");
+            if (entry instanceof Map<?, ?> data) {
+                for (String key : List.of("injection_risks", "inputs", "inputs_complete")) ((Map<String, Object>) data).remove(key);
+            }
         }
         int linked = 0;
         int unlinked = 0;
@@ -390,13 +396,28 @@ public final class RouteRiskCore {
         }
         collected.forEach((path, risks) ->
                 ((Map<String, Object>) routes.get(path)).put("injection_risks", List.copyOf(risks.values())));
+        // What each route reads, with types. A route whose handlers weren't all found gets none.
+        for (JavaInputSchemaCore.Inputs entry : report.inputs()) {
+            for (Map.Entry<String, Object> route : routes.entrySet()) {
+                if (route.getValue() instanceof Map<?, ?> data && viewMatches(String.valueOf(data.get("view")), entry.function(), entry.file())) {
+                    Map<String, Object> target = (Map<String, Object>) data;
+                    Map<String, Object> inputs = target.get("inputs") instanceof Map<?, ?> saved
+                            ? (Map<String, Object>) saved : new TreeMap<>();
+                    entry.inputs().forEach((name, kind) -> inputs.merge(name, kind, (old, now) -> old.equals(now) ? old : "text"));
+                    target.put("inputs", inputs);
+                    target.put("inputs_complete", !Boolean.FALSE.equals(target.get("inputs_complete")) && entry.complete());
+                }
+            }
+        }
+        int typed = (int) routes.values().stream().filter(data -> data instanceof Map<?, ?> map && map.containsKey("inputs")).count();
         Map<String, Object> audit = new LinkedHashMap<>();
         audit.put("generated_at", Instant.now().truncatedTo(ChronoUnit.SECONDS).toString());
         audit.put("files_scanned", report.filesScanned());
         audit.put("linked_findings", linked);
         audit.put("unlinked_findings", unlinked);
+        audit.put("routes_with_inputs", typed);
         manifest.put("injection_audit", audit);
-        return new Counts(collected.size(), linked, unlinked);
+        return new Counts(collected.size(), linked, unlinked, typed);
     }
 
     /** Saves a report's findings into an existing manifest file. */

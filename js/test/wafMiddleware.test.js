@@ -270,14 +270,15 @@ describe('AIWAF-JS Middleware', () => {
 
     await request(headerApp)
       .get('/headers-human')
-      .set('X-Forwarded-For', `198.51.100.${Math.floor(Math.random() * 254) + 1}`)
+      // Fixed, different addresses: a random pair could collide, and the curl client is blocked.
+      .set('X-Forwarded-For', '198.51.100.171')
       .set('user-agent', 'curl/7.88.1')
       .set('accept', '*/*')
       .expect(403, { error: 'blocked' });
 
     await request(headerApp)
       .get('/headers-human')
-      .set('X-Forwarded-For', `198.51.100.${Math.floor(Math.random() * 254) + 1}`)
+      .set('X-Forwarded-For', '198.51.100.172')
       .set('user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36')
       .set('accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8')
       .set('accept-language', 'en-US,en;q=0.9')

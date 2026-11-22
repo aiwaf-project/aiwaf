@@ -398,6 +398,36 @@ impl RouteRiskChecker {
         self.risks.is_empty()
     }
 
+    /// Reviews a request against its route's saved inputs, after the general check found
+    /// `found` (or nothing). Returns ("mismatch", route, input, type), ("relax", route, rule, ""),
+    /// or None to keep the general check's answer.
+    #[pyo3(signature = (path, query, body, max_bytes, found=None))]
+    fn review(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        query: &str,
+        body: Vec<u8>,
+        max_bytes: usize,
+        found: Option<String>,
+    ) -> Option<(String, String, String, String)> {
+        use aiwaf_core::route_risks::Review;
+        py.allow_threads(|| match self.risks.review(path, query, &body, max_bytes, found.as_deref())? {
+            Review::Mismatch { route, input, kind } => Some(("mismatch".into(), route, input, kind)),
+            Review::Relax { route, rule } => Some(("relax".into(), route, rule, String::new())),
+        })
+    }
+
+    /// Reviews a finding from the URL path against its route's parameters: ("mismatch", route,
+    /// input, type), ("relax", route, rule, ""), or None to keep it.
+    fn review_path(&self, py: Python<'_>, path: &str, max_bytes: usize, found: &str) -> Option<(String, String, String, String)> {
+        use aiwaf_core::route_risks::Review;
+        py.allow_threads(|| match self.risks.review_path(path, max_bytes, found)? {
+            Review::Mismatch { route, input, kind } => Some(("mismatch".into(), route, input, kind)),
+            Review::Relax { route, rule } => Some(("relax".into(), route, rule, String::new())),
+        })
+    }
+
     /// Returns (route, sink, input, rule, confidence) for each match.
     fn inspect(
         &self,

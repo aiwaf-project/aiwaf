@@ -1,6 +1,78 @@
 # Changelog
 
-## Python 1.2.6 / aiwaf-rust 0.2.13 / Node.js 1.2.5 / WASM 0.2.10 / Java 1.3.9 — prepared release
+## Python 1.3.0 / aiwaf-rust 0.2.13 / Node.js 1.3.0 / WASM 0.2.10 / Java 1.4.0 — prepared release
+
+- Remote code execution (Python, Node.js and Java, regular and native): the payload check
+  finds Log4Shell lookups (with nested `${lower:j}` forms), Shellshock, serialized Java, pickle,
+  PHP, .NET and node-serialize objects, unsafe YAML tags, OGNL and SpEL that reach a process,
+  Spring4Shell's `class.module.classLoader`, template sandbox escapes, reverse shells and PHP
+  code, in every request value, path segment and header, including `User-Agent` and `Accept`.
+  It also finds deserialization gadgets (Fastjson and Jackson `@type`, XStream, `XMLDecoder`),
+  EL, Thymeleaf, Ruby ERB, Twig, Smarty, Velocity and Mako escapes, JSP, ASP and PHP webshell
+  code, uploads named as server scripts (`filename="shell.php"`), and commands only an attack
+  sends (`; cat /etc/passwd`, `${IFS}`, `certutil -urlcache`, `regsvr32 /i:`, PowerShell
+  download cradles). Each value is checked again with escapes, HTML entities, fullwidth and
+  invisible characters undone, and as base64. It follows `AIWAF_SQL_INJECTION_MODE`. Java's
+  rules are generated from aiwaf-rust's by `scripts/sync_rce_rules.py`, and a test fails when
+  they differ. The shared cases in `tests/fixtures/rce_cases.json` include ordinary text that
+  must never match.
+- Remote code execution, harder to slip past: each field of a query string or form body is
+  checked on its own, so a serialized object in one field (`data=rO0AB...`, a PHP `O:8:...`
+  object, `%AC%ED%00%05...`) is found; raw binary Java, pickle, .NET and Ruby objects are
+  found in Python and Node.js bodies, which were read as text with those bytes lost; gzip
+  bodies are read inflated, and one that inflates past
+  `AIWAF_PAYLOAD_MAX_BYTES` is refused with `413`; and `__proto__` and
+  `constructor.prototype` keys are blocked as `rce_prototype_pollution` in every engine.
+- Command injection: `rce_command_injection` blocks probe and timing commands chained onto the
+  end of a value, as scanners send them (`x;id`, `|whoami`, `&& uname -a`, `; sleep 5`,
+  ``test`id` ``, `$(sleep 5)`), on every route. Ordinary text such as `name; id` and Markdown's
+  `` `id` `` passes; the shared cases include both.
+- WebSocket messages are checked like request bodies: `WebSocketGuard` ASGI middleware for
+  FastAPI, Starlette and Django Channels, `inspect_message` in Python; `guardWebSocketServer`
+  (ws), `guardSocketIo` and `inspectMessage` in Node.js; `AiwafMessageCore.check` in Java. A
+  message with a finding closes the socket with 1008. Flask-SocketIO: `guard_socketio` and
+  `@aiwaf_message()`. Java: `AiwafWebSocketHandler` for Spring WebSocket and `AiwafEndpoint` for
+  Jakarta WebSocket (`spring-websocket` and the Jakarta WebSocket API are `provided`).
+- Route schemas from `init` (Python, Node.js and Java): the audit saves what each route reads
+  from the query and body, with types (`int`, `float`, `bool`, `uuid`, `text`) from conversions,
+  type hints, Pydantic, Django forms, DRF serializers, zod, Spring parameters and DTOs, and
+  whether that list is complete. Requests are reviewed against it: a typed input sent with
+  another type is `schema_type_mismatch`, and an `sql_function`, `sql_comment` or
+  `sql_breakout_numeric` finding that comes only from inputs the schema clears (typed inputs,
+  text that reaches no operation, inputs the route never reads) is cleared. Quote breakouts and
+  remote code execution rules still block everywhere. Findings from the URL path are reviewed
+  by the route's parameters. `AIWAF_ROUTE_SCHEMA_MODE` is `monitor` by default, which only logs;
+  `enforce` acts on it. The native Python and Node.js pipelines review in the engine too, and the
+  Node.js native `inspectPayload()` reviews its findings. The request is followed into helpers in
+  the same file or class, and keys held in constants are known, in all three audits.
+- Multipart bodies are found about ten times faster (a 60 KB upload in about 18 µs, from 189 µs).
+- Multipart forms are checked (Python, Node.js and Java, regular and native), by their first
+  `AIWAF_PAYLOAD_MAX_BYTES`: part headers (`filename="shell.php"`), field names, text fields
+  as any other value, and uploaded files for binary serialized objects and PHP, JSP and ASP
+  code. Large uploads still reach the app whole. Node.js reads the start of an unparsed
+  multipart body and puts it back; Java reads the container's parts, and a servlet with no
+  multipart config still gets the raw upload unread. Checked in embedded Tomcat 11, Jetty 12 and
+  Undertow 2.3 in the tests.
+- Deflate bodies are read inflated like gzip ones, and Node.js reads `br`. Python and Node.js
+  refuse an inspectable body in an encoding they can't read with `413`, as the native
+  pipeline did. Java inflates gzip and deflate bodies for the check when
+  `allowCompressedRequestBodies` is on.
+- Base64 is unwrapped up to three layers deep, including base64 of gzip or deflate.
+- Every header is checked: the check no longer stops after 64. More than 256 headers, or 256
+  cookies, is refused with `413` instead of being checked in part.
+- Faster payload checks (aiwaf-rust, aiwaf-wasm and Java): a value with none of the characters
+  any remote code execution rule needs skips those rules, after a single byte scan; a whole
+  JSON or XML document is checked for them only when it has a marker of an attack in its shape,
+  such as `@type`; and a plain word, number, email or identifier skips the SQL tokenizer and is
+  checked only for SQL-only names such as `tempdb`. In release-build timings, a typical JSON
+  body takes about 25 µs to check, from 37 µs, and a typical query string about 11 µs, from
+  19 µs; values with spaces, quotes or operators still get the full tokenizer.
+- Injection audit: more sinks that run code. Python `importlib.import_module` and `__import__`,
+  `os.exec*` and `os.spawn*`, Jinja `from_string`, and `jsonpickle`, `cloudpickle`, `joblib`,
+  `torch.load` and `pandas.read_pickle`; Node.js dynamic `require()` and `import()`, string
+  timers, `new vm.Script`, eval workers, `execFile` and `fork`, and `v8.deserialize`; Java JNDI
+  `lookup` (not `java:` names), `Class.forName`, Groovy, MVEL, OGNL, EL expressions, Velocity,
+  XStream and `SerializationUtils.deserialize`.
 
 - **Release note:** publish aiwaf-rust 0.2.13 and aiwaf-wasm 0.2.10 first: they carry the
   route rules below, and Python requires `aiwaf-rust>=0.2.13`. npm `aiwaf` keeps

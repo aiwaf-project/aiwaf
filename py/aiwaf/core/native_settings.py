@@ -42,6 +42,7 @@ _DIRECT = {
     "AIWAF_PAYLOAD_MAX_BYTES": ("max_bytes", int),
     "AIWAF_PATH_MANIFEST": ("manifest_path", str),
     "AIWAF_INJECTION_RISK_MODE": ("injection_risk_mode", str),
+    "AIWAF_ROUTE_SCHEMA_MODE": ("route_schema_mode", str),
     "AIWAF_EXEMPT_KEYWORDS": ("exempt_keywords", list),
     "AIWAF_GEO_BLOCK_COUNTRIES": ("geo_block", list),
     "AIWAF_GEO_ALLOW_COUNTRIES": ("geo_allow", list),
@@ -230,6 +231,7 @@ _NATIVE_VALUES = {
     "max_bytes": _payload_size,
     "sql_mode": _one_of({"block", "monitor", "off"}),
     "injection_risk_mode": _one_of({"block", "log", "off"}),
+    "route_schema_mode": _one_of({"enforce", "monitor", "off"}),
     # The regular rate limiter reads ip or ip_only as per-IP, and anything else as per IP and path.
     "rate_key_mode": lambda v: "ip" if str(v or "").strip().lower() in {"ip", "ip_only"} else "ip_path",
 }

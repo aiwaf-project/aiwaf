@@ -898,3 +898,48 @@ def test_route_plans_are_computed_once_per_path_and_view_and_bounded(tmp_path, m
 def test_the_rate_file_exists_only_when_rates_are_counted_in_it(tmp_path, backend, created):
     engine(tmp_path, enabled=["rate_limit"], rate_backend=backend)
     assert (tmp_path / "rate_buckets.csv").exists() is created
+
+
+_SCHEMA = json.loads((__import__("pathlib").Path(__file__).parents[1] / "fixtures" / "route_schema_cases.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.skipif(not rust.NativeCSVPipeline.supports("route_schema"), reason="route schemas need a newer aiwaf-rust")
+def test_the_engine_reviews_findings_against_saved_route_inputs(tmp_path):
+    def outcome(mode, path, query=b"", body=b""):
+        e = engine(tmp_path, enabled=["ip_keyword_block"], learning=False, route_schema_mode=mode, route_manifest=_SCHEMA["manifest"])
+        ctx, status, payload = begin(e, path=path, query=query, body=body, method="POST", exists=True)
+        return status, json.loads(payload) if payload else None, ctx.schema_event
+
+    prose = json.dumps({"body": "use sleep(5) in the query", "post_id": 7}).encode()
+    status, _, event = outcome("enforce", "/comments", body=prose)
+    assert status == 0
+    assert json.loads(event) == {"event": "aiwaf.route_schema", "mode": "enforce", "method": "POST", "route": "/comments",
+                                 "action": "relax", "rule": "sql_function"}
+    assert outcome("monitor", "/comments", body=prose)[:2] == (403, {"error": "sql_function"})
+    assert outcome("enforce", "/comments", query=b"post_id=abc")[:2] == (403, {"error": "schema_type_mismatch"})
+    assert outcome("enforce", "/comments", body=b'{"body": "x\' OR \'1\'=\'1"}')[0] == 403
+    assert outcome("enforce", "/posts/use-sleep(5)-in-queries")[0] == 0
+    assert outcome("off", "/comments", body=prose)[:2] == (403, {"error": "sql_function"})
+    with pytest.raises(ValueError):
+        engine(tmp_path, route_schema_mode="strict")
+
+
+def test_the_pipeline_passes_the_manifest_when_it_has_inputs(tmp_path, monkeypatch, caplog):
+    from aiwaf.core.csv_pipeline import CSVPipeline
+
+    manifest = tmp_path / "paths.json"
+    manifest.write_text(json.dumps(_SCHEMA["manifest"]), encoding="utf-8")
+    monkeypatch.delenv("AIWAF_ROUTE_SCHEMA_MODE", raising=False)
+    pipeline = CSVPipeline({"data_dir": str(tmp_path), "enabled": ["ip_keyword_block"], "learning": False,
+                            "manifest_path": str(manifest), "route_schema_mode": "enforce"})
+    with caplog.at_level("WARNING", logger="aiwaf.route_schema"):
+        _, status, _ = pipeline.begin(ip="8.8.8.8", path="/comments", method="POST", headers={}, query=b"",
+                                      body=b'{"body": "we dropped tempdb"}', exists=True, methods={"POST"})
+    assert status == 0
+    assert json.loads(caplog.records[-1].getMessage())["action"] == "relax"
+    with pytest.raises(ValueError):
+        CSVPipeline({"data_dir": str(tmp_path), "manifest_path": str(manifest), "route_schema_mode": "strict"})
+    # No saved inputs: nothing is passed, so an older engine isn't given keys it rejects.
+    (tmp_path / "plain.json").write_text(json.dumps({"routes": {"/x": {}}}), encoding="utf-8")
+    plain = CSVPipeline({"data_dir": str(tmp_path), "manifest_path": str(tmp_path / "plain.json")})
+    assert "route_manifest" not in plain.profile

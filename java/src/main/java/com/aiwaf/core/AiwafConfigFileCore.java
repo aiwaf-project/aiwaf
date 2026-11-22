@@ -81,6 +81,9 @@ public final class AiwafConfigFileCore {
         if (config.injectionRiskMode == null || !Set.of("block", "log", "off").contains(config.injectionRiskMode)) {
             errors.add("security.injection_risk_mode must be block, log, or off");
         }
+        if (config.routeSchemaMode == null || !Set.of("enforce", "monitor", "off").contains(config.routeSchemaMode)) {
+            errors.add("security.route_schema_mode must be enforce, monitor, or off");
+        }
         if (!Set.of("memory", "file", "csv", "db", "redis").contains(backend)) {
             errors.add("storage.backend must be memory, file, csv, db, or redis");
         }
@@ -236,6 +239,7 @@ public final class AiwafConfigFileCore {
                 "request_body_inspection_enabled", config.requestBodyInspectionEnabled,
                 "sql_injection_mode", config.sqlInjectionMode,
                 "injection_risk_mode", config.injectionRiskMode,
+                "route_schema_mode", config.routeSchemaMode,
                 "allow_compressed_request_bodies", config.allowCompressedRequestBodies,
                 "max_parameter_count", config.maxParameterCount,
                 "max_parameter_bytes", config.maxParameterBytes,

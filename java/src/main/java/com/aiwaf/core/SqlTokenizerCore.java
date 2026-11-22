@@ -476,7 +476,22 @@ public final class SqlTokenizerCore {
     }
 
     /** Returns a rule name when the value breaks out of a SQL value, otherwise null. */
+    /**
+     * True for one plain ASCII word, number, email or identifier, as aiwaf-rust's plain_word: only
+     * the names that appear in SQL alone, as in tempdb, are checked in it.
+     */
+    static boolean plainWord(String value) {
+        if (value == null || value.isEmpty()) return false;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            boolean ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '@';
+            if (!ok) return false;
+        }
+        return true;
+    }
+
     public static String classify(String value) {
+        if (plainWord(value)) return SQL_ONLY_NAME.matcher(value).find() ? "sql_function" : null;
         String text = clean(value);
         List<Token> tokens = lex(text);
         // A value that starts by closing a call or statement, as in ) UNION SELECT or ; DROP TABLE.

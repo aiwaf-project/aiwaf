@@ -94,6 +94,38 @@ def inspectable_content_type(content_type):
             or media.endswith(("+json", "+xml")))
 
 
+def _multipart(content_type):
+    return (content_type or "").split(";", 1)[0].strip().lower() == "multipart/form-data"
+
+
+def _read_body(content_type):
+    """Bodies read here: JSON, forms, XML, and multipart forms by their first max_bytes."""
+    return inspectable_content_type(content_type) or _multipart(content_type)
+
+
+# aiwaf-rust reads gzip and deflate bodies inflated. Other encodings, as in br, can't be read.
+_READABLE_ENCODINGS = ("", "identity", "gzip", "x-gzip", "deflate")
+
+
+def _unreadable(content_type, encoding):
+    return _read_body(content_type) and (encoding or "").strip().lower() not in _READABLE_ENCODINGS
+
+
+def _checked_body(body, query, policy, content_type):
+    """A multipart body is checked by its start, within the budget, so a large upload isn't
+    refused: its text fields and file headers come first."""
+    if body is None or not _multipart(content_type):
+        return body
+    used = len(query.encode() if isinstance(query, str) else (query or b""))
+    return body[:max(0, policy.max_bytes - used)]
+
+
+def _reviewed(observer, query, body, finding, policy):
+    """The general check's finding, after the route's saved inputs review it, when there are any."""
+    review = getattr(observer, "review", None)
+    return review(query, body, finding, policy.max_bytes) if review is not None else finding
+
+
 def _wsgi_headers(request, django):
     """Every request header. aiwaf-rust decides which ones to check."""
     if django:
@@ -106,11 +138,15 @@ def _wsgi_headers(request, django):
         return []
 
 
-def _check_headers_and_path(policy, headers, path):
+def _check_headers_and_path(policy, headers, path, observer=None):
     # Pipelines that only buffer here run their own header and path checks.
     finding = policy.inspect_headers(headers) if hasattr(policy, "inspect_headers") else None
     if not finding and hasattr(policy, "inspect_path"):
         finding = policy.inspect_path(path)
+        # A path's finding, reviewed against the route's parameters: see AIWAF_ROUTE_SCHEMA_MODE.
+        review = getattr(observer, "review_path", None)
+        if finding is not None and review is not None:
+            finding = review(path, finding, policy.max_bytes)
     return finding
 
 
@@ -147,12 +183,16 @@ def inspect_wsgi_request(request, policy, *, django=False, evaluator=None, obser
     if django:
         query = request.META.get("QUERY_STRING", "")
         content_type = request.META.get("CONTENT_TYPE", "")
+        encoding = request.META.get("HTTP_CONTENT_ENCODING", "")
         cached = getattr(request, "_body", None)
     else:
         query, content_type = request.query_string, request.content_type
+        encoding = request.headers.get("Content-Encoding", "") if getattr(request, "headers", None) is not None else ""
         cached = getattr(request, "_cached_data", None)
+    if _unreadable(content_type, encoding):
+        return policy.enforce(Finding("payload_inspection_limit", 413))
     body = None
-    if inspectable_content_type(content_type):
+    if _read_body(content_type):
         if cached is not None:
             body = cached
         elif django:
@@ -163,14 +203,15 @@ def inspect_wsgi_request(request, policy, *, django=False, evaluator=None, obser
             stream = request.stream
             body = stream.read(policy.max_bytes + 1)
             request.stream = io.BufferedReader(_PrefixStream(body, stream))
+    body = _checked_body(body, query, policy, content_type)
     if observer is not None:
         finding = observer(query, body)
         if finding:
             return finding
-    finding = (evaluator or policy.inspect)(query, body)
+    finding = _reviewed(observer, query, body, (evaluator or policy.inspect)(query, body), policy)
     if not finding:
         path = (getattr(request, "path_info", None) or getattr(request, "path", "")) if django else getattr(request, "path", "")
-        finding = _check_headers_and_path(policy, _wsgi_headers(request, django), path)
+        finding = _check_headers_and_path(policy, _wsgi_headers(request, django), path, observer)
     return policy.enforce(finding)
 
 
@@ -184,8 +225,11 @@ async def inspect_asgi_request(request, policy, *, evaluator=None, observer=None
         if evaluator is not None:
             return evaluator(request.scope.get("query_string", b""), None)
         return None
+    content_type = request.headers.get("content-type")
+    if _unreadable(content_type, request.headers.get("content-encoding")):
+        return policy.enforce(Finding("payload_inspection_limit", 413))
     body = None
-    if inspectable_content_type(request.headers.get("content-type")):
+    if _read_body(content_type):
         if hasattr(request, "_body"):
             body = request._body
         else:
@@ -212,14 +256,15 @@ async def inspect_asgi_request(request, policy, *, evaluator=None, observer=None
 
             request._receive = replay
             body = b"".join(chunks)
-            if exhausted:
+            if exhausted and not _multipart(content_type):
                 return policy.enforce(Finding("payload_inspection_limit", 413))
     query = request.scope.get("query_string", b"")
+    body = _checked_body(body, query, policy, content_type)
     if observer is not None:
         finding = observer(query, body)
         if finding:
             return finding
-    finding = (evaluator or policy.inspect)(query, body)
+    finding = _reviewed(observer, query, body, (evaluator or policy.inspect)(query, body), policy)
     if not finding:
-        finding = _check_headers_and_path(policy, list(request.headers.items()), request.scope.get("path", ""))
+        finding = _check_headers_and_path(policy, list(request.headers.items()), request.scope.get("path", ""), observer)
     return policy.enforce(finding)

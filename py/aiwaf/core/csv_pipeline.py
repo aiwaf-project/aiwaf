@@ -5,6 +5,7 @@ import importlib
 import json
 import inspect
 import logging
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -15,6 +16,7 @@ from .storage_ops import now_iso
 # Monitored SQL findings are logged as the regular chain logs them.
 PAYLOAD_LOGGER = logging.getLogger("aiwaf.payload")
 LOGGER = logging.getLogger("aiwaf.native")
+SCHEMA_LOGGER = logging.getLogger("aiwaf.route_schema")
 
 # Adapter-level keys. The engine rejects unknown profile keys, so these are read here.
 _ADAPTER_KEYS = ("path_rules", "manifest_path", "injection_risk_mode", "store_cache_seconds")
@@ -166,6 +168,7 @@ class CSVPipeline:
             from .policy_csv_storage import PolicyCSVStorage
             PolicyCSVStorage(data_dir=directory)
         wire_config = dict(config)
+        self._configure_schema(wire_config, supports)
         if 'soft_block_blocklist' in wire_config:
             wire_config['soft_block_blacklist'] = wire_config.pop('soft_block_blocklist')
         profile_json = json.dumps(wire_config, allow_nan=False)
@@ -193,7 +196,7 @@ class CSVPipeline:
         self.manifest_path = str(config.pop("manifest_path", None) or DEFAULT_MANIFEST_PATH)
         self.injection_risk_mode = config.pop("injection_risk_mode", None)
         # Validates the mode now, so a typo fails at startup rather than on a request.
-        observer_for(self.injection_risk_mode, self.manifest_path, "/")
+        observer_for(self.injection_risk_mode, self.manifest_path, "/", schema_mode="off")
         self.path_rules = get_effective_path_rules(list(explicit), manifest_path=self.manifest_path)
         # The regular rate limiter flood-blocks above the flood threshold before a higher limit is
         # reached, so a limit above it acts as the threshold: the engine is given that.
@@ -236,6 +239,28 @@ class CSVPipeline:
             raise TypeError("rate_counter requires a synchronous count(key, now, window_seconds) method")
         return rate_counter
 
+    def _configure_schema(self, wire_config, supports):
+        """Give the engine the manifest's saved inputs, as the regular chain reviews requests with.
+
+        AIWAF_ROUTE_SCHEMA_MODE is monitor by default. An engine too old to review leaves it off.
+        """
+        from .path_manifest import load_manifest
+        from .route_risks import SCHEMA_MODES, SCHEMA_SETTING
+
+        mode = str(wire_config.pop("route_schema_mode", None) or os.getenv(SCHEMA_SETTING, "monitor")).strip().lower()
+        if mode not in SCHEMA_MODES:
+            raise ValueError("AIWAF_ROUTE_SCHEMA_MODE must be enforce, monitor, or off")
+        manifest = load_manifest(self.manifest_path) if mode != "off" else None
+        routes = manifest.get("routes") if isinstance(manifest, dict) else None
+        if not isinstance(routes, dict) or not any(isinstance(entry, dict) and "inputs" in entry for entry in routes.values()):
+            return
+        if not (supports and supports("route_schema")):
+            LOGGER.warning("Route schemas need a newer aiwaf-rust in the native pipeline; they're not reviewed. "
+                           "Run: pip install -U aiwaf-rust")
+            return
+        wire_config["route_schema_mode"] = mode
+        wire_config["route_manifest"] = manifest
+
     def _check_engine_supports(self, factory):
         """Refuse to start when the configuration needs a fact this aiwaf-rust build lacks."""
         from .route_risks import observer_for
@@ -245,7 +270,7 @@ class CSVPipeline:
         if any(isinstance(rule, dict) and _rate_overrides(rule.get("RATE_LIMIT", rule.get("rate_limit")))
                for rule in self.path_rules):
             needed.append("rate_overrides")
-        if observer_for(self.injection_risk_mode, self.manifest_path, "/") is not None:
+        if observer_for(self.injection_risk_mode, self.manifest_path, "/", schema_mode="off") is not None:
             needed.append("route_rule")
         if self.profile.get("sql_mode") == "monitor":
             needed.append("sql_monitor")
@@ -299,7 +324,7 @@ class CSVPipeline:
         disabled, rate = planned
         rule = None
         if "ip_keyword_block" not in disabled and "ip_keyword_block" in self.profile.get("enabled", STAGES):
-            observe = observer_for(self.injection_risk_mode, self.manifest_path, path, method)
+            observe = observer_for(self.injection_risk_mode, self.manifest_path, path, method, schema_mode="off")
             finding = observe(query, body) if observe else None
             rule = finding.rule if finding else None
         return set(disabled), dict(rate), rule
@@ -352,6 +377,9 @@ class CSVPipeline:
         monitored = getattr(result[0], "sql_monitor", None)
         if monitored:
             PAYLOAD_LOGGER.warning("aiwaf.payload rule=%s mode=monitor", monitored)
+        reviewed = getattr(result[0], "schema_event", None)
+        if reviewed:
+            SCHEMA_LOGGER.warning("%s", reviewed)
         self._apply_effects(result[0])
         return result
 

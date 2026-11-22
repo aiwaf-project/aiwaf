@@ -2492,6 +2492,8 @@ pub mod client_ip;
 #[cfg(test)]
 mod fuzz_smoke;
 pub mod payload;
+pub mod rce;
+mod rce_bench;
 pub mod route_risks;
 pub mod sql;
 pub mod training_evidence;

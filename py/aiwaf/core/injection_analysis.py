@@ -16,6 +16,8 @@ import os
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set
 
+from .input_schema import module_inputs
+
 SCHEMA_VERSION = "1.0"
 _SKIPPED_DIRECTORIES = {
     ".git", ".hg", ".tox", ".venv", "__pycache__", "build", "dist", "env", "migrations",
@@ -91,7 +93,11 @@ _NOSQL_METHODS = {
     "find_one_and_update", "update_many", "update_one",
 }
 _NOSQL_RECEIVER_HINTS = ("coll", "db", "mongo", "users", "documents")
-_COMMAND_FUNCTIONS = {"os.popen", "os.system"}
+_COMMAND_FUNCTIONS = {
+    "commands.getoutput", "os.execl", "os.execle", "os.execlp", "os.execlpe", "os.execv", "os.execve", "os.execvp",
+    "os.execvpe", "os.popen", "os.posix_spawn", "os.posix_spawnp", "os.spawnl", "os.spawnle", "os.spawnlp", "os.spawnv",
+    "os.spawnve", "os.spawnvp", "os.system", "pty.spawn",
+}
 _SUBPROCESS_FUNCTIONS = {
     "subprocess.Popen", "subprocess.call", "subprocess.check_call", "subprocess.check_output",
     "subprocess.getoutput", "subprocess.getstatusoutput", "subprocess.run",
@@ -126,9 +132,15 @@ _COLLECTION_ADDS = {
     "add", "append", "appendleft", "extend", "extendleft", "insert", "setdefault", "update", "write", "writelines",
 }
 _HTTP_CLIENT_METHODS = {"delete", "get", "head", "patch", "post", "put"}
-_CODE_FUNCTIONS = {"compile", "eval", "exec"}
+_CODE_FUNCTIONS = {"__import__", "compile", "eval", "exec"}
+# Importing a module named by input runs that module's code.
+_IMPORT_FUNCTIONS = {"importlib.__import__", "importlib.import_module", "import_module"}
 _TEMPLATE_FUNCTIONS = {"Template", "jinja2.Template", "render_template_string"}
-_DESERIALIZE_FUNCTIONS = {"dill.loads", "marshal.loads", "pickle.load", "pickle.loads", "shelve.open", "yaml.load"}
+_DESERIALIZE_FUNCTIONS = {
+    "cloudpickle.load", "cloudpickle.loads", "dill.load", "dill.loads", "joblib.load", "jsonpickle.decode", "marshal.load",
+    "marshal.loads", "pandas.read_pickle", "pickle.load", "pickle.loads", "shelve.open", "torch.load", "yaml.load",
+    "yaml.unsafe_load",
+}
 _SAFE_YAML_LOADERS = {"CSafeLoader", "SafeLoader", "yaml.CSafeLoader", "yaml.SafeLoader"}
 
 
@@ -1315,8 +1327,12 @@ class _FunctionAnalyzer:
             if target:
                 self.report(node, "ssrf", short, target, "medium")
             return
-        if short in _CODE_FUNCTIONS and source:
+        if (short in _CODE_FUNCTIONS or name in _IMPORT_FUNCTIONS) and source:
             self.report(node, "code", short, source, "high")
+            return
+        if method == "from_string" and source and any(hint in receiver for hint in ("env", "jinja", "template", "loader")):
+            # jinja2.Environment().from_string(text) compiles text as a template.
+            self.report(node, "template", short, source, "high")
             return
         if (name in _TEMPLATE_FUNCTIONS or short in _TEMPLATE_FUNCTIONS) and source:
             self.report(node, "template", short, source, "high")
@@ -1471,8 +1487,14 @@ def analyze_path(path: str = ".", *, include_tests: bool = False) -> dict:
             break
         summaries.clear()
     scanned = len(analyzers) - len(failed)
+    inputs: List[dict] = []
     for analyzer in analyzers:
         findings.extend(analyzer.findings.values())
+        if analyzer.filename not in failed:
+            try:
+                inputs.extend(module_inputs(analyzer.tree, analyzer.filename))
+            except RecursionError:
+                pass  # The file's routes get no saved inputs, so their checks stay as they are.
     kept, suppressed = _without_ignored(findings, {analyzer.filename: analyzer.lines for analyzer in analyzers})
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -1480,6 +1502,7 @@ def analyze_path(path: str = ".", *, include_tests: bool = False) -> dict:
         "files_scanned": scanned,
         "findings": [_as_dict(finding) for finding in sorted(kept, key=lambda item: (item.file, item.line, item.sink, item.function))],
         "errors": errors,
+        "inputs": inputs,
     }
     if suppressed:
         report["suppressed"] = suppressed

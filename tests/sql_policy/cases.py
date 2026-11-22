@@ -42,10 +42,34 @@ class FrameworkCases:
         self.assertEqual(self.send(b'email=admin%27--', content_type='application/x-www-form-urlencoded')[0], 403)
 
     def test_multipart_body_preserved(self):
-        raw = b'--x\r\nContent-Disposition: form-data; name="file"\r\n\r\nadmin\x27--\r\n--x--\r\n'
+        raw = b'--x\r\nContent-Disposition: form-data; name="file"\r\n\r\no\x27reilly\r\n--x--\r\n'
         status, body = self.send(raw, content_type='multipart/form-data; boundary=x')
         self.assertEqual(status, 401)
         self.assertEqual(body['raw'], raw.decode())
+
+    def test_multipart_parts_are_checked(self):
+        multipart = 'multipart/form-data; boundary=x'
+        part = lambda disposition, content: (
+            b'--x\r\nContent-Disposition: form-data; ' + disposition + b'\r\n\r\n' + content + b'\r\n--x--\r\n')
+        for raw, rule in [
+            (part(b'name="email"', b"admin\x27--"), 'sql_'),
+            (part(b'name="f"; filename="shell.php"', b'GIF89a'), 'rce_script_upload'),
+            (part(b'name="f"; filename="a.jpg"', b'\xff\xd8\xff<?php system($_GET["c"]); ?>'), 'rce_php'),
+            (part(b'name="__proto__[admin]"', b'1'), 'rce_prototype_pollution'),
+        ]:
+            with self.subTest(rule=rule):
+                status, body = self.send(raw, content_type=multipart)
+                self.assertEqual(status, 403)
+                self.assertTrue(body['error'].startswith(rule), body)
+        # A large upload is checked by its start and reaches the handler whole, not refused.
+        upload = part(b'name="f"; filename="big.txt"', b'ordinary text ' * 20000)
+        status, body = self.send(upload, content_type=multipart, max_bytes=4096)
+        self.assertEqual(status, 401)
+        self.assertEqual(len(body['raw']), len(upload))
+
+    def test_bodies_in_an_encoding_that_cant_be_read_are_refused(self):
+        self.assertEqual(self.send({'email': 'x'}, encoding='br')[0], 413)
+        self.assertEqual(self.send({'email': 'x'}, encoding='identity')[0], 401)
 
 
 def wire_body(payload):

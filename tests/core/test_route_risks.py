@@ -199,10 +199,12 @@ def test_findings_link_to_routes_by_view(tmp_path, file, view):
     manifest = {"routes": {"/search": {"view": view}}}
     counts = apply_report(report, manifest)
     if view.endswith("Other"):
-        assert counts == {"routes": 0, "linked": 0, "unlinked": 1}
+        assert counts == {"routes": 0, "linked": 0, "unlinked": 1, "inputs": 0}
         assert "injection_risks" not in manifest["routes"]["/search"]
     else:
-        assert counts == {"routes": 1, "linked": 1, "unlinked": 0}
+        assert counts == {"routes": 1, "linked": 1, "unlinked": 0, "inputs": 1}
+        assert manifest["routes"]["/search"]["inputs"] == {"q": "text"}
+        assert manifest["routes"]["/search"]["inputs_complete"] is True
         assert manifest["routes"]["/search"]["injection_risks"] == [{"sink": "command", "input": "q", "confidence": "high"}]
 
 
@@ -268,8 +270,8 @@ def test_audit_into_manifest_saves_findings_and_survives_failures(tmp_path, capl
     manifest = {"routes": {"/search": {"view": "views.search"}, "/x": {"view": "views.x"}}}
     assert audit_into_manifest(manifest, None) is None
     assert describe_audit(manifest) == "Injection checks: not run"
-    assert audit_into_manifest(manifest, str(tmp_path)) == {"routes": 1, "linked": 1, "unlinked": 0}
-    assert describe_audit(manifest) == "Injection checks: 1 routes from 1 files"
+    assert audit_into_manifest(manifest, str(tmp_path)) == {"routes": 1, "linked": 1, "unlinked": 0, "inputs": 1}
+    assert describe_audit(manifest) == "Injection checks: 1 routes from 1 files; inputs and types for 1 routes"
     manifest["injection_audit"]["unlinked_findings"] = 2
     assert "2 findings couldn't be tied" in describe_audit(manifest)
     with caplog.at_level(logging.WARNING, logger="aiwaf.injection_risk"):
@@ -295,3 +297,88 @@ def test_request_formats_are_inputs():
     for query, body in (("a=../x", None), (b"a=../x", None), (None, b"a=../x"), (None, '{"a": ["../x"]}'), (None, {"a": "../x"})):
         assert risks.inspect("/search", query, body)[0]["rule"] == "path_traversal", (query, body)
     assert RouteRisks(manifest_with([{"sink": "path", "input": ""}])).inspect("/search", None, b"../x")[0]["input"] == ""
+
+
+SCHEMA = json.loads((Path(__file__).parents[1] / "fixtures" / "route_schema_cases.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("case", SCHEMA["cases"], ids=lambda case: f"{case['path']} {case['expect']}")
+def test_shared_schema_cases(case):
+    from aiwaf.core.sql_injection import SQLInjectionPolicy
+
+    found = SQLInjectionPolicy("block").inspect(case["query"].encode(), case["body"].encode())
+    review = RouteRisks(SCHEMA["manifest"]).review(case["path"], case["query"], case["body"].encode(), 65536,
+                                                   found.rule if found else None)
+    outcome = review[0] if review else ("block" if found else "pass")
+    assert outcome == case["expect"]
+    if outcome == "mismatch":
+        assert review[2] == case["input"]
+
+
+def test_schema_review_modes_log_names_and_never_values(tmp_path, caplog):
+    from aiwaf.core.sql_injection import Finding
+
+    path = write(tmp_path, SCHEMA["manifest"])
+    prose, finding = b'{"body": "use sleep(5) in the query"}', Finding("sql_function")
+    with caplog.at_level(logging.WARNING, logger="aiwaf.route_schema"):
+        # monitor, the default, logs what enforce would do and keeps the finding.
+        assert observer_for("off", path, "/comments", "POST").review(b"", prose, finding, 65536) == finding
+        assert observer_for("off", path, "/comments", "POST", "enforce").review(b"", prose, finding, 65536) is None
+        mismatch = observer_for("off", path, "/comments", "POST", "enforce").review(b"post_id=1%20OR%201%3D1", b"", None, 65536)
+    assert mismatch.rule == "schema_type_mismatch"
+    events = [json.loads(record.getMessage()) for record in caplog.records]
+    assert events[0] == {"event": "aiwaf.route_schema", "mode": "monitor", "method": "POST", "route": "/comments",
+                         "action": "relax", "rule": "sql_function"}
+    assert events[2]["input"] == "post_id" and events[2]["type"] == "int"
+    assert "sleep" not in caplog.text and "OR" not in caplog.text
+    # Off, or a manifest with no saved inputs, gives no review.
+    assert not hasattr(observer_for("block", path, "/comments", schema_mode="off"), "review")
+    (tmp_path / "plain").mkdir()
+    assert observer_for("off", write(tmp_path / "plain", manifest_with([{"sink": "path", "input": ""}])), "/search") is None
+    with pytest.raises(ValueError):
+        observer_for("block", path, "/comments", schema_mode="strict")
+
+
+def test_a_failing_review_keeps_the_finding(tmp_path, monkeypatch):
+    from aiwaf.core.sql_injection import Finding
+
+    review = observer_for("off", write(tmp_path, SCHEMA["manifest"]), "/comments", schema_mode="enforce").review
+    monkeypatch.setattr(RouteRisks, "review", lambda *_: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert review(b"", b"{}", Finding("sql_function"), 65536) == Finding("sql_function")
+
+
+def test_inputs_from_several_views_merge_and_an_unknown_one_makes_the_list_incomplete(tmp_path):
+    code = ("from flask import request\n"
+            "def search():\n    return int(request.args['page']), request.args.get('q')\n"
+            "def other(request):\n    helper(request)\n")
+    report = report_for(tmp_path, "views.py", code)
+    manifest = {"routes": {"/search": {"view": "views.search"}, "/other": {"view": "views.other"}, "/none": {"view": "x.y"}}}
+    assert apply_report(report, manifest)["inputs"] == 2
+    assert manifest["routes"]["/search"] == {"view": "views.search", "inputs": {"page": "int", "q": "text"}, "inputs_complete": True}
+    assert manifest["routes"]["/other"]["inputs_complete"] is False
+    assert "inputs" not in manifest["routes"]["/none"]
+    assert "inputs and types for 2 routes" in route_risks.describe_audit(manifest)
+
+
+@pytest.mark.parametrize("case", SCHEMA["path_cases"], ids=lambda case: f"{case['path']} {case['expect']}")
+def test_shared_path_cases(case):
+    from aiwaf.core.sql_injection import SQLInjectionPolicy
+
+    found = SQLInjectionPolicy("block").inspect_path(case["path"])
+    review = RouteRisks(SCHEMA["manifest"]).review_path(case["path"], 65536, found.rule) if found else None
+    outcome = review[0] if review else ("block" if found else "pass")
+    assert outcome == case["expect"]
+    if outcome == "mismatch":
+        assert review[2] == case["input"]
+
+
+def test_path_findings_are_reviewed_in_the_request_check(tmp_path):
+    from types import SimpleNamespace
+    from aiwaf.core.sql_injection import SQLInjectionPolicy, inspect_wsgi_request
+
+    path = write(tmp_path, SCHEMA["manifest"])
+    request = SimpleNamespace(query_string=b"", content_type="", path="/posts/use-sleep(5)-in-queries", headers={})
+    observer = observer_for("off", path, request.path, "GET", "enforce")
+    assert inspect_wsgi_request(request, SQLInjectionPolicy(), observer=observer) is None
+    assert inspect_wsgi_request(request, SQLInjectionPolicy(), observer=observer_for("off", path, request.path, "GET")).rule == "sql_function"
+    assert observer.review_path("/x", route_risks.Finding("payload_inspection_limit", 413), 1).status == 413

@@ -625,8 +625,19 @@ fn quoted_word(chars: &[char], end: usize, quote: char) -> bool {
         && KEYWORDS.contains(&chars[end + 1..stop].iter().collect::<String>().to_lowercase().as_str())
 }
 
+/// True for one plain ASCII word, number, email or identifier, with no whitespace, quote,
+/// operator, bracket or comment. Most request values are. Such a value can't break out of a
+/// SQL value, so only the names that appear in SQL alone, as in tempdb, are checked in it:
+/// cleaning leaves it unchanged, and the other signatures need characters it doesn't have.
+fn plain_word(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'@'))
+}
+
 /// Returns a rule name when the value breaks out of a SQL value, otherwise `None`.
 pub fn classify(value: &str) -> Option<&'static str> {
+    if plain_word(value) {
+        return sql_only_name(value).then_some("sql_function");
+    }
     let cleaned = clean(value);
     let chars: Vec<char> = cleaned.chars().collect();
     let tokens = lex(&chars);

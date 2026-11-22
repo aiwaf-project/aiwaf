@@ -11,7 +11,7 @@
 use crate::payload::{JsonTree, decode, parse_json};
 use regex::Regex;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 const MAX_VALUE_CHARS: usize = 4096;
@@ -212,7 +212,143 @@ struct RiskRoute {
     path: String,
     compiled: CompiledRoute,
     risks: Vec<Risk>,
+    /// The inputs `init` found the route reads, with their types, and whether that list is
+    /// complete. None when the audit couldn't tell.
+    inputs: Option<HashMap<String, String>>,
+    complete: bool,
+    /// Each route parameter's type from the route's own syntax, in the order of compiled.names.
+    path_types: Vec<Option<&'static str>>,
 }
+
+/// What a route's saved inputs say about a request, from `RouteRisks::review`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Review {
+    /// A typed input, as an int, sent with a value that isn't one.
+    Mismatch { route: String, input: String, kind: String },
+    /// The general check's finding comes only from inputs the route's schema clears: typed
+    /// inputs of their type, text that reaches no operation, and inputs the route never reads.
+    Relax { route: String, rule: String },
+}
+
+impl Review {
+    /// The log line for this review: names and rule names, never request values.
+    pub fn event(&self, mode: &str, method: &str) -> Value {
+        match self {
+            Review::Mismatch { route, input, kind } => serde_json::json!({
+                "event": "aiwaf.route_schema", "mode": mode, "method": method, "route": route,
+                "action": "mismatch", "input": input, "type": kind,
+            }),
+            Review::Relax { route, rule } => serde_json::json!({
+                "event": "aiwaf.route_schema", "mode": mode, "method": method, "route": route,
+                "action": "relax", "rule": rule,
+            }),
+        }
+    }
+}
+
+/// Where the payload check's finding came from: the query or body, a header, or the URL path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Payload,
+    Headers,
+    Path,
+}
+
+/// The type a route segment's own syntax gives, as in <int:id> or {id:uuid}.
+fn segment_type(segment: &str) -> Option<&'static str> {
+    let converter = segment
+        .strip_prefix('<')
+        .and_then(|rest| rest.split_once(':'))
+        .map(|(kind, _)| kind)
+        .or_else(|| segment.strip_prefix('{').and_then(|rest| rest.strip_suffix('}')).and_then(|rest| rest.split_once(':')).map(|(_, kind)| kind))?;
+    match converter {
+        "int" => Some("int"),
+        "float" => Some("float"),
+        "uuid" => Some("uuid"),
+        _ => None,
+    }
+}
+
+/// The types an input can be saved with. Anything else is text.
+pub const INPUT_TYPES: &[&str] = &["int", "float", "bool", "uuid", "text"];
+
+/// True when a value fits a type. Values that can't carry text, as JSON numbers, always fit.
+fn fits(kind: &str, value: &Value) -> bool {
+    static INT: OnceLock<Regex> = OnceLock::new();
+    static FLOAT: OnceLock<Regex> = OnceLock::new();
+    static UUID: OnceLock<Regex> = OnceLock::new();
+    match value {
+        Value::String(text) => {
+            let text = text.trim();
+            text.is_empty()
+                || match kind {
+                    "int" => INT.get_or_init(|| Regex::new(r"^[+-]?[0-9]{1,20}$").unwrap()).is_match(text),
+                    "float" => FLOAT
+                        .get_or_init(|| Regex::new(r"(?i)^[+-]?(?:[0-9]{1,40}\.?[0-9]{0,40}|\.[0-9]{1,40})(?:e[+-]?[0-9]{1,4})?$").unwrap())
+                        .is_match(text),
+                    "bool" => ["true", "false", "1", "0", "on", "off", "yes", "no", "t", "f", "y", "n"]
+                        .contains(&text.to_ascii_lowercase().as_str()),
+                    "uuid" => UUID
+                        .get_or_init(|| {
+                            Regex::new(r"(?i)^(?:urn:uuid:)?\{?[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}\}?$").unwrap()
+                        })
+                        .is_match(text),
+                    _ => true,
+                }
+        }
+        // A list of values, as in ?id=1&id=2 or {"ids": [1, 2]}.
+        Value::Array(items) => items.iter().take(MAX_ITEMS).all(|item| !item.is_object() && fits(kind, item)),
+        Value::Object(_) => kind == "text",
+        _ => true,
+    }
+}
+
+/// A request's top-level fields, as (name, value, raw form pair or JSON key), and whether its
+/// body has a shape the review can read: none, a form or a JSON object.
+struct Fields {
+    query: Vec<(String, Value, String)>,
+    body: Option<BodyFields>,
+}
+
+enum BodyFields {
+    Empty,
+    Form(Vec<(String, Value, String)>),
+    Json(serde_json::Map<String, Value>),
+}
+
+fn form_fields(text: &str) -> Vec<(String, Value, String)> {
+    text.split('&')
+        .filter(|part| !part.is_empty())
+        .take(MAX_ITEMS)
+        .map(|part| {
+            let (key, value) = part.split_once('=').unwrap_or((part, ""));
+            (input_name(&decode(key.as_bytes())), Value::String(decode(value.as_bytes())), part.to_owned())
+        })
+        .collect()
+}
+
+fn fields(query: &str, body: &[u8]) -> Fields {
+    let body = match std::str::from_utf8(body) {
+        Ok(text) if text.trim().is_empty() => Some(BodyFields::Empty),
+        Ok(text) if text.trim_start().starts_with('{') => match serde_json::from_str::<Value>(text) {
+            Ok(Value::Object(map)) => Some(BodyFields::Json(map)),
+            _ => None,
+        },
+        Ok(text) if text.contains('=') && !text.trim_start().starts_with(['[', '<', '-']) => Some(BodyFields::Form(form_fields(text))),
+        _ => None,
+    };
+    Fields { query: form_fields(query), body }
+}
+
+fn high_confidence(value: &str, budget: usize) -> Option<String> {
+    crate::payload::inspect_sql(b"", value.as_bytes(), budget, false)
+        .map(|(rule, _)| rule)
+        .filter(|rule| !RELAXED_RULES.contains(&rule.as_str()))
+}
+
+/// The general check's rules a cleared input only logs: the ones that fire on prose and code
+/// snippets. Quote breakouts, as in ' OR 1=1--, and every remote code execution rule still block.
+pub const RELAXED_RULES: &[&str] = &["sql_function", "sql_comment", "sql_breakout_numeric"];
 
 /// Saved risks for one manifest, compiled for lookup by request path.
 pub struct RouteRisks {
@@ -232,9 +368,17 @@ impl RouteRisks {
         let mut routes = Vec::new();
         if let Some(entries) = manifest.get("routes").and_then(Value::as_object) {
             for (path, entry) in entries {
-                let Some(saved) = entry.get("injection_risks").and_then(Value::as_array) else {
-                    continue;
-                };
+                let saved = entry.get("injection_risks").and_then(Value::as_array).cloned().unwrap_or_default();
+                let inputs = entry.get("inputs").and_then(Value::as_object).map(|inputs| {
+                    inputs
+                        .iter()
+                        .map(|(name, kind)| {
+                            let kind = kind.as_str().filter(|kind| INPUT_TYPES.contains(kind)).unwrap_or("text");
+                            (name.clone(), kind.to_owned())
+                        })
+                        .collect::<HashMap<_, _>>()
+                });
+                let complete = inputs.is_some() && entry.get("inputs_complete").and_then(Value::as_bool) == Some(true);
                 let risks: Vec<Risk> = saved
                     .iter()
                     .filter(|risk| risk.is_object())
@@ -244,8 +388,14 @@ impl RouteRisks {
                         confidence: text_field(risk, "confidence"),
                     })
                     .collect();
-                if !risks.is_empty() {
-                    routes.push(RiskRoute { path: path.clone(), compiled: compile_route(path), risks });
+                if !risks.is_empty() || inputs.is_some() {
+                    let path_types = path
+                        .split('/')
+                        .filter(|segment| !segment.is_empty())
+                        .filter(|segment| segment.starts_with(['<', '{', ':', '*']))
+                        .map(segment_type)
+                        .collect();
+                    routes.push(RiskRoute { path: path.clone(), compiled: compile_route(path), risks, inputs, complete, path_types });
                 }
             }
         }
@@ -258,6 +408,142 @@ impl RouteRisks {
 
     pub fn is_empty(&self) -> bool {
         self.routes.is_empty()
+    }
+
+    fn route(&self, path: &str) -> Option<&RiskRoute> {
+        let path = if path.is_empty() { "/" } else { path };
+        self.routes.iter().find(|route| route.compiled.pattern.is_match(path))
+    }
+
+    /// Reviews the payload check's finding, by where it came from, or a request with none. A
+    /// header's finding always stands. A path's is reviewed by `review_path`.
+    pub fn review_found(&self, path: &str, query: &str, body: &[u8], budget: usize, found: Option<(&str, Source)>) -> Option<Review> {
+        match found {
+            None => self.review(path, query, body, budget, None),
+            Some((rule, Source::Payload)) => self.review(path, query, body, budget, Some(rule)),
+            Some((_, Source::Headers)) => None,
+            Some((rule, Source::Path)) => self.review_path(path, budget, rule),
+        }
+    }
+
+    /// Reviews a finding from the URL path, as in /posts/use-sleep(5)-in-queries. The route's
+    /// static segments are code, so only its parameters can carry input: typed ones must fit
+    /// their type, and text ones that reach no operation are cleared, still getting the rules
+    /// that aren't in `RELAXED_RULES`. `Relax` when the path is clean without them.
+    pub fn review_path(&self, path: &str, budget: usize, found: &str) -> Option<Review> {
+        let route = self.route(path)?;
+        let inputs = route.inputs.as_ref()?;
+        let path = if path.is_empty() { "/" } else { path };
+        let captures = route.compiled.pattern.captures(path)?;
+        let relaxable = RELAXED_RULES.contains(&found) && !route.risks.iter().any(|risk| risk.input.is_empty());
+        let mut rebuilt = String::with_capacity(path.len());
+        let mut last = 0;
+        for (index, name) in route.compiled.names.iter().enumerate() {
+            let Some(value) = captures.get(index + 1) else { continue };
+            let kind = route.path_types.get(index).copied().flatten().or_else(|| inputs.get(name).map(String::as_str)).unwrap_or("text");
+            let text = decode(value.as_str().as_bytes());
+            if kind != "text" {
+                if !fits(kind, &Value::String(text)) {
+                    return Some(Review::Mismatch { route: route.path.clone(), input: name.clone(), kind: kind.to_owned() });
+                }
+            } else if name.is_empty() || route.risks.iter().any(|risk| &risk.input == name) {
+                continue;
+            } else if high_confidence(&text, budget).is_some() {
+                return None;
+            }
+            rebuilt.push_str(&path[last..value.start()]);
+            rebuilt.push('1');
+            last = value.end();
+        }
+        rebuilt.push_str(&path[last..]);
+        if !relaxable {
+            return None;
+        }
+        match crate::payload::inspect_sql_path(&rebuilt, budget) {
+            None => Some(Review::Relax { route: route.path.clone(), rule: found.to_owned() }),
+            Some(_) => None,
+        }
+    }
+
+    /// Reviews a request against the inputs `init` saved for its route, after the general check.
+    ///
+    /// A typed input sent with a value that isn't of its type is a `Mismatch`. When `found`, the
+    /// general check's finding, comes from the query or body, the request is checked again
+    /// without the inputs the schema clears, which still get the rules that aren't in
+    /// `RELAXED_RULES`. `Relax` when nothing else is found. None, keeping the finding, whenever
+    /// the route's inputs aren't known in full: an incomplete list, an operation reached by an
+    /// input the audit couldn't name, or a body that isn't a form or JSON object.
+    pub fn review(&self, path: &str, query: &str, body: &[u8], budget: usize, found: Option<&str>) -> Option<Review> {
+        let route = self.route(path)?;
+        let inputs = route.inputs.as_ref()?;
+        let fields = fields(query, body);
+        let mut all: Vec<(&String, &Value)> = fields.query.iter().map(|(name, value, _)| (name, value)).collect();
+        match &fields.body {
+            Some(BodyFields::Form(items)) => all.extend(items.iter().map(|(name, value, _)| (name, value))),
+            Some(BodyFields::Json(map)) => all.extend(map.iter()),
+            _ => (),
+        }
+        for (name, value) in &all {
+            if let Some(kind) = inputs.get(*name).filter(|kind| kind.as_str() != "text") {
+                if !fits(kind, value) {
+                    // The name comes from the manifest, because request names are untrusted.
+                    let input = inputs.get_key_value(*name).map(|(key, _)| key.clone()).unwrap_or_default();
+                    return Some(Review::Mismatch { route: route.path.clone(), input, kind: kind.clone() });
+                }
+            }
+        }
+        let found = found?;
+        if !RELAXED_RULES.contains(&found) || !route.complete || route.risks.iter().any(|risk| risk.input.is_empty()) {
+            return None;
+        }
+        let body_fields = fields.body.as_ref()?;
+        // A finding from headers or the path isn't the query's or body's to clear.
+        crate::payload::inspect_sql(query.as_bytes(), body, budget, false)?;
+        let reaches = |name: &str| route.risks.iter().any(|risk| risk.input == name);
+        let cleared = |name: &str, value: &Value| -> Result<bool, ()> {
+            match inputs.get(name).map(String::as_str) {
+                Some(kind) if kind != "text" => Ok(true),
+                Some(_) if reaches(name) => Ok(false),
+                _ => {
+                    let text = match value {
+                        Value::String(text) => text.clone(),
+                        other => other.to_string(),
+                    };
+                    if high_confidence(&text, budget).is_some() { Err(()) } else { Ok(true) }
+                }
+            }
+        };
+        let mut kept_query = Vec::new();
+        for (name, value, raw) in &fields.query {
+            if !cleared(name, value).ok()? {
+                kept_query.push(raw.as_str());
+            }
+        }
+        let kept_body = match body_fields {
+            BodyFields::Empty => String::new(),
+            BodyFields::Form(items) => {
+                let mut kept = Vec::new();
+                for (name, value, raw) in items {
+                    if !cleared(name, value).ok()? {
+                        kept.push(raw.as_str());
+                    }
+                }
+                kept.join("&")
+            }
+            BodyFields::Json(map) => {
+                let mut kept = serde_json::Map::new();
+                for (name, value) in map {
+                    if !cleared(name, value).ok()? {
+                        kept.insert(name.clone(), value.clone());
+                    }
+                }
+                if kept.is_empty() { String::new() } else { Value::Object(kept).to_string() }
+            }
+        };
+        match crate::payload::inspect_sql(kept_query.join("&").as_bytes(), kept_body.as_bytes(), budget, false) {
+            None => Some(Review::Relax { route: route.path.clone(), rule: found.to_owned() }),
+            Some(_) => None,
+        }
     }
 
     /// Checks one request. Returns every distinct match on the first route the path matches.
@@ -395,6 +681,47 @@ mod tests {
         assert!(RouteRisks::new(&json!(null)).is_empty());
         assert!(RouteRisks::new(&json!({"routes": "bad"})).is_empty());
         assert!(RouteRisks::new(&json!({"routes": {"/x": {"injection_risks": ["bad"]}}})).is_empty());
+    }
+
+    /// What a request comes to: the general check, then the route's schema review.
+    pub(crate) fn schema_outcome(risks: &RouteRisks, path: &str, query: &str, body: &[u8]) -> (String, String) {
+        let found = crate::payload::inspect_sql(query.as_bytes(), body, 65536, false).map(|(rule, _)| rule);
+        match risks.review(path, query, body, 65536, found.as_deref()) {
+            Some(Review::Mismatch { input, .. }) => ("mismatch".into(), input),
+            Some(Review::Relax { .. }) => ("relax".into(), String::new()),
+            None if found.is_some() => ("block".into(), String::new()),
+            None => ("pass".into(), String::new()),
+        }
+    }
+
+    #[test]
+    fn shared_schema_cases() {
+        let cases: Value = serde_json::from_str(include_str!("../../../../tests/fixtures/route_schema_cases.json")).unwrap();
+        let risks = RouteRisks::new(&cases["manifest"]);
+        for case in cases["cases"].as_array().unwrap() {
+            let text = |key: &str| case[key].as_str().unwrap_or_default().to_owned();
+            let outcome = schema_outcome(&risks, &text("path"), &text("query"), text("body").as_bytes());
+            assert_eq!(outcome, (text("expect"), text("input")), "{case}");
+        }
+        for case in cases["path_cases"].as_array().unwrap() {
+            let path = case["path"].as_str().unwrap();
+            let found = crate::payload::inspect_sql_path(path, 65536).map(|(rule, _)| rule);
+            let outcome = match risks.review_found(path, "", b"", 65536, found.as_deref().map(|rule| (rule, Source::Path))) {
+                Some(Review::Mismatch { input, .. }) => ("mismatch".to_owned(), input),
+                Some(Review::Relax { .. }) => ("relax".to_owned(), String::new()),
+                None if found.is_some() => ("block".to_owned(), String::new()),
+                None => ("pass".to_owned(), String::new()),
+            };
+            let input = case["input"].as_str().unwrap_or_default().to_owned();
+            assert_eq!(outcome, (case["expect"].as_str().unwrap().to_owned(), input), "{case}");
+        }
+        // A header's finding always stands.
+        assert_eq!(risks.review_found("/comments", "", b"", 65536, Some(("sql_function", Source::Headers))), None);
+        let event = Review::Relax { route: "/x".into(), rule: "sql_function".into() }.event("monitor", "GET");
+        assert_eq!(event["action"], "relax");
+        // Routes with only saved inputs still give no route-specific events.
+        assert!(risks.inspect("/comments", "body=a;id", b"").is_empty());
+        assert!(fits("int", &json!(null)) && !fits("int", &json!({"a": 1})) && fits("text", &json!({"a": 1})));
     }
 
     #[test]

@@ -216,7 +216,8 @@ def test_missing_path_raises():
 def test_reports_have_the_shared_shape_and_readable_output(tmp_path):
     (tmp_path / "view.py").write_text(DJANGO_VIEW, encoding="utf-8")
     report = analyze_path(str(tmp_path))
-    assert set(report) == {"schema_version", "language", "files_scanned", "findings", "errors"}
+    assert set(report) == {"schema_version", "language", "files_scanned", "findings", "errors", "inputs"}
+    assert report["inputs"] == [{"function": "search", "file": report["findings"][0]["file"], "inputs": {"q": "text"}, "complete": True}]
     # entry_file is added only for an operation in another module than the view.
     assert set(report["findings"][0]) == {"file", "line", "function", "sink", "call", "source", "confidence"}
     assert json.loads(to_json(report))["language"] == "python"
@@ -488,6 +489,13 @@ FLOW_CASES = [
     ("XML with defaults", [], "def view(request):\n    xml.dom.minidom.parseString(request.body, xml.sax.make_parser())\n"),
     ("regular expression from input", ["redos"], "def view(request):\n    re.compile(request.GET['p'])\n"),
     ("regular expression escaped", [], "def view(request):\n    re.compile(re.escape(request.GET['p']))\n"),
+    # Remote code execution sinks.
+    ("import of a module named by input", ["code"], "def view(request):\n    importlib.import_module(request.GET['m'])\n"),
+    ("__import__ of input", ["code"], "def view(request):\n    __import__(request.GET['m'])\n"),
+    ("os.exec of input", ["command"], "def view(request):\n    os.execvp(request.GET['b'], [])\n"),
+    ("Jinja from_string", ["template"], "def view(request):\n    env.from_string(request.GET['t']).render()\n"),
+    ("jsonpickle", ["deserialization"], "def view(request):\n    jsonpickle.decode(request.body)\n"),
+    ("import of a checked number", [], "def view(request):\n    importlib.import_module('app.' + str(int(request.GET['n'])))\n"),
     # Encoders are safe only for what they encode for.
     ("HTML escaping before SQL", ["sql"], "def view(request):\n    cursor.execute(html.escape(request.GET['q']))\n"),
     ("shell quoting", [], "def view(request):\n    os.system('ls ' + shlex.quote(request.GET['q']))\n"),

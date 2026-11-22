@@ -24,8 +24,9 @@ pub const STAGES: [&str; 8] = [
 ];
 static NEXT_CONTEXT: AtomicU64 = AtomicU64::new(1);
 /// Optional request facts this engine accepts, for `NativeRequestPipeline::supports`.
-pub const FEATURES: [&str; 14] = [
+pub const FEATURES: [&str; 15] = [
     "rate_overrides",
+    "route_schema",
     "sql_monitor",
     "uuid_resolver",
     "host_store",
@@ -115,6 +116,10 @@ struct Profile {
     /// "memory" keeps blocks and learned keywords in the engine. "host" takes them as request
     /// facts and returns blocks and keywords from finish for the host's stores.
     policy_store: String,
+    /// What the inputs init saved for each route do, as AIWAF_ROUTE_SCHEMA_MODE: "enforce",
+    /// "monitor" or "off". The route manifest is given in route_manifest.
+    route_schema_mode: String,
+    route_manifest: Value,
 }
 impl Default for Profile {
     fn default() -> Self {
@@ -190,6 +195,8 @@ impl Default for Profile {
             max_history: 1000,
             max_pending: 10000,
             policy_store: "memory".into(),
+            route_schema_mode: "off".into(),
+            route_manifest: Value::Null,
         }
     }
 }
@@ -270,6 +277,56 @@ struct Begin {
     /// A SQL finding allowed through because sql_mode is "monitor", for the adapter to log.
     #[serde(skip_serializing_if = "Option::is_none")]
     monitor: Option<String>,
+    /// The route schema review's log line, for the adapter to log.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema: Option<Value>,
+}
+
+/// What a route schema review does to a finding in the profile's mode.
+enum Verdict {
+    Keep,
+    Clear,
+    Mismatch,
+}
+
+/// Reviews a payload finding, by where it came from, against the route's saved inputs.
+fn reviewed(
+    schema: Option<&aiwaf_core::route_risks::RouteRisks>,
+    profile: &Profile,
+    method: &str,
+    path: &str,
+    query: &str,
+    body: &Value,
+    found: Option<(&str, aiwaf_core::route_risks::Source)>,
+) -> (Verdict, Option<Value>) {
+    use aiwaf_core::route_risks::Review;
+    let Some(schema) = schema else { return (Verdict::Keep, None) };
+    let review = schema.review_found(path, query, &body_bytes(body), profile.max_bytes, found);
+    let event = review.as_ref().map(|review| review.event(&profile.route_schema_mode, method));
+    let enforce = profile.route_schema_mode == "enforce";
+    let verdict = match review {
+        Some(Review::Mismatch { .. }) if enforce => Verdict::Mismatch,
+        Some(Review::Relax { .. }) if enforce => Verdict::Clear,
+        _ => Verdict::Keep,
+    };
+    (verdict, event)
+}
+
+/// A result with the route schema review's log line, when there is one.
+fn with_schema(mut result: Value, schema: Option<Value>) -> Value {
+    if let (Some(event), Some(object)) = (schema, result.as_object_mut()) {
+        object.insert("schema".into(), event);
+    }
+    result
+}
+
+/// A request body as the payload check reads it: the text sent, or a parsed body as JSON.
+fn body_bytes(body: &Value) -> Vec<u8> {
+    match body {
+        Value::Null => Vec::new(),
+        Value::String(text) => text.as_bytes().to_vec(),
+        other => other.to_string().into_bytes(),
+    }
 }
 pub struct Engine {
     profile: Profile,
@@ -285,6 +342,8 @@ pub struct Engine {
     pub model: Option<IsolationForest>,
     header_limits: HeaderLimits,
     agent_lists: Option<UserAgentLists>,
+    /// The route manifest's saved inputs, when route_schema_mode isn't "off".
+    schema: Option<aiwaf_core::route_risks::RouteRisks>,
 }
 
 /// Whether a static or learned keyword blocks this path. With exempt keywords or allowed path
@@ -411,6 +470,7 @@ impl Engine {
         }
         if !["off", "block", "monitor"].contains(&p.sql_mode.as_str())
             || !["memory", "host"].contains(&p.policy_store.as_str())
+            || !["enforce", "monitor", "off"].contains(&p.route_schema_mode.as_str())
             || !["ip", "ip_path"].contains(&p.rate_key_mode.as_str())
         {
             return Err("Unsupported native policy".into());
@@ -511,7 +571,9 @@ impl Engine {
             .map(|s| s.to_lowercase())
             .filter(|s| !s.is_empty())
             .collect();
+        let schema = (p.route_schema_mode != "off").then(|| aiwaf_core::route_risks::RouteRisks::new(&p.route_manifest));
         Ok(Self {
+            schema,
             profile: p,
             clients: HashMap::new(),
             pending: HashMap::new(),
@@ -525,6 +587,17 @@ impl Engine {
             header_limits,
             agent_lists,
         })
+    }
+    /// Reviews a payload finding, by where it came from, against the route's saved inputs.
+    fn reviewed(
+        &self,
+        method: &str,
+        path: &str,
+        query: &str,
+        body: &Value,
+        found: Option<(&str, aiwaf_core::route_risks::Source)>,
+    ) -> (Verdict, Option<Value>) {
+        reviewed(self.schema.as_ref(), &self.profile, method, path, query, body, found)
     }
     pub fn set_model(&mut self, model: IsolationForest) -> Result<(), String> {
         let state = model.to_state();
@@ -674,6 +747,7 @@ impl Engine {
         let mut status = 0u16;
         let mut reason = String::new();
         let mut monitor = None;
+        let mut schema = None;
         let p = &self.profile;
         let country = r.country.to_uppercase();
         if apply.contains("geo_block")
@@ -695,12 +769,13 @@ impl Engine {
                 status = 403;
                 reason = k.into();
             } else if p.sql_mode != "off" {
-                let finding: Option<(u16, String)> = if r.payload_exhausted {
-                    Some((413, "payload_inspection_limit".into()))
+                use aiwaf_core::route_risks::Source;
+                let found: Option<(u16, String, Source)> = if r.payload_exhausted {
+                    Some((413, "payload_inspection_limit".into(), Source::Payload))
                 } else if let Some((s, k)) =
                     inspect(&json!([r.query, r.body, r.parsed_query]), p.max_bytes)
                 {
-                    Some((s, k.into()))
+                    Some((s, k.into(), Source::Payload))
                 } else if let Some((k, s)) = aiwaf_core::payload::inspect_sql_headers(
                     r.headers
                         .iter()
@@ -708,10 +783,29 @@ impl Engine {
                     p.max_bytes,
                 ) {
                     // Cookies, the Referer and other headers, as in Python and Node.js.
-                    Some((s as _, k))
+                    Some((s as _, k, Source::Headers))
                 } else {
                     aiwaf_core::payload::inspect_sql_path(&r.path, p.max_bytes)
-                        .map(|(k, s)| (s as _, k))
+                        .map(|(k, s)| (s as _, k, Source::Path))
+                };
+                // The route's saved inputs review the finding: see AIWAF_ROUTE_SCHEMA_MODE. A
+                // deferred body is reviewed when it's inspected.
+                let (verdict, event) = if r.payload_exhausted || (r.defer_body && found.is_none()) {
+                    (Verdict::Keep, None)
+                } else {
+                    self.reviewed(
+                        &r.method,
+                        &r.path,
+                        &r.query,
+                        &r.body,
+                        found.as_ref().filter(|(s, _, _)| *s == 403).map(|(_, k, source)| (k.as_str(), *source)),
+                    )
+                };
+                schema = event;
+                let finding = match verdict {
+                    Verdict::Keep => found.map(|(s, k, _)| (s, k)),
+                    Verdict::Clear => None,
+                    Verdict::Mismatch => Some((403, "schema_type_mismatch".into())),
                 };
                 match finding {
                     Some((_, rule)) if p.sql_mode == "monitor" => monitor = Some(rule),
@@ -871,6 +965,7 @@ impl Engine {
             status,
             reason,
             monitor,
+            schema,
         })
         .map_err(|e| e.to_string())
     }
@@ -909,12 +1004,26 @@ impl Engine {
         };
         let mut finding = None;
         let mut monitored = None;
+        let mut schema = None;
         if item.apply.contains("ip_keyword_block") && self.profile.sql_mode != "off" {
             finding = if limit || exhausted {
                 Some((413, "payload_inspection_limit"))
             } else {
                 inspect(&body, self.profile.max_bytes)
             };
+            if !(limit || exhausted) && self.schema.is_some() {
+                // The deferred body, reviewed against the route's saved inputs.
+                let r = &item.request;
+                let found = finding.filter(|(s, _)| *s == 403).map(|(_, k)| (k, aiwaf_core::route_risks::Source::Payload));
+                let (method, path, query) = (r.method.clone(), r.path.clone(), r.query.clone());
+                let (verdict, event) = reviewed(self.schema.as_ref(), &self.profile, &method, &path, &query, &body, found);
+                schema = event;
+                match verdict {
+                    Verdict::Keep => {}
+                    Verdict::Clear => finding = None,
+                    Verdict::Mismatch => finding = Some((403, "schema_type_mismatch")),
+                }
+            }
             if self.profile.sql_mode == "monitor" {
                 monitored = finding.take();
             }
@@ -962,12 +1071,13 @@ impl Engine {
                 self.blocks
                     .insert(item.request.ip.clone(), now + self.profile.block_duration);
             }
-            return Ok(json!({"status":status,"rule":rule}).to_string());
+            return Ok(with_schema(json!({"status":status,"rule":rule}), schema).to_string());
         }
         if let Some((status, rule)) = monitored {
-            return Ok(json!({"status":status,"rule":rule,"mode":"monitor"}).to_string());
+            return Ok(with_schema(json!({"status":status,"rule":rule,"mode":"monitor"}), schema).to_string());
         }
-        Ok("null".into())
+        // A cleared finding or a log line alone: the adapter logs it and lets the request through.
+        Ok(schema.map(|event| json!({"schema": event}).to_string()).unwrap_or_else(|| "null".into()))
     }
     pub fn finish(
         &mut self,
@@ -1214,6 +1324,21 @@ fn inspect(value: &Value, max_bytes: usize) -> Option<(u16, &'static str)> {
                 if *bytes > max {
                     return Some((413, "payload_inspection_limit"));
                 }
+                // A multipart form, part by part: its shape, then each text field as one value.
+                if let Some(parts) = aiwaf_core::payload::multipart_parts(s.as_bytes()) {
+                    for part in parts {
+                        if let Some(rule) = aiwaf_core::payload::part_rule(&part) {
+                            return Some((403, rule));
+                        }
+                        if part.filename.is_none() {
+                            let value = String::from_utf8_lossy(&part.content);
+                            if let Some(rule) = aiwaf_core::rce::classify(&value).or_else(|| aiwaf_core::sql::classify(&value)) {
+                                return Some((403, rule));
+                            }
+                        }
+                    }
+                    return None;
+                }
                 let normalized = decode(&decode(s));
                 if normalized.trim_start().starts_with(['{', '[']) {
                     if let Ok(parsed) = serde_json::from_str::<Value>(&normalized) {
@@ -1221,6 +1346,10 @@ fn inspect(value: &Value, max_bytes: usize) -> Option<(u16, &'static str)> {
                             return Some(k);
                         }
                     }
+                }
+                // Each form field on its own too, as in data=rO0AB... or __proto__[x]=1.
+                if let Some(rule) = aiwaf_core::rce::classify_fields(s).or_else(|| aiwaf_core::rce::classify(&normalized)) {
+                    return Some((403, rule));
                 }
                 if let Some(rule) = aiwaf_core::sql::classify_fields(&normalized) {
                     return Some((403, rule));
@@ -1234,6 +1363,12 @@ fn inspect(value: &Value, max_bytes: usize) -> Option<(u16, &'static str)> {
                 }
             }
             Value::Object(items) => {
+                // {"__proto__": {...}} or {"constructor": {"prototype": {...}}}.
+                if items.contains_key("__proto__")
+                    || items.get("constructor").and_then(Value::as_object).is_some_and(|c| c.contains_key("prototype"))
+                {
+                    return Some((403, "rce_prototype_pollution"));
+                }
                 for (k, v) in items {
                     if let Some(k) = visit(
                         &Value::String(k.clone()),
@@ -1478,6 +1613,15 @@ mod tests {
             403
         );
         assert!(inspect(&json!({"name":"O'Reilly","notes":"select a color"}), 65536).is_none());
+        assert_eq!(inspect(&json!({"a":{"__proto__":{"x":1}}}), 65536).unwrap().1, "rce_prototype_pollution");
+        assert_eq!(inspect(&json!(["__proto__[shell]=/bin/sh"]), 65536).unwrap().1, "rce_prototype_pollution");
+        assert_eq!(inspect(&json!(["user=bob&data=rO0ABXNyABFqYXZhLnV0aWwuSGFzaE1hcA"]), 65536).unwrap().1, "rce_serialized_object");
+        assert!(inspect(&json!({"constructor":"Acme","prototype":true}), 65536).is_none());
+        let form = "--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"shell.php\"\r\n\r\nx\r\n--b--";
+        assert_eq!(inspect(&json!([form]), 65536).unwrap().1, "rce_script_upload");
+        let form = "--b\r\nContent-Disposition: form-data; name=\"q\"\r\n\r\n1 OR 1=1\r\n--b--";
+        assert_eq!(inspect(&json!([form]), 65536).unwrap().1, "sql_breakout_numeric");
+        assert!(inspect(&json!(["--b\r\nContent-Disposition: form-data; name=\"q\"\r\n\r\nhello\r\n--b--"]), 65536).is_none());
         assert_eq!(
             inspect(&json!("embedded\0null"), 65536).unwrap().1,
             "content_nul_byte"

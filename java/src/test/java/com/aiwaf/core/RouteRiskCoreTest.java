@@ -334,7 +334,7 @@ class RouteRiskCoreTest {
     void findingsLinkToRoutesByView(String view) throws IOException {
         JavaSourceAnalysisCore.Report report = audit("com/acme/App.java", VIEW);
         Map<String, Object> saved = routes("/search", view);
-        assertEquals(new RouteRiskCore.Counts(1, 1, 0), RouteRiskCore.applyReport(report, saved));
+        assertEquals(new RouteRiskCore.Counts(1, 1, 0, 1), RouteRiskCore.applyReport(report, saved));
         assertEquals(List.of(Map.of("sink", "command", "input", "q", "confidence", "high")),
                 ((Map<?, ?>) ((Map<?, ?>) saved.get("routes")).get("/search")).get("injection_risks"));
     }
@@ -353,7 +353,7 @@ class RouteRiskCoreTest {
                 }
                 """);
         assertTrue(report.findings().get(0).file().endsWith("com/acme/svc/UserService.java"));
-        assertEquals(new RouteRiskCore.Counts(1, 1, 0), RouteRiskCore.applyReport(report, routes("/search", "com.acme.web.App.view")));
+        assertEquals(new RouteRiskCore.Counts(1, 1, 0, 1), RouteRiskCore.applyReport(report, routes("/search", "com.acme.web.App.view")));
     }
 
     @Test
@@ -385,7 +385,7 @@ class RouteRiskCoreTest {
         Path file = directory.resolve("paths.json");
         PathManifestCore.writeManifest(PathManifestCore.buildManifestFromSource("java-source", report.routes()), file);
         RouteRiskCore.Counts counts = RouteRiskCore.updateManifest(report, file);
-        assertEquals(new RouteRiskCore.Counts(1, 1, 0), counts);
+        assertEquals(new RouteRiskCore.Counts(1, 1, 0, 1), counts);
         assertTrue(RouteRiskCore.formatCounts(counts, "x").contains("Saved 1 possible injection paths to 1 routes"));
         assertTrue(RouteRiskCore.formatCounts(new RouteRiskCore.Counts(0, 0, 2), "x").contains("couldn't be tied"));
         assertEquals(1, new RouteRiskCore.Risks(PathManifestCore.loadManifest(file)).inspect("/search", Map.of("q", "$(id)"), "").size());

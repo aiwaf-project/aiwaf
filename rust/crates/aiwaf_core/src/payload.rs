@@ -17,6 +17,11 @@ pub fn decode_percent(bytes: &[u8]) -> String {
 }
 
 fn decode_with(bytes: &[u8], plus_is_space: bool) -> String {
+    String::from_utf8_lossy(&decode_bytes(bytes, plus_is_space)).into_owned()
+}
+
+/// Decodes %XX (and + when plus_is_space) to bytes, so a binary value isn't lost to UTF-8.
+pub fn decode_bytes(bytes: &[u8], plus_is_space: bool) -> Vec<u8> {
     let mut output = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
@@ -43,7 +48,7 @@ fn decode_with(bytes: &[u8], plus_is_space: bool) -> String {
         output.push(if plus_is_space && bytes[i] == b'+' { b' ' } else { bytes[i] });
         i += 1;
     }
-    String::from_utf8_lossy(&output).into_owned()
+    output
 }
 
 /// Reads a body as text, detecting UTF-16 and UTF-32 the way Python's json module does.
@@ -318,17 +323,127 @@ pub fn inspect_sql_path(path: &str, budget: usize) -> Option<(String, i32)> {
 /// query string and path, and the path and query of X-Original-URL and X-Rewrite-URL are read
 /// by their parts. Any other header is checked as one value, except those that hold
 /// credentials, framing or browser-set values. Header names are matched without regard to case.
+/// One part of a multipart form: its header text, field name, file name and content.
+pub struct Part {
+    pub headers: String,
+    pub name: String,
+    pub filename: Option<String>,
+    pub content: Vec<u8>,
+}
+
+fn find(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if from > haystack.len() {
+        return None;
+    }
+    memchr::memmem::find(&haystack[from..], needle).map(|at| at + from)
+}
+
+fn disposition_param(headers: &str, key: &str) -> Option<String> {
+    let lower = headers.to_ascii_lowercase();
+    let line = lower.lines().position(|line| line.trim_start().starts_with("content-disposition"))?;
+    let original = headers.lines().nth(line)?;
+    let lowered = original.to_ascii_lowercase();
+    let mut at = 0;
+    while let Some(found) = lowered[at..].find(key) {
+        let start = at + found;
+        at = start + key.len();
+        // A whole parameter, so name= isn't read from filename=.
+        if start > 0 && !matches!(lowered.as_bytes()[start - 1], b';' | b' ' | b'\t') {
+            continue;
+        }
+        let rest = original[at..].trim_start().strip_prefix('=')?.trim_start();
+        return Some(match rest.strip_prefix('"') {
+            Some(quoted) => quoted.split('"').next().unwrap_or_default().to_owned(),
+            None => rest.split(';').next().unwrap_or_default().trim().to_owned(),
+        });
+    }
+    None
+}
+
+/// The parts of a multipart/form-data body, found by its opening boundary line, or None when
+/// the body isn't one. A body cut short, as a checked prefix is, gives the parts it has.
+pub fn multipart_parts(raw: &[u8]) -> Option<Vec<Part>> {
+    let start = raw.iter().position(|b| !matches!(b, b'\r' | b'\n'))?;
+    let body = &raw[start..];
+    if !body.starts_with(b"--") {
+        return None;
+    }
+    let line_end = find(body, b"\n", 0)?;
+    let boundary = body[2..line_end].strip_suffix(b"\r").unwrap_or(&body[2..line_end]);
+    if boundary.is_empty() || boundary.len() > 200 || boundary.iter().any(|b| *b < 0x20) {
+        return None;
+    }
+    let mut delimiter = b"\n--".to_vec();
+    delimiter.extend_from_slice(boundary);
+    let mut parts = Vec::new();
+    let mut at = line_end + 1;
+    while parts.len() < 1024 && at < body.len() {
+        let end = find(body, &delimiter, at).unwrap_or(body.len());
+        let chunk = &body[at..end];
+        let (head, content) = match find(chunk, b"\r\n\r\n", 0) {
+            Some(split) => (&chunk[..split], &chunk[split + 4..]),
+            None => match find(chunk, b"\n\n", 0) {
+                Some(split) => (&chunk[..split], &chunk[split + 2..]),
+                None => (chunk, &b""[..]),
+            },
+        };
+        let headers = String::from_utf8_lossy(head).into_owned();
+        if parts.is_empty() && !headers.to_ascii_lowercase().contains("content-disposition") {
+            return None;
+        }
+        let content = content.strip_suffix(b"\r").unwrap_or(content).to_vec();
+        parts.push(Part {
+            name: disposition_param(&headers, "name").unwrap_or_default(),
+            filename: disposition_param(&headers, "filename*").or_else(|| disposition_param(&headers, "filename")),
+            headers,
+            content,
+        });
+        // The closing delimiter, --boundary--, ends the form.
+        if end >= body.len() || body[end + delimiter.len()..].starts_with(b"--") {
+            break;
+        }
+        at = find(body, b"\n", end + delimiter.len()).map_or(body.len(), |n| n + 1);
+    }
+    (!parts.is_empty()).then_some(parts)
+}
+
+/// The rule for a part's shape: its headers, as in filename="shell.php", its field name, as in
+/// __proto__[x], and an uploaded file's content. A text field's value is checked by the caller.
+pub fn part_rule(part: &Part) -> Option<&'static str> {
+    if crate::rce::polluting_key(&part.name) {
+        return Some("rce_prototype_pollution");
+    }
+    crate::rce::classify(&part.headers)
+        .or_else(|| part.filename.as_ref().and_then(|_| crate::rce::classify_upload(&part.content)))
+}
+
 pub fn inspect_sql_headers<'a>(headers: impl IntoIterator<Item = (&'a str, &'a str)>, budget: usize) -> Option<(String, i32)> {
-    let mut checked = 0;
-    for (name, value) in headers.into_iter().take(256) {
+    // Every header is checked, so an attack can't be pushed past the ones that are. A request
+    // with more headers, or more header bytes, than can be checked is refused, not let through.
+    let mut total = 0usize;
+    for (index, (name, value)) in headers.into_iter().enumerate() {
+        total += name.len() + value.len();
+        if index >= 256 || total > budget.max(65536) {
+            return Some(("payload_inspection_limit".into(), 413));
+        }
         // Names can also be WSGI keys, as in HTTP_USER_AGENT.
         let name = name.trim().to_ascii_lowercase();
         let name = name.strip_prefix("http_").unwrap_or(&name).replace('_', "-");
-        if value.trim().is_empty() || !header_checked(&name) {
+        if value.trim().is_empty() {
+            continue;
+        }
+        if !header_checked(&name) {
+            // Headers skipped for SQL still carry Log4Shell and Shellshock, as in User-Agent
+            // or Accept, so they're checked for remote code execution.
+            let decoded = decode(value.as_bytes());
+            if let Some(rule) = crate::rce::classify(value).or_else(|| crate::rce::classify(&decoded)) {
+                return Some((rule.to_owned(), 403));
+            }
             continue;
         }
         let found = match name.as_str() {
-            "cookie" => value.split(';').take(256).find_map(|pair| {
+            "cookie" if value.split(';').nth(256).is_some() => Some(("payload_inspection_limit".into(), 413)),
+            "cookie" => value.split(';').find_map(|pair| {
                 let (key, item) = pair.trim().split_once('=').unwrap_or(("", pair.trim()));
                 crate::sql::classify(key.trim())
                     .map(|rule| (rule.to_owned(), 403))
@@ -348,10 +463,6 @@ pub fn inspect_sql_headers<'a>(headers: impl IntoIterator<Item = (&'a str, &'a s
         };
         if found.is_some() {
             return found;
-        }
-        checked += 1;
-        if checked >= 64 {
-            break;
         }
     }
     None
@@ -410,6 +521,38 @@ fn walk_sql(query: &[u8], body: &[u8], budget: usize, exhausted: bool, fields: b
                 if bytes + raw.len() > budget {
                     return Some(("payload_inspection_limit".into(), 413));
                 }
+                // A gzip or deflate body, sent with Content-Encoding, is read inflated. Inflating
+                // stops past the budget, so a small body that inflates to gigabytes is refused.
+                if raw.starts_with(&[0x1f, 0x8b]) || crate::rce::zlib_header(&raw) {
+                    let limit = budget - bytes + 1;
+                    if let Some(inflated) = crate::rce::inflate(&raw, limit) {
+                        if inflated.len() >= limit {
+                            return Some(("payload_inspection_limit".into(), 413));
+                        }
+                        // Counted, so gzip inside gzip can't be inflated again and again.
+                        bytes += raw.len();
+                        stack.push((Node::Bytes(inflated), depth));
+                        continue;
+                    }
+                }
+                // A multipart form is checked part by part: each part's headers and name, a text
+                // field's value as any other value, and a file's content for code and objects.
+                if let Some(parts) = multipart_parts(&raw) {
+                    for part in parts {
+                        if let Some(rule) = part_rule(&part) {
+                            return Some((rule.to_owned(), 403));
+                        }
+                        if part.filename.is_none() {
+                            // Deeper than a raw body, so the value isn't split into form fields.
+                            stack.push((Node::Bytes(part.content), depth + 2));
+                        }
+                    }
+                    continue;
+                }
+                // A binary serialized object isn't text, so it's checked before it's read as UTF-8.
+                if let Some(rule) = crate::rce::classify_binary(&raw) {
+                    return Some((rule.to_owned(), 403));
+                }
                 if raw.contains(&0)
                     || raw.starts_with(&[0xef, 0xbb, 0xbf])
                     || raw.starts_with(&[0xff, 0xfe])
@@ -436,6 +579,17 @@ fn walk_sql(query: &[u8], body: &[u8], budget: usize, exhausted: bool, fields: b
                     return Some(("payload_inspection_limit".into(), 413));
                 }
                 let decoded = decode(decode(text.as_bytes()).as_bytes());
+                // Remote code execution is checked in the whole document first: a gadget such as
+                // {"@type": "com.sun.rowset.JdbcRowSetImpl"} or <dynamic-proxy> is in its shape,
+                // which checking its values one by one wouldn't see.
+                let document = |value: &str| value.trim_start().starts_with(['{', '[', '<']);
+                if document(&text) || document(&decoded) {
+                    let found = crate::rce::classify_document(&text)
+                        .or_else(|| if decoded != text { crate::rce::classify_document(&decoded) } else { None });
+                    if let Some(rule) = found {
+                        return Some((rule.to_owned(), 403));
+                    }
+                }
                 // A JSON document is checked by its values, so its own quotes aren't read as a
                 // breakout. Parse it before decoding when that works, so a literal + survives.
                 let mut parsed = false;
@@ -470,7 +624,14 @@ fn walk_sql(query: &[u8], body: &[u8], budget: usize, exhausted: bool, fields: b
                     // Only a raw query string or body is split into form fields. A JSON value,
                     // as in "--warp=e=mc^2", is one value.
                     let check = if fields && depth <= 1 { crate::sql::classify_fields } else { crate::sql::classify };
-                    let rule = check(&decoded).or_else(|| if kept != decoded { check(&kept) } else { None });
+                    // Remote code execution first: those rules match only attack text.
+                    // A form's fields are also checked one by one, for a value that starts with an
+                    // attack, as in data=rO0AB..., and for a prototype key, as in __proto__[x]=1.
+                    let rule = (if fields && depth <= 1 { crate::rce::classify_fields(&text) } else { None })
+                        .or_else(|| crate::rce::classify(&decoded))
+                        .or_else(|| if kept != decoded { crate::rce::classify(&kept) } else { None })
+                        .or_else(|| check(&decoded))
+                        .or_else(|| if kept != decoded { check(&kept) } else { None });
                     if let Some(rule) = rule {
                         return Some((rule.to_owned(), 403));
                     }
@@ -482,6 +643,16 @@ fn walk_sql(query: &[u8], body: &[u8], budget: usize, exhausted: bool, fields: b
                 }
             }
             Node::Json(JsonTree::Object(values)) => {
+                // {"__proto__": {...}} or {"constructor": {"prototype": {...}}} reaches the prototype
+                // of every object when merged into one.
+                let polluting = values.iter().any(|(key, value)| {
+                    key == "__proto__"
+                        || (key == "constructor"
+                            && matches!(value, JsonTree::Object(inner) if inner.iter().any(|(k, _)| k == "prototype")))
+                });
+                if polluting {
+                    return Some(("rce_prototype_pollution".into(), 403));
+                }
                 for (key, value) in values {
                     stack.push((Node::Json(JsonTree::Text(key)), depth + 1));
                     stack.push((Node::Json(value), depth + 1));

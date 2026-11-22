@@ -344,7 +344,14 @@ module.exports = function aiwaf(rawOpts = {}) {
     await checksReady;
     const riskFinding = observeRisks ? observeRisks(req) : null;
     if (riskFinding) return riskFinding;
-    const finding = inspectSql(req);
+    await inspectSql.prepare(req);
+    let finding = inspectSql(req);
+    // The route's saved inputs review the general check's answer: see AIWAF_ROUTE_SCHEMA_MODE.
+    if (observeRisks?.review && finding?.status !== 413 && finding?.source !== 'headers') {
+      finding = finding?.source === 'path'
+        ? observeRisks.reviewPath(req, finding, inspectSql.maxBytes)
+        : observeRisks.review(req, finding, inspectSql.maxBytes);
+    }
     if (finding?.mode === 'monitor') {
       (opts.logger || console).warn?.({ event: 'aiwaf.payload', rule: finding.rule, mode: finding.mode });
       return null;

@@ -10,6 +10,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const parser = require('@babel/parser');
+const { fileInputs } = require('./inputSchema');
 
 const SCHEMA_VERSION = '1.0';
 const SKIPPED_DIRECTORIES = new Set(['.git', '.next', '.nuxt', 'build', 'coverage', 'dist', 'node_modules', 'out', 'vendor']);
@@ -121,7 +122,10 @@ const SQLITE_METHODS = new Set(['all', 'each', 'exec', 'get', 'prepare', 'run'])
 const SQLITE_RECEIVER = /(^|\.)(db|sqlite|database)$/i;
 const NOSQL_METHODS = new Set(['aggregate', 'count', 'countDocuments', 'deleteMany', 'deleteOne', 'find', 'findOne', 'findOneAndDelete', 'findOneAndUpdate', 'updateMany', 'updateOne']);
 const NOSQL_RECEIVER = /(coll|db|mongo|model|users?$|^[A-Z])/;
-const COMMAND_FUNCTIONS = new Set(['child_process.exec', 'child_process.execSync', 'cp.exec', 'cp.execSync', 'exec', 'execSync']);
+const COMMAND_FUNCTIONS = new Set([
+  'child_process.exec', 'child_process.execFile', 'child_process.execFileSync', 'child_process.execSync', 'child_process.fork',
+  'cp.exec', 'cp.execFile', 'cp.execFileSync', 'cp.execSync', 'cp.fork', 'exec', 'execFile', 'execFileSync', 'execSync', 'fork'
+]);
 const SHELL_FUNCTIONS = new Set(['child_process.spawn', 'child_process.spawnSync', 'cp.spawn', 'cp.spawnSync', 'spawn', 'spawnSync']);
 const PATH_METHODS = new Set([
   'appendFile', 'appendFileSync', 'createReadStream', 'createWriteStream', 'readFile', 'readFileSync', 'readdir',
@@ -134,9 +138,14 @@ const SSRF_FUNCTIONS = new Set([
   'got.get', 'got.post', 'http.get', 'http.request', 'https.get', 'https.request', 'needle', 'superagent.get', 'superagent.post',
   'undici.fetch', 'undici.request'
 ]);
-const CODE_FUNCTIONS = new Set(['eval', 'setImmediate.call', 'vm.compileFunction', 'vm.runInContext', 'vm.runInNewContext', 'vm.runInThisContext']);
+// A string given to setTimeout or setInterval runs as code; require() and import() of a module
+// named by input run that module.
+const CODE_FUNCTIONS = new Set([
+  'Function', 'eval', 'import', 'require', 'setImmediate.call', 'setInterval', 'setTimeout', 'vm.compileFunction',
+  'vm.runInContext', 'vm.runInNewContext', 'vm.runInThisContext', 'window.eval'
+]);
 const TEMPLATE_FUNCTIONS = new Set(['Handlebars.compile', 'dot.template', 'ejs.compile', 'ejs.render', 'handlebars.compile', 'lodash.template', 'nunjucks.renderString', 'pug.compile', 'pug.render', '_.template']);
-const DESERIALIZE_FUNCTIONS = new Set(['serialize.unserialize', 'nodeSerialize.unserialize', 'funcster.deepDeserialize']);
+const DESERIALIZE_FUNCTIONS = new Set(['serialize.unserialize', 'nodeSerialize.unserialize', 'funcster.deepDeserialize', 'v8.deserialize']);
 
 function dottedName(node) {
   if (!node) return '';
@@ -1267,7 +1276,16 @@ class FunctionWalker {
       if (name === 'Function') {
         const code = this.first(node.arguments);
         if (code) this.report(node, 'code', 'new Function', code, 'high');
+      } else if ((name === 'vm.Script' || name === 'Script') && source) {
+        this.report(node, 'code', `new ${name}`, source, 'high');
+      } else if (name === 'Worker' && source && node.arguments.some(argument => argument.type === 'ObjectExpression'
+                 && argument.properties.some(item => item.key && item.key.name === 'eval' && item.value.value === true))) {
+        this.report(node, 'code', 'new Worker', source, 'high');
       }
+      return;
+    }
+    if (node.callee.type === 'Import' && source) {
+      this.report(node, 'code', 'import()', source, 'high');
       return;
     }
     const head = receiver.split('.')[0];
@@ -1629,7 +1647,14 @@ function analyzePath(target = '.', options = {}) {
   }
   findings.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.sink.localeCompare(b.sink)
     || a.function.localeCompare(b.function));
-  const report = { schema_version: SCHEMA_VERSION, language: 'javascript', files_scanned: filesScanned, findings, errors };
+  // What each handler reads, with types, labelled as its findings are so both link to the same routes.
+  const inputs = [];
+  for (const item of parsed) {
+    const analyzer = project.get(item.full);
+    const label = (node, parent) => analyzer.routeLabels.get(node) || functionName(node, parent);
+    for (const entry of fileInputs(item.ast, item.display, item.text, label)) inputs.push(entry);
+  }
+  const report = { schema_version: SCHEMA_VERSION, language: 'javascript', files_scanned: filesScanned, findings, errors, inputs };
   if (suppressed) report.suppressed = suppressed;
   return report;
 }

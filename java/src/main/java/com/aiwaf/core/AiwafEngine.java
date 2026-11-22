@@ -190,7 +190,9 @@ public final class AiwafEngine {
         if (!pathExempted && !ipExempted && config.ipKeywordBlockEnabled
                 && !isRuleDisabled(req, rule, config, "ip_keyword_block")
                 && !"off".equals(config.sqlInjectionMode)) {
-            String finding = SqlInjectionCore.inspect(req, config);
+            SqlInjectionCore.Found found = SqlInjectionCore.find(req, config);
+            // The route's saved inputs review the general check's answer: see RouteSchemaCore.
+            String finding = RouteSchemaCore.apply(req, config, found);
             if (finding != null) {
                 telemetryIncrement("middleware.request_inspection." + finding);
                 if (!"monitor".equals(config.sqlInjectionMode)) {

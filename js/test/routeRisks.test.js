@@ -4,7 +4,7 @@ const path = require('path');
 const { analyzeSource, runAuditCommand } = require('../lib/injectionAnalysis');
 const { loadManifest, compileManifestToPathRules } = require('../lib/pathManifest');
 const {
-  applyReport, compileRisks, createObserver, formatCounts, inputFromSource, inspectRisks, ruleFor, updateManifest
+  applyReport, compileRisks, createObserver, formatCounts, inputFromSource, inspectRisks, reviewRequest, ruleFor, updateManifest
 } = require('../lib/routeRisks');
 
 const CASES = JSON.parse(fs.readFileSync(path.join(__dirname, '../../tests/fixtures/route_risk_cases.json'), 'utf8'));
@@ -127,8 +127,8 @@ describe('route risks', () => {
       AIWAF_MIDDLEWARES: ['ip_keyword_block'],
       logger: { warn() {} }
     });
-    expect(await blocking.inspectPayload({ method: 'GET', url: '/search', headers: {}, query: { q: '$(id)' } }))
-      .toEqual({ rule: 'command_substitution', status: 403, mode: 'block' });
+    expect(await blocking.inspectPayload({ method: 'GET', url: '/search', headers: {}, query: { q: 'x; ls -la' } }))
+      .toEqual({ rule: 'command_chain', status: 403, mode: 'block' });
 
     const logger = { warn: jest.fn() };
     const middleware = require('../lib/wafMiddleware')({
@@ -137,9 +137,9 @@ describe('route risks', () => {
       AIWAF_MIDDLEWARES: ['ip_keyword_block'],
       logger
     });
-    const finding = await middleware.inspectPayload({ method: 'GET', url: '/search', headers: {}, query: { q: '$(id)' } });
+    const finding = await middleware.inspectPayload({ method: 'GET', url: '/search', headers: {}, query: { q: 'x; ls -la' } });
     expect(finding).toBeNull();
-    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ event: 'aiwaf.injection_risk', rule: 'command_substitution', input: 'q' }));
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ event: 'aiwaf.injection_risk', rule: 'command_chain', input: 'q' }));
   });
 
   test('the native pipeline logs from the environment settings', async () => {
@@ -148,17 +148,17 @@ describe('route risks', () => {
     process.env.AIWAF_PATH_MANIFEST = save(manifestWith([{ sink: 'command', input: 'q', confidence: 'high' }]));
     try {
       const native = await require('../lib/nativePipeline')({ dataDir: path.join(directory, 'native') });
-      expect(native.inspectPayload({ method: 'GET', url: '/search', headers: {}, query: { q: '$(id)' } })?.status).toBeFalsy();
+      expect(native.inspectPayload({ method: 'GET', url: '/search', headers: {}, query: { q: 'x; ls -la' } })?.status).toBeFalsy();
       process.env.AIWAF_INJECTION_RISK_MODE = 'block';
       const blocking = await require('../lib/nativePipeline')({ dataDir: path.join(directory, 'native-block') });
-      expect(blocking.inspectPayload({ method: 'GET', url: '/search', headers: {}, query: { q: '$(id)' } }).rule).toBe('command_substitution');
+      expect(blocking.inspectPayload({ method: 'GET', url: '/search', headers: {}, query: { q: 'x; ls -la' } }).rule).toBe('command_chain');
       const res = { status: jest.fn(() => res), json: jest.fn(() => res) };
-      blocking({ method: 'GET', url: '/search', headers: {}, query: { q: '$(id)' }, socket: {} }, res, () => {});
+      blocking({ method: 'GET', url: '/search', headers: {}, query: { q: 'x; ls -la' }, socket: {} }, res, () => {});
       expect(res.status).toHaveBeenCalledWith(403);
       blocking.close();
       expect(warn).toHaveBeenCalledWith(expect.objectContaining({ event: 'aiwaf.injection_risk', input: 'q' }));
       warn.mockClear();
-      native.inspectPayload({ url: '/search', headers: {}, query: { q: '$(id)' }, aiwafRoute: { fullyExempt: true } });
+      native.inspectPayload({ url: '/search', headers: {}, query: { q: 'x; ls -la' }, aiwafRoute: { fullyExempt: true } });
       expect(warn).not.toHaveBeenCalled();
       native.close();
     } finally {
@@ -197,7 +197,7 @@ describe('route risks', () => {
 
   test('findings link to routes by the path in the source', () => {
     const { counts, routes } = linked("app.get('/x', (req, res) => { exec(req.query.id); });", { '/x': { view: '' }, '/y': { view: '' } });
-    expect(counts).toEqual({ routes: 1, linked: 1, unlinked: 0 });
+    expect(counts).toMatchObject({ routes: 1, linked: 1, unlinked: 0 });
     expect(routes['/x'].injection_risks).toEqual([{ sink: 'command', input: 'id', confidence: 'high' }]);
     expect(routes['/y'].injection_risks).toBeUndefined();
   });
@@ -208,14 +208,14 @@ describe('route risks', () => {
       sink: 'sql', call: 'db.query', source: 'req.query.id', confidence: 'high'
     };
     const manifest = { routes: { '/api/users/:id': {}, '/other': {} } };
-    expect(applyReport({ findings: [finding] }, manifest)).toEqual({ routes: 1, linked: 1, unlinked: 0 });
+    expect(applyReport({ findings: [finding] }, manifest)).toMatchObject({ routes: 1, linked: 1, unlinked: 0 });
     expect(manifest.routes['/api/users/:id'].injection_risks).toHaveLength(1);
   });
 
   test('routers link under one mount prefix, and never by a guess', () => {
     const source = "router.get('/x', (req, res) => { exec(req.query.id); });";
     expect(linked(source, { '/api/x': {} }).counts.linked).toBe(1);
-    expect(linked(source, { '/a/x': {}, '/b/x': {} }).counts).toEqual({ routes: 0, linked: 0, unlinked: 1 });
+    expect(linked(source, { '/a/x': {}, '/b/x': {} }).counts).toMatchObject({ routes: 0, linked: 0, unlinked: 1 });
   });
 
   test('Hapi routes link by their path', () => {
@@ -322,5 +322,79 @@ describe('ordinary text', () => {
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
+  });
+});
+
+describe('route schemas saved by init', () => {
+  const SCHEMA = JSON.parse(fs.readFileSync(path.join(__dirname, '../../tests/fixtures/route_schema_cases.json'), 'utf8'));
+  const wasm = () => require('../lib/wasmChecks').get();
+  let directory;
+  beforeEach(() => { directory = fs.mkdtempSync(path.join(os.tmpdir(), 'aiwaf-schema-')); });
+  afterEach(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const save = manifest => {
+    const file = path.join(directory, 'paths.json');
+    fs.writeFileSync(file, JSON.stringify(manifest));
+    return file;
+  };
+
+  test.each(SCHEMA.cases.map(item => [item.path, item.expect, item]))('shared case %s %s', (_path, _expect, item) => {
+    const general = JSON.parse(wasm().sql_inspect(Buffer.from(item.query), Buffer.from(item.body), 65536));
+    const review = reviewRequest(compileRisks(SCHEMA.manifest), item.path, item.query, Buffer.from(item.body), 65536, general && general.rule);
+    const outcome = review ? review.action : (general ? 'block' : 'pass');
+    expect(outcome).toBe(item.expect);
+    if (outcome === 'mismatch') expect(review.input).toBe(item.input);
+  });
+
+  test.each(SCHEMA.path_cases.map(item => [item.path, item.expect, item]))('shared path case %s %s', (_path, _expect, item) => {
+    const general = JSON.parse(wasm().sql_inspect_path(item.path, 65536));
+    const review = general ? JSON.parse(compileRisks(SCHEMA.manifest).review_path(item.path, 65536, general.rule)) : null;
+    const outcome = review ? review.action : (general ? 'block' : 'pass');
+    expect(outcome).toBe(item.expect);
+    if (outcome === 'mismatch') expect(review.input).toBe(item.input);
+  });
+
+  test('path findings are reviewed by the route\'s parameters', () => {
+    const enforce = createObserver({ AIWAF_PATH_MANIFEST: save(SCHEMA.manifest), AIWAF_ROUTE_SCHEMA_MODE: 'enforce', logger: { warn() {} } });
+    const finding = { rule: 'sql_function', status: 403, mode: 'block', source: 'path' };
+    expect(enforce.reviewPath({ path: '/posts/use-sleep(5)-in-queries' }, finding, 65536)).toBeNull();
+    expect(enforce.reviewPath({ path: '/orders/char(65)' }, finding, 65536)).toEqual({ rule: 'schema_type_mismatch', status: 403, mode: 'block' });
+    expect(enforce.reviewPath({ path: '/x' }, { rule: 'payload_inspection_limit', status: 413 }, 1)).toEqual({ rule: 'payload_inspection_limit', status: 413 });
+  });
+
+  test('review modes log names and never values', () => {
+    const warn = jest.fn();
+    const finding = { rule: 'sql_function', status: 403, mode: 'block' };
+    const req = body => ({ method: 'POST', url: '/comments', path: '/comments', body });
+    const prose = req({ body: 'use sleep(5) in the query' });
+    const monitor = createObserver({ AIWAF_PATH_MANIFEST: save(SCHEMA.manifest), logger: { warn } });
+    expect(monitor.review(prose, finding, 65536)).toBe(finding);
+    expect(warn).toHaveBeenCalledWith({ event: 'aiwaf.route_schema', mode: 'monitor', method: 'POST', route: '/comments', action: 'relax', rule: 'sql_function' });
+    const enforce = createObserver({ AIWAF_PATH_MANIFEST: save(SCHEMA.manifest), AIWAF_ROUTE_SCHEMA_MODE: 'enforce', AIWAF_INJECTION_RISK_MODE: 'off', logger: { warn } });
+    expect(enforce(prose)).toBeNull();
+    expect(enforce.review(prose, finding, 65536)).toBeNull();
+    expect(enforce.review(req({ post_id: '1 OR 1=1' }), null, 65536)).toEqual({ rule: 'schema_type_mismatch', status: 403, mode: 'block' });
+    expect(enforce.review(req({ body: 'hello' }), null, 65536)).toBeNull();
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('sleep');
+    // A failing review keeps the finding.
+    expect(enforce.review({ get path() { throw new Error('boom'); } }, finding, 65536)).toBe(finding);
+    expect(createObserver({ AIWAF_PATH_MANIFEST: save(SCHEMA.manifest), AIWAF_ROUTE_SCHEMA_MODE: 'off' })?.review).toBeUndefined();
+    expect(createObserver({ AIWAF_PATH_MANIFEST: save(manifestWith([])), AIWAF_INJECTION_RISK_MODE: 'off' })).toBeNull();
+    expect(() => createObserver({ AIWAF_ROUTE_SCHEMA_MODE: 'strict' })).toThrow('AIWAF_ROUTE_SCHEMA_MODE');
+  });
+
+  test('init saves each route\'s inputs from the handlers that serve it', () => {
+    const { analyzePath } = require('../lib/injectionAnalysis');
+    fs.writeFileSync(path.join(directory, 'app.js'), [
+      "app.get('/search', (req, res) => res.json({ q: req.query.q, page: parseInt(req.query.page) }));",
+      "app.post('/save', auth, (req, res) => res.json(req.body.x));"
+    ].join('\n'));
+    const manifest = { routes: { '/search': { view: 'x' }, '/save': { view: 'y' }, '/none': { view: 'z' } } };
+    expect(applyReport(analyzePath(directory), manifest).inputs).toBe(2);
+    expect(manifest.routes['/search']).toEqual({ view: 'x', inputs: { q: 'text', page: 'int' }, inputs_complete: true });
+    expect(manifest.routes['/save'].inputs_complete).toBe(false);
+    expect(manifest.routes['/none'].inputs).toBeUndefined();
+    expect(manifest.injection_audit.routes_with_inputs).toBe(2);
+    applyReport({ findings: [] }, manifest);
+    expect(manifest.routes['/search']).toEqual({ view: 'x' });
   });
 });

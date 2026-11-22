@@ -39,15 +39,15 @@ the supported Redis backends when sharing limits across workers.
 
 Each package is versioned and released independently.
 
-Python 1.2.6, Rust/Python 0.2.13, Node.js 1.2.5, WASM 0.2.10, and Java 1.3.9 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
+Python 1.3.0, Rust/Python 0.2.13, Node.js 1.3.0, WASM 0.2.10, and Java 1.4.0 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
 
 | Runtime | Package | Repository version | Primary use |
 | --- | --- | ---: | --- |
-| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.2.6` | Django, Flask, and FastAPI protection |
-| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.2.5` | Express and Node framework middleware |
+| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.3.0` | Django, Flask, and FastAPI protection |
+| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.3.0` | Express and Node framework middleware |
 | Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.13` | Native Python acceleration and JSON model inference |
 | WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.10` | Rust detection and model primitives for JavaScript |
-| Java | `io.github.aiwaf-project:aiwaf-java` | `1.3.9` | Spring MVC and Jakarta Servlet protection |
+| Java | `io.github.aiwaf-project:aiwaf-java` | `1.4.0` | Spring MVC and Jakarta Servlet protection |
 
 Supported framework integrations include Django, Flask, FastAPI, Express, Fastify, Hapi, Koa, NestJS, Next.js API routes, AdonisJS, Sails.js, Spring MVC, and Jakarta Servlet.
 
@@ -241,6 +241,86 @@ The SQL tokenizer, request walker and route checks are fuzzed: for two minutes p
 each pull request, and for 30 minutes each week (`rust/fuzz`). Short random-input tests also
 run with every `cargo test`.
 
+### Remote code execution
+
+The same payload check looks in every request value for text that runs code on the server:
+
+| Rule | What it matches |
+| --- | --- |
+| `rce_jndi_lookup` | Log4Shell lookups, `${jndi:ldap://...}`, including nested forms like `${${lower:j}ndi:...}` |
+| `rce_shellshock` | `() { :; };` |
+| `rce_serialized_object` | Serialized Java, Python pickle, PHP, .NET and node-serialize objects, and unsafe YAML tags |
+| `rce_gadget` | Deserialization gadgets: Fastjson and Jackson `@type` and array forms (`JdbcRowSetImpl`, `TemplatesImpl`, `InetAddress` probes), XStream `dynamic-proxy`, `XMLDecoder` `ProcessBuilder` |
+| `rce_expression` | OGNL, SpEL, EL (`''.getClass().forName(...)`), Thymeleaf `__${...}__::` and Java reflection that reach a process; Spring4Shell's `class.module.classLoader` |
+| `rce_template_escape` | Jinja, Twig, Smarty, Velocity, Mako, Ruby ERB and Node.js sandbox escapes, such as `__subclasses__()`, `\|filter('system')` and `require('child_process')` |
+| `rce_webshell` | JSP, ASP and ASP.NET webshell code, and PHP that runs what the request sends (`$_GET['f']($_GET['x'])`, `eval(base64_decode($_POST[...]))`) |
+| `rce_script_upload` | Uploads named as server scripts: `filename="shell.php"`, `.jsp`, `.aspx`, `.htaccess` and similar |
+| `rce_command_injection` | A probe or timing command chained onto the end of a value, as scanners send it: `x;id`, `\|whoami`, `&& uname -a`, `; sleep 5`, ``test`id` ``, `$(sleep 5)`. A bare `id` must touch its separator, so `name; id` passes |
+| `rce_shell_payload` | Reverse shells (`/dev/tcp/`, `bash -i`, `nc -e`), download-and-run, `; cat /etc/passwd`, `${IFS}`, and Windows `certutil -urlcache`, `regsvr32 /i:`, `mshta` and PowerShell download cradles |
+| `rce_php` | `<?php`, `system($_GET[...])` and the `php://`, `expect://` and `phar://` wrappers |
+| `rce_prototype_pollution` | `__proto__` and `constructor.prototype` keys in JSON bodies, forms and query strings |
+
+Each value is checked as sent, then again with the disguises attackers use undone: `\u0024`,
+`\x24` and `%u0024` escapes, HTML entities such as `&#36;` and `&dollar;`, fullwidth
+characters such as `％`, invisible characters inside a word, Log4j `${date:'j'}` and
+`${env:x:-j}` nesting, and a whole value sent as base64.
+
+Each field of a query string or form body is also checked on its own, so `data=rO0AB...`
+and `data=%AC%ED%00%05...` are found, and base64 is unwrapped up to three layers deep,
+including base64 of gzip or deflate. A raw binary serialized body (Java, pickle, .NET
+`BinaryFormatter`, Ruby `Marshal`) is checked before it's read as text. A prototype key,
+`{"__proto__": ...}`, `{"constructor": {"prototype": ...}}` or `a[__proto__][x]=1`, is
+blocked as `rce_prototype_pollution`, since in Node.js it turns into code execution through
+options that libraries pass to `child_process` and template compilers.
+
+A multipart form is checked by its first `AIWAF_PAYLOAD_MAX_BYTES`, part by part: each
+part's headers (`filename="shell.php"`) and field name, each text field as any other value,
+and each file for a binary serialized object or PHP, JSP or ASP code (`<?php` in an image).
+A file isn't checked for SQL or the other rules, since an ordinary document can quote them,
+and a large upload isn't refused: the rest of it reaches your app unread. Node.js reads the
+start of an unparsed multipart body and puts it back for your upload parser; Java reads the
+parts the container parsed, when the servlet has a multipart config.
+
+A gzip or deflate body (`Content-Encoding`) is read inflated, within
+`AIWAF_PAYLOAD_MAX_BYTES`, so one that inflates past it is refused with `413`. Node.js also
+reads `br`. A body in an encoding that can't be read is refused with `413`, since it can't be
+checked (Java refuses compressed bodies unless `allowCompressedRequestBodies` is on). Every
+header is checked; a request with more than 256 headers or 256 cookies is refused with `413`
+rather than checked in part.
+
+It reads the query, the body (JSON, XML and forms), path segments and headers, including
+`User-Agent`, `Accept` and `Content-Disposition`, which the SQL check skips. Every rule is checked against the shared
+list of ordinary text and must match none of it, and shell syntax on its own (`;`, `|`, a
+backtick) isn't matched: only the probes `rce_command_injection` lists are, and routes whose input
+reaches a command get the full command checks from `init`.
+The rules are in `aiwaf-rust` and `aiwaf-wasm`. Java's copy is generated from them by
+`scripts/sync_rce_rules.py`, and a test fails when it's out of date. The cases in
+`tests/fixtures/rce_cases.json` (73 attacks and 57 ordinary look-alikes, plus whole form and JSON bodies, such as JSON-LD
+`"@type": "Person"` and `filename="report.pdf"`) run against both. It follows `AIWAF_SQL_INJECTION_MODE`:
+`block` (the default) answers `403`, `monitor` logs the rule, and `off` turns both checks off.
+
+### WebSocket messages
+
+HTTP checks don't see what a WebSocket carries after its handshake, so each message a client
+sends can be checked like a request body, with the same rules and `AIWAF_SQL_INJECTION_MODE`.
+A message with a finding closes the socket with `1008` (`1009` when it's too large to check)
+and never reaches your handlers; log events carry the rule and path, never the message.
+
+- Python (FastAPI, Starlette, Django Channels): `app.add_middleware(WebSocketGuard)`, from
+  `aiwaf.core.websocket` (also `aiwaf.fast.WebSocketGuard`), or wrap your ASGI application.
+  Flask-SocketIO: `guard_socketio(socketio)` for every event, or `@aiwaf_message()` under
+  `@socketio.on(...)` for one handler, from `aiwaf.flask.websocket`. `inspect_message(data)`
+  checks one message anywhere else.
+- Node.js: `await aiwaf.guardWebSocketServer(wss)` for `ws`, `await aiwaf.guardSocketIo(io)` for
+  socket.io, or `aiwaf.inspectMessage(data)`.
+- Java: `new AiwafWebSocketHandler(handler, config)` for Spring WebSocket, and
+  `new AiwafEndpoint(endpoint, config)` for a Jakarta WebSocket endpoint (return it from your
+  `ServerEndpointConfig.Configurator`). In an annotated `@ServerEndpoint`, call
+  `AiwafMessageCore.check(message, config, path)` and close with `AiwafMessageCore.closeCode(rule)`.
+
+These are tested against real servers: Starlette, Flask-SocketIO's test server, `ws` and
+socket.io with their clients, and Tomcat's WebSocket container with the JDK client.
+
 ### Route-specific checks from init
 
 `init` audits your source as it builds the route manifest, and saves which operation each
@@ -304,6 +384,53 @@ and `AIWAF_PATH_MANIFEST` from the environment.
 - **Accuracy isn't measured on real traffic yet:** if a rule blocks real users on a route,
   set `AIWAF_INJECTION_RISK_MODE=log` while you report it.
 
+### Route schemas from init
+
+`init` also saves what each route reads from the query and body, and a type for each input,
+from your code: `int`, `float`, `bool`, `uuid` or `text`.
+
+```json
+"/comments": {"inputs": {"body": "text", "post_id": "int"}, "inputs_complete": true}
+```
+
+Types come from what the code says:
+- Python: `int(request.GET["page"])`, `type=int`, FastAPI type hints and Pydantic models, Django
+  forms and DRF serializers in the same module.
+- Node.js: `parseInt(req.query.page)`, `Number(...)`, destructuring, and zod object schemas.
+- Java: `@RequestParam int page`, `@RequestBody` and `@ModelAttribute` classes and records in the
+  project, `Pageable`, and `Integer.parseInt(request.getParameter("n"))`.
+
+The request is followed into functions in the same file (Python and Node.js) or methods of the
+same class (Java), as in `return render(request)`, and a key held in a constant, as in
+`request.GET[PAGE_PARAM]` or `getParameter(PAGE)`, is known. `inputs_complete` is true only when every read was
+understood. Passing the request to a helper,
+using `request.POST` or `req.body` whole, a key that isn't a constant, an unknown body class or
+route middleware that isn't a body parser all make it false.
+
+Requests to those routes are then reviewed after the general check:
+
+- A typed input sent with a value of another type, as in `post_id=7 OR 1=1`, is
+  `schema_type_mismatch`.
+- A finding from `sql_function`, `sql_comment` or `sql_breakout_numeric` is checked again
+  without the inputs the schema clears: typed inputs of their type, text that reaches no
+  operation, and, when the list is complete, inputs the route never reads. When nothing else is
+  found, the finding is cleared. This is where prose and pasted code, as in "use sleep(5) in the
+  query", stops being blocked.
+- A finding from the URL path, as in `/posts/use-sleep(5)-in-queries`, is reviewed by the
+  route's parameters: static segments are code, typed parameters (`<int:id>`, `{id:uuid}`, or a
+  saved type) must fit, and text parameters that reach no operation are cleared the same way.
+- Quote breakouts (`' OR '1'='1`) and every remote code execution rule still block on every
+  input. An incomplete list, a sink reached by an input the audit couldn't name, a body that
+  isn't a form or JSON object, or a finding from headers or the path keeps the finding.
+
+`AIWAF_ROUTE_SCHEMA_MODE` is `monitor` by default: it logs what it would do
+(`{"event": "aiwaf.route_schema", "action": "relax", "rule": "sql_function", ...}`, never
+request values) and changes nothing. Set it to `enforce` to act on it, or `off`. Java reads
+`security.route_schema_mode` and `aiwaf.route-schema-mode`. The native pipelines review in the
+engine too: Python's reads `route_schema_mode` (or `AIWAF_ROUTE_SCHEMA_MODE`), and Node.js's
+takes `routeSchemaMode`, including its `inspectPayload()`. The cases in `tests/fixtures/route_schema_cases.json` run against aiwaf-rust, aiwaf-wasm
+and Java.
+
 ## Repository layout
 
 ```text
@@ -331,7 +458,7 @@ pip install "aiwaf[django]"
 pip install "aiwaf[flask]"
 pip install "aiwaf[fastapi]"
 
-# Backward-compatible alias; Python 1.2.6 already installs aiwaf-rust
+# Backward-compatible alias; Python 1.3.0 already installs aiwaf-rust
 pip install "aiwaf[rust]"
 
 # Node.js middleware
@@ -341,13 +468,13 @@ npm install aiwaf
 npm install aiwaf-wasm
 ```
 
-Java 1.3.9, after it is published to Maven Central:
+Java 1.4.0, after it is published to Maven Central:
 
 ```xml
 <dependency>
   <groupId>io.github.aiwaf-project</groupId>
   <artifactId>aiwaf-java</artifactId>
-  <version>1.3.9</version>
+  <version>1.4.0</version>
 </dependency>
 ```
 
@@ -355,7 +482,7 @@ Java 1.3.9, after it is published to Maven Central:
 
 The Python package requires Python 3.10 or newer. Framework dependencies are optional, so install only the extra needed by the application.
 
-Python 1.2.6 requires `aiwaf-rust>=0.2.13`; the `rust` extra remains an installation
+Python 1.3.0 requires `aiwaf-rust>=0.2.13`; the `rust` extra remains an installation
 alias. Publish the matching Rust wheel with `NativeCSVPipeline` support before
 the Python release. The Rust release workflow builds Linux x86_64/aarch64,
 musl x86_64, macOS x86_64/arm64 and Windows x86_64 wheels and checks the native
@@ -1425,7 +1552,7 @@ cp -R ../licenses crates/aiwaf_wasm/pkg/
 
 ## Java package
 
-AIWAF Java 1.3.9 targets Java 17, Spring Framework 7.0, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
+AIWAF Java 1.4.0 targets Java 17, Spring Framework 7.0, and Jakarta Servlet 6.1. It is a native Java implementation and does not load the Rust library.
 
 ### Core engine
 
@@ -1514,7 +1641,7 @@ UUID protection uses Python-compatible weighted signals: malformed input, valid 
 Generate a route manifest from the live Spring application rather than supplying controller methods manually:
 
 ```bash
-java -cp "your-app.jar:aiwaf-java-1.3.9.jar" \
+java -cp "your-app.jar:aiwaf-java-1.4.0.jar" \
   com.aiwaf.cli.AiwafConsole init \
   --app com.example.Application \
   --output .aiwaf/paths.json
@@ -1742,11 +1869,11 @@ Release versions and tags must match the relevant manifest.
 
 | Package | Manifest | Tag | Workflow |
 | --- | --- | --- | --- |
-| Python `aiwaf` | `pyproject.toml` | `python-v1.2.6` | `python-publish.yml` |
-| npm `aiwaf` | `js/package.json` | `js-v1.2.5` | `npm-publish.yml` |
+| Python `aiwaf` | `pyproject.toml` | `python-v1.3.0` | `python-publish.yml` |
+| npm `aiwaf` | `js/package.json` | `js-v1.3.0` | `npm-publish.yml` |
 | PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.13` | `rust-publish.yml` |
 | npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.10` | `wasm-publish.yml` |
-| Maven `aiwaf-java` | `java/pom.xml` | `java-v1.3.9` | `java-publish.yml` |
+| Maven `aiwaf-java` | `java/pom.xml` | `java-v1.4.0` | `java-publish.yml` |
 
 Python and Rust publish to PyPI with trusted publishing. The npm workflows use npm trusted publishing and stage packages for approval. Configure the trusted publisher with organization `aiwaf-project`, repository `aiwaf`, the exact workflow filename, and the environment used by that workflow.
 
@@ -1754,9 +1881,10 @@ Java publishing uses the protected `maven-publish` environment plus `GPG_PRIVATE
 
 Registry releases are immutable. Increment the relevant manifest version before publishing another release.
 
-This release is Python `aiwaf 1.2.6`, npm `aiwaf 1.2.5`, Java `aiwaf-java 1.3.9`,
-`aiwaf-rust 0.2.13` and `aiwaf-wasm 0.2.10`: `AIWAF_PROFILE` and the route checks for the new
-operations. Python 1.2.5, npm 1.2.4, Java 1.3.8, `aiwaf-rust 0.2.12` and `aiwaf-wasm 0.2.9` are
+This release is Python `aiwaf 1.3.0`, npm `aiwaf 1.3.0`, Java `aiwaf-java 1.4.0`,
+`aiwaf-rust 0.2.13` and `aiwaf-wasm 0.2.10`: remote code execution checks, route schemas from
+`init`, multipart and compressed bodies, WebSocket messages, `AIWAF_PROFILE` and the route checks
+for the new operations. Python 1.2.5, npm 1.2.4, Java 1.3.8, `aiwaf-rust 0.2.12` and `aiwaf-wasm 0.2.9` are
 already published. Publish the two engines first: they carry the new route rules, and Python
 requires `aiwaf-rust>=0.2.13`. npm `aiwaf` keeps `aiwaf-wasm ^0.2.9`, which picks up 0.2.10
 once it's published.

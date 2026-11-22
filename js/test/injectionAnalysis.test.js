@@ -159,6 +159,14 @@ describe('injection analysis', () => {
 
   // Each case: what it shows, the operations reported, and the code. Safe look-alikes report nothing.
   const FLOW_CASES = {
+  'dynamic require (vuln)': [['code'], "app.get('/a', (req, res) => { require(req.query.m); });"],
+  'dynamic import (vuln)': [['code'], "app.get('/a', (req, res) => { import(req.query.m); });"],
+  'string timer (vuln)': [['code'], "app.get('/a', (req, res) => { setTimeout(req.query.code, 10); });"],
+  'function timer (safe)': [[], "app.get('/a', (req, res) => { setTimeout(() => go(req.query.x), 10); });"],
+  'vm.Script (vuln)': [['code'], "app.get('/a', (req, res) => { new vm.Script(req.body.src); });"],
+  'eval worker (vuln)': [['code'], "app.post('/a', (req, res) => { new Worker(req.body.src, { eval: true }); });"],
+  'execFile (vuln)': [['command'], "app.get('/a', (req, res) => { execFile(req.query.bin); });"],
+  'v8.deserialize (vuln)': [['deserialization'], "app.post('/a', (req, res) => { v8.deserialize(req.body.blob); });"],
   // [expected sinks], source
   'xss send (vuln)': [['xss'], "app.get('/a', (req, res) => { res.send('<h1>' + req.query.name + '</h1>'); });"],
   'xss json object (safe)': [[], "app.get('/a', (req, res) => { res.send(req.query); res.json({ q: req.query.q }); });"],
@@ -377,7 +385,7 @@ app.get('/harmless', (req, res) => { sql.harmless(req.query.q); });`);
     test('reports use the shared format and are readable', () => {
       write('a.js', FRAMEWORKS.express);
       const report = analyzePath(directory);
-      expect(Object.keys(report).sort()).toEqual(['errors', 'files_scanned', 'findings', 'language', 'schema_version']);
+      expect(Object.keys(report).sort()).toEqual(['errors', 'files_scanned', 'findings', 'inputs', 'language', 'schema_version']);
       expect(Object.keys(report.findings[0]).sort()).toEqual(['call', 'confidence', 'file', 'function', 'line', 'sink', 'source']);
       expect(formatReport(report)).toContain('req.query.id reaches db.query in app.get /x');
     });

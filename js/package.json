@@ -1,6 +1,6 @@
 {
     "name": "aiwaf",
-    "version": "1.2.5",
+    "version": "1.3.0",
     "description": "AIWAF Web Application Firewall for JavaScript applications and major Node.js frameworks",
     "main": "index.js",
     "files": [
@@ -22,8 +22,11 @@
     "scripts": {
         "retrain": "AIWAF_LOG_PATH=/var/log/nginx/access.log npm run train",
         "train": "node train.js",
+        "pretest": "node scripts/check-local-wasm.js",
         "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand",
+        "pretest:coverage": "node scripts/check-local-wasm.js",
         "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --coverage",
+        "pretest:wasm": "node scripts/check-local-wasm.js",
         "test:wasm": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --runTestsByPath test/wasmAdapter.test.js test/wasm-header-config.test.js test/wasm-header-input.test.js test/wasm-retrain-behavior.test.js test/wasm-waf-integration.test.js && node test/wasm-real.js",
         "aiwaf": "node bin/aiwaf.js",
         "test:wasm-real": "node test/wasm-real.js",
@@ -55,7 +58,10 @@
         "@nestjs/core": "^11.1.18",
         "@nestjs/platform-express": "^11.1.18",
         "reflect-metadata": "^0.2.2",
-        "rxjs": "^7.8.1"
+        "rxjs": "^7.8.1",
+        "ws": "8.22.1",
+        "socket.io": "4.8.4",
+        "socket.io-client": "4.8.4"
     },
     "optionalDependencies": {
         "maxmind": "^4.3.0"

@@ -14,7 +14,7 @@ from tests.sql_policy.cases import FrameworkCases, wire_body, echo_body
 
 
 class DjangoPolicyTests(FrameworkCases, unittest.TestCase):
-    def send(self, payload, mode='block', max_bytes=65536, exempt=False, query='', content_type='application/json'):
+    def send(self, payload, mode='block', max_bytes=65536, exempt=False, query='', content_type='application/json', encoding=None):
         module = 'aiwaf.django.middleware.'
         store = MagicMock(); store.get_top_keywords.return_value = []
         def handler(request):
@@ -28,7 +28,8 @@ class DjangoPolicyTests(FrameworkCases, unittest.TestCase):
              patch.object(IPAndKeywordBlockMiddleware, '_get_exempt_keywords', return_value=set()), \
              patch.object(IPAndKeywordBlockMiddleware, '_get_legitimate_path_keywords', return_value=set()):
             middleware = IPAndKeywordBlockMiddleware(handler)
-            request = RequestFactory().generic('POST', '/login?' + query, wire_body(payload), content_type=content_type)
+            extra = {'HTTP_CONTENT_ENCODING': encoding} if encoding else {}
+            request = RequestFactory().generic('POST', '/login?' + query, wire_body(payload), content_type=content_type, **extra)
             result = middleware(request)
         return result.status_code, json.loads(result.content)
 
@@ -62,14 +63,14 @@ class RouteRiskLogTests(unittest.TestCase):
         return result.status_code, json.loads(result.content)
 
     def test_log_mode_logs_and_leaves_the_request_unchanged(self):
-        payload = {'email': '$(whoami)', 'password': 'private-secret'}
+        payload = {'email': 'a; cat /tmp/notes', 'password': 'private-secret'}
         with self.assertLogs('aiwaf.injection_risk', 'WARNING') as logs:
             status, body = self.send(payload, risk_mode='log')
         self.assertEqual((status, body['received']), (401, payload))
         event = json.loads(logs.records[0].getMessage())
-        self.assertEqual((event['route'], event['input'], event['rule']), ('/login', 'email', 'command_substitution'))
+        self.assertEqual((event['route'], event['input'], event['rule']), ('/login', 'email', 'command_chain'))
         self.assertNotIn('private-secret', ''.join(logs.output))
-        self.assertNotIn('whoami', ''.join(logs.output))
+        self.assertNotIn('/tmp/notes', ''.join(logs.output))
 
     def test_log_mode_works_with_sql_inspection_off(self):
         with self.assertLogs('aiwaf.injection_risk', 'WARNING'):
@@ -78,15 +79,15 @@ class RouteRiskLogTests(unittest.TestCase):
 
     def test_block_mode_is_the_default_and_blocks(self):
         with self.assertLogs('aiwaf.injection_risk', 'WARNING'):
-            status, body = self.send({'email': '$(whoami)', 'password': 'private-secret'})
-        self.assertEqual((status, body['error']), (403, 'command_substitution'))
+            status, body = self.send({'email': 'a; cat /tmp/notes', 'password': 'private-secret'})
+        self.assertEqual((status, body['error']), (403, 'command_chain'))
         status, _ = self.send({'email': 'ordinary@example.com'})
         self.assertEqual(status, 401)
 
     def test_off_and_exempt_requests_are_skipped(self):
         for kwargs in ({'risk_mode': 'off'}, {'risk_mode': 'block', 'exempt': True}):
             with self.assertNoLogs('aiwaf.injection_risk', 'WARNING'):
-                status, _ = self.send({'email': '$(whoami)'}, **kwargs)
+                status, _ = self.send({'email': 'a; cat /tmp/notes'}, **kwargs)
             self.assertEqual(status, 401)
 
     def test_ordinary_text_is_never_blocked(self):

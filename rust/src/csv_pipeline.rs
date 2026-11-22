@@ -124,6 +124,10 @@ struct Profile {
     /// "csv" keeps the blocklist, exemptions, keywords and countries in data_dir. "host" takes them
     /// as request facts and returns blocks and learned keywords as effects for the host's stores.
     policy_store: String,
+    /// What the inputs init saved for each route do, as AIWAF_ROUTE_SCHEMA_MODE: "enforce",
+    /// "monitor" or "off". The route manifest is given as JSON in route_manifest.
+    route_schema_mode: String,
+    route_manifest: Value,
 }
 
 impl Default for Profile {
@@ -258,6 +262,8 @@ impl Default for Profile {
             log_path: String::new(),
             log_fsync: false,
             policy_store: "csv".into(),
+            route_schema_mode: "off".into(),
+            route_manifest: Value::Null,
         }
     }
 }
@@ -303,6 +309,8 @@ pub struct NativePipelineRequest {
     started: std::time::Instant,
     /// A SQL finding allowed through because sql_mode is "monitor", for the adapter to log.
     sql_monitor: Option<String>,
+    /// The route schema review's log line, as JSON, for the adapter to log.
+    schema_event: Option<String>,
     /// The stage that blocked this request, when one did: in begin, or after the response.
     blocked_stage: Mutex<String>,
 }
@@ -312,6 +320,11 @@ impl NativePipelineRequest {
     #[getter]
     fn sql_monitor(&self) -> Option<String> {
         self.sql_monitor.clone()
+    }
+
+    #[getter]
+    fn schema_event(&self) -> Option<String> {
+        self.schema_event.clone()
     }
 
     /// The stage that blocked this request ("geo_block", "rate_limit" and so on), or None.
@@ -354,6 +367,8 @@ pub struct NativeCSVPipeline {
     /// With rate_backend "counter": shared window counts, such as Redis, from the adapter.
     rate_counter: Option<PyObject>,
     header_limits: HeaderLimits,
+    /// The route manifest's saved inputs, when route_schema_mode isn't "off".
+    schema: Option<aiwaf_core::route_risks::RouteRisks>,
 }
 
 impl NativeCSVPipeline {
@@ -607,6 +622,7 @@ impl NativeCSVPipeline {
         accepts_method: bool,
         authenticated: bool,
         monitored: &mut Option<String>,
+        schema_event: &mut Option<String>,
         stage: &std::cell::Cell<&'static str>,
     ) -> PyResult<(i32, Value, String)> {
         let p = &self.profile;
@@ -649,19 +665,43 @@ impl NativeCSVPipeline {
                 return Ok((403, json!({"error":rule}), rule.clone()));
             }
             if p.sql_mode != "off" {
-                if let Some((rule, status)) = py.allow_threads(|| {
-                    aiwaf_core::payload::inspect_sql(&query, &body, p.max_bytes, exhausted).or_else(
-                        || {
+                let found = py.allow_threads(|| {
+                    use aiwaf_core::route_risks::Source;
+                    let found = aiwaf_core::payload::inspect_sql(&query, &body, p.max_bytes, exhausted)
+                        .map(|found| (found, Source::Payload))
+                        .or_else(|| {
                             aiwaf_core::payload::inspect_sql_headers(
-                                f.headers
-                                    .iter()
-                                    .map(|(name, value)| (name.as_str(), value.as_str())),
+                                f.headers.iter().map(|(name, value)| (name.as_str(), value.as_str())),
                                 p.max_bytes,
                             )
-                            .or_else(|| aiwaf_core::payload::inspect_sql_path(&f.path, p.max_bytes))
-                        },
-                    )
-                }) {
+                            .map(|found| (found, Source::Headers))
+                        })
+                        .or_else(|| aiwaf_core::payload::inspect_sql_path(&f.path, p.max_bytes).map(|found| (found, Source::Path)));
+                    // The route's saved inputs review the finding: see AIWAF_ROUTE_SCHEMA_MODE.
+                    let Some(schema) = self.schema.as_ref().filter(|_| !exhausted) else {
+                        return (found.map(|(found, _)| found), None);
+                    };
+                    let query_text = String::from_utf8_lossy(&query);
+                    let review = schema.review_found(
+                        &f.path,
+                        &query_text,
+                        &body,
+                        p.max_bytes,
+                        found.as_ref().filter(|((_, status), _)| *status == 403).map(|((rule, _), source)| (rule.as_str(), *source)),
+                    );
+                    let event = review.as_ref().map(|review| review.event(&p.route_schema_mode, &f.method).to_string());
+                    let found = match review {
+                        Some(aiwaf_core::route_risks::Review::Mismatch { .. }) if p.route_schema_mode == "enforce" => {
+                            Some(("schema_type_mismatch".to_owned(), 403))
+                        }
+                        Some(aiwaf_core::route_risks::Review::Relax { .. }) if p.route_schema_mode == "enforce" => None,
+                        _ => found.map(|(found, _)| found),
+                    };
+                    (found, event)
+                });
+                let (found, event) = found;
+                *schema_event = event;
+                if let Some((rule, status)) = found {
                     if p.sql_mode == "monitor" {
                         *monitored = Some(rule);
                     } else {
@@ -972,6 +1012,7 @@ impl NativeCSVPipeline {
         if p.data_dir.is_empty()
             || !["block", "monitor", "off"].contains(&p.sql_mode.as_str())
             || !["csv", "host"].contains(&p.policy_store.as_str())
+            || !["enforce", "monitor", "off"].contains(&p.route_schema_mode.as_str())
             || !(1..=1048576).contains(&p.max_bytes)
             || !["memory", "csv", "counter"].contains(&p.rate_backend.as_str())
             || !["memory", "csv", "django_cache", "cache"].contains(&p.honeypot_backend.as_str())
@@ -1065,8 +1106,10 @@ impl NativeCSVPipeline {
                 .collect::<Result<_, _>>()
                 .map_err(|error| PyValueError::new_err(format!("Invalid User-Agent pattern: {error}")))?,
         };
+        let schema = (p.route_schema_mode != "off").then(|| aiwaf_core::route_risks::RouteRisks::new(&p.route_manifest));
         let pipeline = Self {
             header_limits,
+            schema,
             profile: p,
             state: Mutex::new(State::default()),
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
@@ -1133,6 +1176,7 @@ impl NativeCSVPipeline {
     fn supports(feature: &str) -> bool {
         [
             "route_rule",
+            "route_schema",
             "rate_overrides",
             "sql_monitor",
             "uuid_fact",
@@ -1315,6 +1359,7 @@ impl NativeCSVPipeline {
             Ok(())
         })?;
         let mut sql_monitor = None;
+        let mut schema_event = None;
         let stage = std::cell::Cell::new("");
         let (status, payload, reason) = self.evaluate(
             py,
@@ -1327,6 +1372,7 @@ impl NativeCSVPipeline {
             accepts_method,
             authenticated,
             &mut sql_monitor,
+            &mut schema_event,
             &stage,
         )?;
         self.processed.fetch_add(1, Ordering::Relaxed);
@@ -1338,6 +1384,7 @@ impl NativeCSVPipeline {
             finished: AtomicBool::new(false),
             started,
             sql_monitor,
+            schema_event,
             blocked_stage: Mutex::new(if status != 0 { stage.get().to_string() } else { String::new() }),
         };
         Ok((ctx, status, payload.to_string()))

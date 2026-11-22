@@ -206,6 +206,12 @@ public final class AiwafConfig {
     }
     /** How saved audit findings are used: "block" (default) blocks and logs matches, "log" only logs, "off" skips them. */
     public String injectionRiskMode = "block";
+    /**
+     * What the inputs init saved for each route do: "enforce" blocks a typed input sent with a value
+     * of another type and lets through findings the schema clears, "monitor" (default) only logs
+     * both, "off" skips them.
+     */
+    public String routeSchemaMode = "monitor";
     public boolean allowCompressedRequestBodies = false;
     public int maxRuntimeStateEntries = 10_000;
     public int maxParameterCount = 200;
