@@ -18,7 +18,7 @@ setup(
     package_dir={"": "py"},
     python_requires=">=3.10",
     install_requires=[
-        "aiwaf-rust>=0.2.13",
+        "aiwaf-rust>=0.2.14",
         "numpy>2",
         "pandas>2",
         "scikit-learn>=1.6.0",

@@ -39,14 +39,14 @@ the supported Redis backends when sharing limits across workers.
 
 Each package is versioned and released independently.
 
-Python 1.3.0, Rust/Python 0.2.13, Node.js 1.3.0, WASM 0.2.10, and Java 1.4.0 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
+Python 1.3.0, Rust/Python 0.2.14, Node.js 1.3.0, WASM 0.2.11, and Java 1.4.0 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
 
 | Runtime | Package | Repository version | Primary use |
 | --- | --- | ---: | --- |
 | Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.3.0` | Django, Flask, and FastAPI protection |
 | Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.3.0` | Express and Node framework middleware |
-| Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.13` | Native Python acceleration and JSON model inference |
-| WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.10` | Rust detection and model primitives for JavaScript |
+| Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.14` | Native Python acceleration and JSON model inference |
+| WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.11` | Rust detection and model primitives for JavaScript |
 | Java | `io.github.aiwaf-project:aiwaf-java` | `1.4.0` | Spring MVC and Jakarta Servlet protection |
 
 Supported framework integrations include Django, Flask, FastAPI, Express, Fastify, Hapi, Koa, NestJS, Next.js API routes, AdonisJS, Sails.js, Spring MVC, and Jakarta Servlet.
@@ -482,7 +482,7 @@ Java 1.4.0, after it is published to Maven Central:
 
 The Python package requires Python 3.10 or newer. Framework dependencies are optional, so install only the extra needed by the application.
 
-Python 1.3.0 requires `aiwaf-rust>=0.2.13`; the `rust` extra remains an installation
+Python 1.3.0 requires `aiwaf-rust>=0.2.14`; the `rust` extra remains an installation
 alias. Publish the matching Rust wheel with `NativeCSVPipeline` support before
 the Python release. The Rust release workflow builds Linux x86_64/aarch64,
 musl x86_64, macOS x86_64/arm64 and Windows x86_64 wheels and checks the native
@@ -1871,8 +1871,8 @@ Release versions and tags must match the relevant manifest.
 | --- | --- | --- | --- |
 | Python `aiwaf` | `pyproject.toml` | `python-v1.3.0` | `python-publish.yml` |
 | npm `aiwaf` | `js/package.json` | `js-v1.3.0` | `npm-publish.yml` |
-| PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.13` | `rust-publish.yml` |
-| npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.10` | `wasm-publish.yml` |
+| PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.14` | `rust-publish.yml` |
+| npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.11` | `wasm-publish.yml` |
 | Maven `aiwaf-java` | `java/pom.xml` | `java-v1.4.0` | `java-publish.yml` |
 
 Python and Rust publish to PyPI with trusted publishing. The npm workflows use npm trusted publishing and stage packages for approval. Configure the trusted publisher with organization `aiwaf-project`, repository `aiwaf`, the exact workflow filename, and the environment used by that workflow.
@@ -1882,12 +1882,13 @@ Java publishing uses the protected `maven-publish` environment plus `GPG_PRIVATE
 Registry releases are immutable. Increment the relevant manifest version before publishing another release.
 
 This release is Python `aiwaf 1.3.0`, npm `aiwaf 1.3.0`, Java `aiwaf-java 1.4.0`,
-`aiwaf-rust 0.2.13` and `aiwaf-wasm 0.2.10`: remote code execution checks, route schemas from
-`init`, multipart and compressed bodies, WebSocket messages, `AIWAF_PROFILE` and the route checks
-for the new operations. Python 1.2.5, npm 1.2.4, Java 1.3.8, `aiwaf-rust 0.2.12` and `aiwaf-wasm 0.2.9` are
-already published. Publish the two engines first: they carry the new route rules, and Python
-requires `aiwaf-rust>=0.2.13`. npm `aiwaf` keeps `aiwaf-wasm ^0.2.9`, which picks up 0.2.10
-once it's published.
+`aiwaf-rust 0.2.14` and `aiwaf-wasm 0.2.11`: remote code execution checks, route schemas from
+`init`, multipart and compressed bodies, and WebSocket messages; Java 1.4.0 also brings
+`AIWAF_PROFILE` and the route checks for the new operations. Python 1.2.6, npm 1.2.5, Java 1.3.8,
+`aiwaf-rust 0.2.13` and `aiwaf-wasm 0.2.10` are already published. Publish the two engines
+first: they carry the new checks, and Python requires `aiwaf-rust>=0.2.14`. npm `aiwaf` declares
+`aiwaf-wasm ^0.2.9` until 0.2.11 is published; then raise it to `^0.2.11` and refresh the
+lockfile before tagging `js-v1.3.0`.
 
 ## Security and limitations
 

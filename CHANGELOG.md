@@ -1,7 +1,14 @@
 # Changelog
 
-## Python 1.3.0 / aiwaf-rust 0.2.13 / Node.js 1.3.0 / WASM 0.2.10 / Java 1.4.0 — prepared release
+## Python 1.3.0 / aiwaf-rust 0.2.14 / Node.js 1.3.0 / WASM 0.2.11 / Java 1.4.0 — prepared release
 
+- **Release note:** publish aiwaf-rust 0.2.14 and aiwaf-wasm 0.2.11 first: they carry the
+  checks below, and Python requires `aiwaf-rust>=0.2.14`. npm `aiwaf` declares
+  `aiwaf-wasm ^0.2.9`, because the lockfile can't name an unpublished version; once 0.2.11 is
+  published, raise it to `^0.2.11` and refresh the lockfile before tagging `js-v1.3.0`, since
+  the Node.js checks below need it.
+- **Java 1.4.0** also brings `AIWAF_PROFILE` and the route checks for the new operations from
+  the 1.2.6 release below: Java 1.3.9 wasn't published.
 - Remote code execution (Python, Node.js and Java, regular and native): the payload check
   finds Log4Shell lookups (with nested `${lower:j}` forms), Shellshock, serialized Java, pickle,
   PHP, .NET and node-serialize objects, unsafe YAML tags, OGNL and SpEL that reach a process,
@@ -74,10 +81,9 @@
   `lookup` (not `java:` names), `Class.forName`, Groovy, MVEL, OGNL, EL expressions, Velocity,
   XStream and `SerializationUtils.deserialize`.
 
-- **Release note:** publish aiwaf-rust 0.2.13 and aiwaf-wasm 0.2.10 first: they carry the
-  route rules below, and Python requires `aiwaf-rust>=0.2.13`. npm `aiwaf` keeps
-  `aiwaf-wasm ^0.2.9`, which picks up 0.2.10 once it's published (the lockfile can't name a
-  version before it exists).
+
+## Python 1.2.6 / aiwaf-rust 0.2.13 / Node.js 1.2.5 / WASM 0.2.10 — released
+
 - `AIWAF_PROFILE` (Python, Node.js and Java): `balanced` keeps every default; `strict` halves
   the rate and flood limits and turns on UUID scoring, header validation and the method policy
   where the runtime has them as settings; `monitor` is a dry run that logs "AIWAF monitor: would
