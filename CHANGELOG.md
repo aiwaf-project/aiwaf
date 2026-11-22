@@ -2,11 +2,10 @@
 
 ## Python 1.3.0 / aiwaf-rust 0.2.14 / Node.js 1.3.0 / WASM 0.2.11 / Java 1.4.0 — prepared release
 
-- **Release note:** publish aiwaf-rust 0.2.14 and aiwaf-wasm 0.2.11 first: they carry the
-  checks below, and Python requires `aiwaf-rust>=0.2.14`. npm `aiwaf` declares
-  `aiwaf-wasm ^0.2.9`, because the lockfile can't name an unpublished version; once 0.2.11 is
-  published, raise it to `^0.2.11` and refresh the lockfile before tagging `js-v1.3.0`, since
-  the Node.js checks below need it.
+- **Release note:** aiwaf-rust 0.2.14 and aiwaf-wasm 0.2.11 are published and carry the
+  checks below. Python requires `aiwaf-rust>=0.2.14`, and npm `aiwaf` requires
+  `aiwaf-wasm ^0.2.11` (was ^0.2.9), with the lockfile pinning the published 0.2.11, so
+  `python-v1.3.0`, `js-v1.3.0` and `java-v1.4.0` can be tagged.
 - **Java 1.4.0** also brings `AIWAF_PROFILE` and the route checks for the new operations from
   the 1.2.6 release below: Java 1.3.9 wasn't published.
 - Remote code execution (Python, Node.js and Java, regular and native): the payload check

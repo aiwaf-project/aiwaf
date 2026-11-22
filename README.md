@@ -1885,10 +1885,9 @@ This release is Python `aiwaf 1.3.0`, npm `aiwaf 1.3.0`, Java `aiwaf-java 1.4.0`
 `aiwaf-rust 0.2.14` and `aiwaf-wasm 0.2.11`: remote code execution checks, route schemas from
 `init`, multipart and compressed bodies, and WebSocket messages; Java 1.4.0 also brings
 `AIWAF_PROFILE` and the route checks for the new operations. Python 1.2.6, npm 1.2.5, Java 1.3.8,
-`aiwaf-rust 0.2.13` and `aiwaf-wasm 0.2.10` are already published. Publish the two engines
-first: they carry the new checks, and Python requires `aiwaf-rust>=0.2.14`. npm `aiwaf` declares
-`aiwaf-wasm ^0.2.9` until 0.2.11 is published; then raise it to `^0.2.11` and refresh the
-lockfile before tagging `js-v1.3.0`.
+`aiwaf-rust 0.2.13` and `aiwaf-wasm 0.2.10` are already published, and so are the two new
+engines, `aiwaf-rust 0.2.14` and `aiwaf-wasm 0.2.11`, which carry the new checks. Python requires
+`aiwaf-rust>=0.2.14` and npm `aiwaf` requires `aiwaf-wasm ^0.2.11`.
 
 ## Security and limitations
 
