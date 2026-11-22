@@ -6,8 +6,21 @@ let wasmModule = null;
 let wasmLoadAttempted = false;
 let wasmLoadError = null;
 
+/**
+ * The installed aiwaf-wasm folder, found the way require() finds it, so it works wherever npm
+ * put it (in aiwaf's own node_modules or hoisted to the app's), or null when it isn't installed.
+ */
+function wasmPackageDir() {
+  try {
+    return path.dirname(require.resolve('aiwaf-wasm/package.json'));
+  } catch (_) {
+    return null;
+  }
+}
+
 async function loadWasmFromDisk() {
-  const pkgDir = path.join(__dirname, '..', 'node_modules', 'aiwaf-wasm');
+  const pkgDir = wasmPackageDir();
+  if (!pkgDir) return null;
   const wasmPath = path.join(pkgDir, 'aiwaf_wasm_bg.wasm');
   const bgPath = path.join(pkgDir, 'aiwaf_wasm_bg.js');
 
@@ -58,7 +71,8 @@ async function loadWasmFromDisk() {
 }
 
 async function loadWasmFromPackageModule() {
-  const pkgDir = path.join(__dirname, '..', 'node_modules', 'aiwaf-wasm');
+  const pkgDir = wasmPackageDir();
+  if (!pkgDir) return null;
   const modulePath = path.join(pkgDir, 'aiwaf_wasm.js');
   if (!fs.existsSync(modulePath)) return null;
   try {
@@ -596,5 +610,6 @@ module.exports = {
   rustPayloadFromRecords,
   pythonFeatureFromRecord,
   pythonFeaturesBatched,
-  getWasmStatus
+  getWasmStatus,
+  wasmPackageDir
 };

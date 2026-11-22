@@ -161,13 +161,9 @@ function applyAutoMiddlewareDefaults(opts, enabled, rawOpts = {}) {
 const NATIVE_DEFAULT_WASM = '0.2.9';
 
 function installedWasmVersion() {
-  const fs = require('fs');
-  const path = require('path');
-  for (const file of [path.join(__dirname, '..', 'node_modules', 'aiwaf-wasm', 'package.json'),
-    () => require.resolve('aiwaf-wasm/package.json')]) {
-    try { return JSON.parse(fs.readFileSync(typeof file === 'function' ? file() : file, 'utf8')).version; } catch (_) { /* next */ }
-  }
-  return null;
+  const dir = require('./wasmAdapter').wasmPackageDir();
+  if (!dir) return null;
+  try { return JSON.parse(require('fs').readFileSync(require('path').join(dir, 'package.json'), 'utf8')).version; } catch (_) { return null; }
 }
 function atLeast(version, minimum) {
   const parse = v => String(v).split('-')[0].split('.').map(Number);

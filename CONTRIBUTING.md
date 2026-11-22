@@ -26,7 +26,7 @@ python -m pip install maturin
 python scripts/stage_rust_package_files.py
 maturin develop --release --locked --manifest-path rust/Cargo.toml
 python -m pip install -e ".[django,flask,fastapi]"
-python -m pip install pytest httpx
+python -m pip install pytest pytest-cov coverage httpx redis djangorestframework python-multipart flask-socketio
 python scripts/check_rust_source_build.py
 ```
 

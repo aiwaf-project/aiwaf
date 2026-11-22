@@ -6,6 +6,9 @@
   checks below. Python requires `aiwaf-rust>=0.2.14`, and npm `aiwaf` requires
   `aiwaf-wasm ^0.2.11` (was ^0.2.9), with the lockfile pinning the published 0.2.11, so
   `python-v1.3.0`, `js-v1.3.0` and `java-v1.4.0` can be tagged.
+- Node.js finds `aiwaf-wasm` wherever npm installed it: the fallback loaders and the version
+  check for the native pipeline used to look only in aiwaf's own `node_modules`, so they missed
+  a copy hoisted to the app's `node_modules`.
 - **Java 1.4.0** also brings `AIWAF_PROFILE` and the route checks for the new operations from
   the 1.2.6 release below: Java 1.3.9 wasn't published.
 - Remote code execution (Python, Node.js and Java, regular and native): the payload check
