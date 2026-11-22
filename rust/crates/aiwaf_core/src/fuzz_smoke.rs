@@ -53,7 +53,26 @@ fn seeds() -> Vec<String> {
     seeds
 }
 
+/// Compiles every rule once, before anything is timed: the first call pays for compiling the
+/// rule sets, which takes a few hundred milliseconds in a debug build on a slow runner, and these
+/// tests are about inputs that stall, not that one-time cost.
+fn warm() {
+    static WARM: std::sync::Once = std::sync::Once::new();
+    WARM.call_once(|| {
+        let _ = crate::payload::inspect_sql(b"q=1", b"{\"a\": \"x;id\"}", 65536, false);
+        let _ = crate::payload::inspect_sql_headers([("cookie", "a=b"), ("x-a", "b")], 65536);
+        let _ = crate::payload::inspect_sql_path("/a/b", 65536);
+        let _ = crate::rce::classify("${x}");
+        let _ = crate::rce::classify_upload(b"<?php");
+        let _ = crate::sql::classify("1 OR 1=1");
+        for sink in crate::route_risks::SINKS {
+            let _ = crate::route_risks::rule_for(sink, "x");
+        }
+    });
+}
+
 fn timed<T>(limit: Duration, label: &str, input: &str, work: impl FnOnce() -> T) -> T {
+    warm();
     let started = Instant::now();
     let result = work();
     let elapsed = started.elapsed();
