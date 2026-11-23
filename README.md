@@ -184,17 +184,17 @@ java -cp <classpath> com.aiwaf.cli.AiwafConsole init --source src --output .aiwa
 
 AIWAF checks request values for SQL injection with a tokenizer. It tries each value as a
 bare number, inside single quotes, and inside double quotes, and flags it only when the
-value closes that SQL value and what follows reads as SQL. It catches `1 OR 1=1` and
-`1 AND SLEEP(5)`, which have no quote, and MySQL's executed comments such as
-`/*!50000UNION*/`. It passes text like `"Item" #3`, `o'reilly`, `union select committee`
+value closes that SQL value and what follows reads as SQL. It catches a number followed by an
+always-true condition or a time delay, which needs no quote, and MySQL's version comments,
+whose contents MySQL executes. It passes text like `"Item" #3`, `o'reilly`, `union select committee`
 and `Drop table tennis; update your set list`.
 
-Text such as `union select password` on its own isn't flagged, because without a value to
-close it can't change a query.
+SQL keywords on their own, with no value to close, aren't flagged, because they can't change a
+query.
 
 Besides the query string and body, the check reads the URL path and the headers, where SQL
-injection also reaches applications. The path is checked one segment at a time, as in
-`/post/1 OR 1=1`. Cookies are checked by their names and values, and the `Referer`,
+injection also reaches applications. The path is checked one segment at a time, so a SQL
+condition after a post ID in the path is found. Cookies are checked by their names and values, and the `Referer`,
 `X-Original-URL` and `X-Rewrite-URL` by their path and query string. Every other header is
 checked as one value, such as `User-Agent`, `X-Forwarded-For`, `Accept-Language` or an app's own
 `X-` headers. Headers that hold credentials, framing or browser-set values aren't checked:
@@ -230,10 +230,10 @@ fails if the results get worse:
 
 CRS also matches SQL keywords and function names on their own, such as `concat(` or
 `cast(`, especially at higher paranoia levels. AIWAF flags values that break out of a
-SQL value, plus names that only appear in SQL such as `pg_sleep(` and `information_schema`, so
+SQL value, plus names that only appear in SQL, such as delay functions and the schema catalog, so
 it misses many of those CRS fragments by design: matching them would block code snippets and
 ordinary text. Each CRS test's whole request is checked, including its path and headers. Three
-CRS tests marked benign carry SQL injection, such as `/post/foo/24 union all select 1,2,3 from aa`,
+CRS tests marked benign carry SQL injection, such as a post path ending in a UNION query,
 because CRS only means that one rule shouldn't match them. AIWAF flags them, and the benchmark
 lists them apart from false positives.
 
@@ -247,35 +247,35 @@ The same payload check looks in every request value for text that runs code on t
 
 | Rule | What it matches |
 | --- | --- |
-| `rce_jndi_lookup` | Log4Shell lookups, `${jndi:ldap://...}`, including nested forms like `${${lower:j}ndi:...}` |
-| `rce_shellshock` | `() { :; };` |
+| `rce_jndi_lookup` | Log4Shell JNDI lookups, including nested lookups that spell out the keyword |
+| `rce_shellshock` | Shellshock function definitions in headers and values |
 | `rce_serialized_object` | Serialized Java, Python pickle, PHP, .NET and node-serialize objects, and unsafe YAML tags |
-| `rce_gadget` | Deserialization gadgets: Fastjson and Jackson `@type` and array forms (`JdbcRowSetImpl`, `TemplatesImpl`, `InetAddress` probes), XStream `dynamic-proxy`, `XMLDecoder` `ProcessBuilder` |
-| `rce_expression` | OGNL, SpEL, EL (`''.getClass().forName(...)`), Thymeleaf `__${...}__::` and Java reflection that reach a process; Spring4Shell's `class.module.classLoader` |
-| `rce_template_escape` | Jinja, Twig, Smarty, Velocity, Mako, Ruby ERB and Node.js sandbox escapes, such as `__subclasses__()`, `\|filter('system')` and `require('child_process')` |
-| `rce_webshell` | JSP, ASP and ASP.NET webshell code, and PHP that runs what the request sends (`$_GET['f']($_GET['x'])`, `eval(base64_decode($_POST[...]))`) |
-| `rce_script_upload` | Uploads named as server scripts: `filename="shell.php"`, `.jsp`, `.aspx`, `.htaccess` and similar |
-| `rce_command_injection` | A probe or timing command chained onto the end of a value, as scanners send it: `x;id`, `\|whoami`, `&& uname -a`, `; sleep 5`, ``test`id` ``, `$(sleep 5)`. A bare `id` must touch its separator, so `name; id` passes |
-| `rce_shell_payload` | Reverse shells (`/dev/tcp/`, `bash -i`, `nc -e`), download-and-run, `; cat /etc/passwd`, `${IFS}`, and Windows `certutil -urlcache`, `regsvr32 /i:`, `mshta` and PowerShell download cradles |
-| `rce_php` | `<?php`, `system($_GET[...])` and the `php://`, `expect://` and `phar://` wrappers |
-| `rce_prototype_pollution` | `__proto__` and `constructor.prototype` keys in JSON bodies, forms and query strings |
+| `rce_gadget` | Deserialization gadgets: Fastjson and Jackson type keys that name known gadget classes, XStream dynamic proxies and `XMLDecoder` documents that start a process |
+| `rce_expression` | OGNL, SpEL, EL, Thymeleaf preprocessing and Java reflection that reach a process, and Spring4Shell's class-loader property path |
+| `rce_template_escape` | Jinja, Twig, Smarty, Velocity, Mako, Ruby ERB and Node.js sandbox escapes that reach Python internals, shell filters or Node's process module |
+| `rce_webshell` | JSP, ASP and ASP.NET webshell code, and PHP that runs code or function names taken from the request, including base64-encoded code |
+| `rce_script_upload` | Uploads named as server scripts: PHP, JSP, ASPX, `.htaccess` and similar |
+| `rce_command_injection` | A probe or timing command chained onto the end of a value, as scanners send it: an identity, system-information or delay command after a semicolon, pipe or `&&`, or inside backticks or command substitution. A short probe must touch its separator, so ordinary text with a semicolon passes |
+| `rce_shell_payload` | Reverse shells, download-and-run commands, reads of system account files, shell field-separator tricks, and Windows download commands and PowerShell download cradles |
+| `rce_php` | PHP opening tags, PHP calls that run request input, and the PHP stream wrappers that run or unpack code |
+| `rce_prototype_pollution` | Prototype-pollution keys in JSON bodies, forms and query strings |
 
 Each value is checked as sent, then again with the disguises attackers use undone: `\u0024`,
 `\x24` and `%u0024` escapes, HTML entities such as `&#36;` and `&dollar;`, fullwidth
-characters such as `％`, invisible characters inside a word, Log4j `${date:'j'}` and
-`${env:x:-j}` nesting, and a whole value sent as base64.
+characters such as `％`, invisible characters inside a word, Log4j lookups nested inside other
+lookups, and a whole value sent as base64.
 
-Each field of a query string or form body is also checked on its own, so `data=rO0AB...`
-and `data=%AC%ED%00%05...` are found, and base64 is unwrapped up to three layers deep,
+Each field of a query string or form body is also checked on its own, so a serialized Java
+object in one field is found whether it's base64 or percent-encoded, and base64 is unwrapped up to three layers deep,
 including base64 of gzip or deflate. A raw binary serialized body (Java, pickle, .NET
-`BinaryFormatter`, Ruby `Marshal`) is checked before it's read as text. A prototype key,
-`{"__proto__": ...}`, `{"constructor": {"prototype": ...}}` or `a[__proto__][x]=1`, is
-blocked as `rce_prototype_pollution`, since in Node.js it turns into code execution through
+`BinaryFormatter`, Ruby `Marshal`) is checked before it's read as text. A prototype key in a
+JSON body, form or query string is blocked as `rce_prototype_pollution`, since in Node.js it turns into code execution through
 options that libraries pass to `child_process` and template compilers.
 
 A multipart form is checked by its first `AIWAF_PAYLOAD_MAX_BYTES`, part by part: each
-part's headers (`filename="shell.php"`) and field name, each text field as any other value,
-and each file for a binary serialized object or PHP, JSP or ASP code (`<?php` in an image).
+part's headers (such as a file name ending in `.php`) and field name, each text field as any
+other value, and each file for a binary serialized object or PHP, JSP or ASP code, such as PHP
+hidden in an image.
 A file isn't checked for SQL or the other rules, since an ordinary document can quote them,
 and a large upload isn't refused: the rest of it reaches your app unread. Node.js reads the
 start of an unparsed multipart body and puts it back for your upload parser; Java reads the
@@ -339,14 +339,14 @@ values too. A match blocks the request with `403` and logs an event like this:
 | `command` | `command_chain`, `command_substitution`: `;`, `&` or `\|` and a command, `$(...)`, backticks |
 | `path` | `path_traversal`, `path_sensitive_location`, `path_null_byte` |
 | `ssrf` | `ssrf_scheme`, `ssrf_internal_host`: `file://` and similar, private and metadata hosts |
-| `nosql`, `code`, `template`, `deserialization` | operators like `$ne`, `eval(`, `{{ }}`, serialized object markers |
-| `xss` | `xss_markup`, `xss_event_handler`, `xss_script_url`: `<script`, `onerror=`, `javascript:` |
-| `redirect` | `redirect_external`: `//host`, `/\host`, `javascript:`, `user@host` and `https:host` targets |
-| `ldap` | `ldap_filter`: `)(`, `(|(`, a leading `*)` |
-| `xpath` | `xpath_quote_break`, `xpath_tautology`: `' or 'a'='a`, `or 1=1` |
-| `xxe` | `xxe_entity`: `<!DOCTYPE` or `<!ENTITY` |
-| `redos` | `redos_nested_quantifier`: `(a+)+` and similar |
-| `prototype` | `prototype_key`: `__proto__`, `constructor.prototype` |
+| `nosql`, `code`, `template`, `deserialization` | query operators, code evaluation calls, template expressions, serialized object markers |
+| `xss` | `xss_markup`, `xss_event_handler`, `xss_script_url`: script tags, event-handler attributes, script URLs |
+| `redirect` | `redirect_external`: protocol-relative, backslash, script-URL, user-info and scheme-only targets |
+| `ldap` | `ldap_filter`: filter breakouts, OR filters and leading wildcards |
+| `xpath` | `xpath_quote_break`, `xpath_tautology`: quote breakouts and always-true conditions |
+| `xxe` | `xxe_entity`: document type and entity declarations |
+| `redos` | `redos_nested_quantifier`: nested quantifiers |
+| `prototype` | `prototype_key`: prototype-pollution keys |
 
 Every rule is checked against a shared list of ordinary values (names, addresses, prose with
 quotes and parentheses) that must never match. A plain absolute URL passes the redirect rule,
@@ -409,17 +409,17 @@ route middleware that isn't a body parser all make it false.
 
 Requests to those routes are then reviewed after the general check:
 
-- A typed input sent with a value of another type, as in `post_id=7 OR 1=1`, is
-  `schema_type_mismatch`.
+- A typed input sent with a value of another type, as in a SQL condition sent as a numeric
+  ID, is `schema_type_mismatch`.
 - A finding from `sql_function`, `sql_comment` or `sql_breakout_numeric` is checked again
   without the inputs the schema clears: typed inputs of their type, text that reaches no
   operation, and, when the list is complete, inputs the route never reads. When nothing else is
-  found, the finding is cleared. This is where prose and pasted code, as in "use sleep(5) in the
-  query", stops being blocked.
-- A finding from the URL path, as in `/posts/use-sleep(5)-in-queries`, is reviewed by the
+  found, the finding is cleared. This is where prose and pasted code, such as a question about
+  a SQL function, stops being blocked.
+- A finding from the URL path, such as a blog slug that names a SQL function, is reviewed by the
   route's parameters: static segments are code, typed parameters (`<int:id>`, `{id:uuid}`, or a
   saved type) must fit, and text parameters that reach no operation are cleared the same way.
-- Quote breakouts (`' OR '1'='1`) and every remote code execution rule still block on every
+- Quote breakouts and every remote code execution rule still block on every
   input. An incomplete list, a sink reached by an input the audit couldn't name, a body that
   isn't a form or JSON object, or a finding from headers or the path keeps the finding.
 

@@ -12,6 +12,10 @@
   0.24, and aiwaf-rust never calls it on them), but scanners flag every PyO3 before 0.29. The
   Python API is unchanged; the training CSV reader holds its reader in a `Mutex`, because PyO3
   classes must now be thread-safe.
+- The README describes attacks in words instead of quoting working payloads (reverse shells,
+  JNDI lookups, webshell and PHP calls, XML entities and similar). npm refused every publish of
+  aiwaf 1.3.0 with a bare 403 after these were added, and malware scanners flag them; aiwaf-wasm,
+  whose registry entry doesn't carry the README text, published normally.
 - Dependency alerts: Java pins `org.json` 20260719 (Jedis 7.5.3 brings 20251224, with
   CVE-2026-59171) and tests with AssertJ 3.27.7; Rust locks `rand` 0.8.6. The unused root
   `requirements.txt` and `tests/flask/requirements.txt`, frozen copies of a development
