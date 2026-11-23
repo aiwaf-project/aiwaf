@@ -101,7 +101,7 @@ pub fn parts(value: &str, apache: bool) -> Option<DateParts> {
 }
 #[pyfunction]
 fn training_date_parts(py: Python<'_>, dates: Vec<String>, apache: bool) -> Vec<Option<DateParts>> {
-    py.allow_threads(|| dates.iter().map(|date| parts(date, apache)).collect())
+    py.detach(|| dates.iter().map(|date| parts(date, apache)).collect())
 }
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(training_date_parts, m)?)?;

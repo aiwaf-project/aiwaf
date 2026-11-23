@@ -1,11 +1,22 @@
 # Changelog
 
-## Python 1.3.0 / aiwaf-rust 0.2.14 / Node.js 1.3.0 / WASM 0.2.11 / Java 1.4.0 — prepared release
+## Python 1.3.0 / aiwaf-rust 0.2.15 / Node.js 1.3.0 / WASM 0.2.11 / Java 1.4.0 — prepared release
 
 - **Release note:** aiwaf-rust 0.2.14 and aiwaf-wasm 0.2.11 are published and carry the
-  checks below. Python requires `aiwaf-rust>=0.2.14`, and npm `aiwaf` requires
-  `aiwaf-wasm ^0.2.11` (was ^0.2.9), with the lockfile pinning the published 0.2.11, so
-  `python-v1.3.0`, `js-v1.3.0` and `java-v1.4.0` can be tagged.
+  checks below. npm `aiwaf` requires `aiwaf-wasm ^0.2.11` (was ^0.2.9), with the lockfile
+  pinning the published 0.2.11. Publish aiwaf-rust 0.2.15 (`rust-v0.2.15`) before tagging
+  `python-v1.3.0`, which requires `aiwaf-rust>=0.2.15`; `js-v1.3.0` and `java-v1.4.0` don't
+  depend on it.
+- **aiwaf-rust 0.2.15** moves from PyO3 0.21 to 0.29.3. 0.21 isn't affected by
+  GHSA-36hh-v3qg-5jq4 (the out-of-bounds read in list and tuple iterators' `nth` arrived in
+  0.24, and aiwaf-rust never calls it on them), but scanners flag every PyO3 before 0.29. The
+  Python API is unchanged; the training CSV reader holds its reader in a `Mutex`, because PyO3
+  classes must now be thread-safe.
+- Node.js loads without `sqlite3`'s native binary, which npm 12 doesn't build unless the app
+  approves its install script: `require('aiwaf')` used to fail with knex's "npm install sqlite3"
+  hint. The database now connects on first use, the stores keep their data in CSV files under
+  `logs/storage`, and one warning names the fix (`npm approve-scripts sqlite3 && npm rebuild
+  sqlite3`).
 - Node.js finds `aiwaf-wasm` wherever npm installed it: the fallback loaders and the version
   check for the native pipeline used to look only in aiwaf's own `node_modules`, so they missed
   a copy hoisted to the app's `node_modules`.

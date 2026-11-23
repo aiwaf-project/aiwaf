@@ -363,9 +363,9 @@ pub struct NativeCSVPipeline {
     state: Mutex<State>,
     id: u64,
     processed: AtomicU64,
-    honeypot_cache: Option<PyObject>,
+    honeypot_cache: Option<Py<PyAny>>,
     /// With rate_backend "counter": shared window counts, such as Redis, from the adapter.
-    rate_counter: Option<PyObject>,
+    rate_counter: Option<Py<PyAny>>,
     header_limits: HeaderLimits,
     /// The route manifest's saved inputs, when route_schema_mode isn't "off".
     schema: Option<aiwaf_core::route_risks::RouteRisks>,
@@ -602,7 +602,7 @@ impl NativeCSVPipeline {
         if !self.profile.uuid_score_enabled || delta == 0 {
             return Ok(0);
         }
-        py.allow_threads(|| {
+        py.detach(|| {
             let mut state = self.state.lock().map_err(err)?;
             let events = state.uuid.entry(ip.into()).or_default();
             events.retain(|(t, _)| *t >= now - self.profile.uuid_window);
@@ -665,7 +665,7 @@ impl NativeCSVPipeline {
                 return Ok((403, json!({"error":rule}), rule.clone()));
             }
             if p.sql_mode != "off" {
-                let found = py.allow_threads(|| {
+                let found = py.detach(|| {
                     use aiwaf_core::route_risks::Source;
                     let found = aiwaf_core::payload::inspect_sql(&query, &body, p.max_bytes, exhausted)
                         .map(|found| (found, Source::Payload))
@@ -794,7 +794,7 @@ impl NativeCSVPipeline {
                     }
                 }
             } else {
-                py.allow_threads(|| -> PyResult<_> {
+                py.detach(|| -> PyResult<_> {
                     let mut state = self.state.lock().map_err(err)?;
                     let old = state.rates.remove(&key).unwrap_or_default();
                     let d = policy::policy_rate(old, f.now, f.rate.0, f.rate.1, f.rate.2);
@@ -851,7 +851,7 @@ impl NativeCSVPipeline {
             let key = format!("honeypot_get:{}", f.ip);
             if f.method == "GET" {
                 if p.honeypot_backend == "memory" {
-                    py.allow_threads(|| -> PyResult<()> {
+                    py.detach(|| -> PyResult<()> {
                         self.state
                             .lock()
                             .map_err(err)?
@@ -884,7 +884,7 @@ impl NativeCSVPipeline {
                 }
             } else if f.method == "POST" {
                 let decision = if p.honeypot_backend == "memory" {
-                    py.allow_threads(|| -> PyResult<_> {
+                    py.detach(|| -> PyResult<_> {
                         // Read, evaluate and expire atomically: a concurrent GET
                         // must not be removed by an older POST's expiry decision.
                         let mut state = self.state.lock().map_err(err)?;
@@ -978,7 +978,7 @@ impl NativeCSVPipeline {
                 .required_headers_by_method
                 .get(&f.method.to_uppercase())
                 .unwrap_or(&p.required_headers);
-            if let Some(reason) = py.allow_threads(|| {
+            if let Some(reason) = py.detach(|| {
                 validate_headers_full(
                     &f.headers,
                     required,
@@ -1004,8 +1004,8 @@ impl NativeCSVPipeline {
     fn new(
         py: Python<'_>,
         profile_json: String,
-        honeypot_cache: Option<PyObject>,
-        rate_counter: Option<PyObject>,
+        honeypot_cache: Option<Py<PyAny>>,
+        rate_counter: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         let mut p: Profile = serde_json::from_str(&profile_json)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1335,7 +1335,7 @@ impl NativeCSVPipeline {
             effects: Arc::new(Mutex::new(Vec::new())),
         };
         // Bound state maps without evicting active subjects or changing thresholds.
-        py.allow_threads(|| -> PyResult<()> {
+        py.detach(|| -> PyResult<()> {
             let mut state = self.state.lock().map_err(err)?;
             state.rate_window = state.rate_window.max(rate.0).max(self.profile.rate_window);
             if now >= state.cleanup_at || now < state.cleanup_at - 30.0 {
@@ -1442,7 +1442,7 @@ impl NativeCSVPipeline {
             }
         }
         if ctx.status == 0 && f.active.contains("ai_anomaly") {
-            let anomaly = py.allow_threads(|| -> PyResult<Option<String>> {
+            let anomaly = py.detach(|| -> PyResult<Option<String>> {
                 let mut state = self.state.lock().map_err(err)?;
                 let model = state.model.clone();
                 let entries = state.histories.entry(f.ip.clone()).or_default();
@@ -1524,7 +1524,7 @@ impl NativeCSVPipeline {
             );
             if let Err(error) = logged {
                 if !LOG_FAILURE_REPORTED.swap(true, Ordering::Relaxed) {
-                    let _ = py.import_bound("logging").and_then(|logging| {
+                    let _ = py.import("logging").and_then(|logging| {
                         logging.call_method1("getLogger", ("aiwaf.native",))?.call_method1(
                             "warning",
                             (

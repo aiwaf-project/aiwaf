@@ -124,7 +124,7 @@ impl NativeRequestEngine {
                 return Ok(None);
             };
             let text = String::from_utf8(decoded).expect("ASCII decoder");
-            if let Some(rule) = py.allow_threads(|| crate::runtime_policy::sql_signature(&text)) {
+            if let Some(rule) = py.detach(|| crate::runtime_policy::sql_signature(&text)) {
                 self.processed.fetch_add(1, Ordering::Relaxed);
                 return Ok(Some((Some(rule), 403, None, vec![], vec![])));
             }

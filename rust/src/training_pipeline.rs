@@ -10,7 +10,9 @@ type Fields = (String, String, String, String, f64);
 
 #[pyclass]
 struct TrainingCSVReader {
-    reader: csv::Reader<Box<dyn std::io::Read + Send>>,
+    // PyO3 classes must be Sync, and a boxed reader is only Send. next_batch takes &mut self,
+    // so it reaches the reader with get_mut() and never locks.
+    reader: std::sync::Mutex<csv::Reader<Box<dyn std::io::Read + Send>>>,
     indices: [usize; 4],
     elapsed: Option<usize>,
     milliseconds: bool,
@@ -19,7 +21,7 @@ struct TrainingCSVReader {
 impl TrainingCSVReader {
     #[new]
     fn new(py: Python<'_>, path: String) -> PyResult<Self> {
-        py.allow_threads(|| {
+        py.detach(|| {
             let file = std::fs::File::open(&path)
                 .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
             let input: Box<dyn std::io::Read + Send> = if path.ends_with(".gz") {
@@ -50,7 +52,7 @@ impl TrainingCSVReader {
                 }
             });
             Ok(Self {
-                reader,
+                reader: std::sync::Mutex::new(reader),
                 indices,
                 elapsed,
                 milliseconds,
@@ -61,12 +63,15 @@ impl TrainingCSVReader {
         if size == 0 || size > 65536 {
             return Err(PyValueError::new_err("Batch size must be 1..65536"));
         }
-        py.allow_threads(|| {
+        let reader = self
+            .reader
+            .get_mut()
+            .map_err(|_| PyValueError::new_err("Training CSV reader is unusable after an earlier panic"))?;
+        py.detach(|| {
             let (mut count, mut output) = (0, Vec::new());
             let mut row = csv::StringRecord::new();
             while count < size
-                && self
-                    .reader
+                && reader
                     .read_record(&mut row)
                     .map_err(|e| PyValueError::new_err(e.to_string()))?
             {
@@ -137,7 +142,7 @@ fn response_time(m: &regex::Captures<'_>) -> f64 {
 
 #[pyfunction]
 fn training_parse_lines(py: Python<'_>, lines: Vec<String>) -> Vec<Vec<Fields>> {
-    py.allow_threads(|| {
+    py.detach(|| {
         lines
             .iter()
             .map(|line| {
@@ -161,7 +166,7 @@ fn training_parse_lines(py: Python<'_>, lines: Vec<String>) -> Vec<Vec<Fields>> 
 
 #[pyfunction]
 fn training_parse_csv(py: Python<'_>, text: String) -> PyResult<Vec<Fields>> {
-    py.allow_threads(|| {
+    py.detach(|| {
         let mut reader = csv::ReaderBuilder::new()
             .flexible(true)
             .from_reader(text.as_bytes());
@@ -207,7 +212,7 @@ fn training_aggregate(
     HashMap<String, usize>,
     HashMap<String, Vec<usize>>,
 ) {
-    py.allow_threads(|| {
+    py.detach(|| {
         let (mut errors, mut exempt_errors, mut indices) =
             (HashMap::new(), HashMap::new(), HashMap::new());
         for (i, (ip, path, status)) in records.into_iter().enumerate() {
@@ -284,7 +289,7 @@ fn training_keywords(
     if records.iter().any(|(p, _)| !p.is_ascii()) {
         return None;
     }
-    py.allow_threads(|| {
+    py.detach(|| {
         let (mut counts, mut order) = (HashMap::<String, usize>::new(), Vec::<String>::new());
         for (path, status) in &records {
             if !(status.starts_with('4') || status.starts_with('5'))
@@ -357,7 +362,7 @@ fn training_keyword_counts(
     if records.iter().any(|(p, _)| !p.is_ascii()) {
         return None;
     }
-    py.allow_threads(|| {
+    py.detach(|| {
         let mut counts = HashMap::<String, (usize, Vec<String>)>::new();
         let mut order = Vec::new();
         for (path, status) in records {
@@ -405,7 +410,7 @@ fn training_anomaly_stats(
     if rows.len() != predictions.len() {
         return Err(PyValueError::new_err("Prediction count mismatch"));
     }
-    py.allow_threads(|| {
+    py.detach(|| {
         let mut groups = HashMap::<String, (f64, usize, f64, f64, usize, usize, bool)>::new();
         for ((ip, kw, errors, burst), prediction) in rows.into_iter().zip(predictions) {
             let g = groups

@@ -300,7 +300,7 @@ pub fn policy_keyword_flask(
     prefixes: Vec<String>,
     malicious: HashSet<String>,
 ) -> (Option<String>, Vec<String>, Vec<String>) {
-    py.allow_threads(|| {
+    py.detach(|| {
         let path = path.to_lowercase();
         let query = query.to_lowercase();
         static SPLIT: OnceLock<Regex> = OnceLock::new();
@@ -339,7 +339,7 @@ pub fn policy_keyword_flask(
 
 #[pyfunction]
 pub fn policy_sql_signature(py: Python<'_>, text: String) -> Option<String> {
-    py.allow_threads(|| sql_signature(&text))
+    py.detach(|| sql_signature(&text))
 }
 
 /// Returns the SQL tokenizer's rule for a value. The name is kept from the signature rules it
@@ -352,7 +352,7 @@ pub(crate) fn sql_signature(text: &str) -> Option<String> {
 /// 403 for an attack and 413 when the request is too large to inspect, or None.
 #[pyfunction]
 pub fn policy_sql_inspect(py: Python<'_>, query: Vec<u8>, body: Vec<u8>, max_bytes: usize) -> Option<(String, i32)> {
-    py.allow_threads(|| aiwaf_core::payload::inspect_sql(&query, &body, max_bytes, false))
+    py.detach(|| aiwaf_core::payload::inspect_sql(&query, &body, max_bytes, false))
 }
 
 /// Checks request headers for SQL injection: cookie names and values, the Referer's query
@@ -361,7 +361,7 @@ pub fn policy_sql_inspect(py: Python<'_>, query: Vec<u8>, body: Vec<u8>, max_byt
 /// (name, value) pairs and returns (rule, status) or None, like `policy_sql_inspect`.
 #[pyfunction]
 pub fn policy_sql_inspect_headers(py: Python<'_>, headers: Vec<(String, String)>, max_bytes: usize) -> Option<(String, i32)> {
-    py.allow_threads(|| {
+    py.detach(|| {
         aiwaf_core::payload::inspect_sql_headers(headers.iter().map(|(n, v)| (n.as_str(), v.as_str())), max_bytes)
     })
 }
@@ -369,13 +369,13 @@ pub fn policy_sql_inspect_headers(py: Python<'_>, headers: Vec<(String, String)>
 /// Checks a URL path for SQL injection, one segment at a time.
 #[pyfunction]
 pub fn policy_sql_inspect_path(py: Python<'_>, path: String, max_bytes: usize) -> Option<(String, i32)> {
-    py.allow_threads(|| aiwaf_core::payload::inspect_sql_path(&path, max_bytes))
+    py.detach(|| aiwaf_core::payload::inspect_sql_path(&path, max_bytes))
 }
 
 /// Returns the first route-check rule for this operation that matches the value.
 #[pyfunction]
 pub fn policy_route_rule(py: Python<'_>, sink: String, value: String) -> Option<String> {
-    py.allow_threads(|| aiwaf_core::route_risks::rule_for(&sink, &value))
+    py.detach(|| aiwaf_core::route_risks::rule_for(&sink, &value))
 }
 
 /// Route-specific checks compiled from a manifest's saved audit findings.
@@ -412,7 +412,7 @@ impl RouteRiskChecker {
         found: Option<String>,
     ) -> Option<(String, String, String, String)> {
         use aiwaf_core::route_risks::Review;
-        py.allow_threads(|| match self.risks.review(path, query, &body, max_bytes, found.as_deref())? {
+        py.detach(|| match self.risks.review(path, query, &body, max_bytes, found.as_deref())? {
             Review::Mismatch { route, input, kind } => Some(("mismatch".into(), route, input, kind)),
             Review::Relax { route, rule } => Some(("relax".into(), route, rule, String::new())),
         })
@@ -422,7 +422,7 @@ impl RouteRiskChecker {
     /// input, type), ("relax", route, rule, ""), or None to keep it.
     fn review_path(&self, py: Python<'_>, path: &str, max_bytes: usize, found: &str) -> Option<(String, String, String, String)> {
         use aiwaf_core::route_risks::Review;
-        py.allow_threads(|| match self.risks.review_path(path, max_bytes, found)? {
+        py.detach(|| match self.risks.review_path(path, max_bytes, found)? {
             Review::Mismatch { route, input, kind } => Some(("mismatch".into(), route, input, kind)),
             Review::Relax { route, rule } => Some(("relax".into(), route, rule, String::new())),
         })
@@ -436,7 +436,7 @@ impl RouteRiskChecker {
         query: &str,
         body: Vec<u8>,
     ) -> Vec<(String, String, String, String, String)> {
-        py.allow_threads(|| {
+        py.detach(|| {
             self.risks
                 .inspect(path, query, &body)
                 .into_iter()
@@ -449,19 +449,19 @@ impl RouteRiskChecker {
 /// Returns the tokenizer's rule when a value breaks out of a SQL value.
 #[pyfunction]
 pub fn policy_sql_tokenizer(py: Python<'_>, text: String) -> Option<String> {
-    py.allow_threads(|| aiwaf_core::sql::classify(&text).map(str::to_owned))
+    py.detach(|| aiwaf_core::sql::classify(&text).map(str::to_owned))
 }
 
 /// Returns the first tokenizer rule across values, crossing the binding once.
 #[pyfunction]
 pub fn policy_sql_tokenizers(py: Python<'_>, texts: Vec<String>) -> Option<String> {
-    py.allow_threads(|| texts.iter().find_map(|text| aiwaf_core::sql::classify(text)).map(str::to_owned))
+    py.detach(|| texts.iter().find_map(|text| aiwaf_core::sql::classify(text)).map(str::to_owned))
 }
 
 /// Preserve first-value/first-rule order while crossing the binding once.
 #[pyfunction]
 pub fn policy_sql_signatures(py: Python<'_>, texts: Vec<String>) -> Option<String> {
-    py.allow_threads(|| texts.iter().find_map(|text| sql_signature(text)))
+    py.detach(|| texts.iter().find_map(|text| sql_signature(text)))
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {

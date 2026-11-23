@@ -27,6 +27,7 @@ use aiwaf_core::{
     validate_headers_with_config_limits as core_validate_headers_with_config_limits,
 };
 use pyo3::exceptions::{PyKeyError, PyValueError};
+use pyo3::BoundObject;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
 use std::collections::HashMap;
@@ -81,9 +82,9 @@ fn headers_to_map(headers: &Bound<'_, PyDict>) -> PyResult<HashMap<String, Strin
 }
 
 fn map_to_pydict<'py>(py: Python<'py>, map: &HashMap<String, Vec<f64>>) -> PyResult<Py<PyDict>> {
-    let dict = PyDict::new_bound(py);
+    let dict = PyDict::new(py);
     for (k, vals) in map.iter() {
-        let list = PyList::new_bound(py, vals.iter().copied());
+        let list = PyList::new(py, vals.iter().copied())?;
         dict.set_item(k, list)?;
     }
     Ok(dict.into())
@@ -93,7 +94,7 @@ fn pydict_to_map(state: &Bound<'_, PyDict>) -> PyResult<HashMap<String, Vec<f64>
     let mut map = HashMap::new();
     for (k, v) in state.iter() {
         let key: String = k.extract()?;
-        let list = v.downcast::<PyList>()?;
+        let list = v.cast::<PyList>()?;
         let mut vals = Vec::with_capacity(list.len());
         for item in list.iter() {
             vals.push(item.extract::<f64>()?);
@@ -103,7 +104,13 @@ fn pydict_to_map(state: &Bound<'_, PyDict>) -> PyResult<HashMap<String, Vec<f64>
     Ok(map)
 }
 
-fn py_timestamp_epoch(value: &PyAny) -> PyResult<f64> {
+/// A key the Python caller must supply, as a KeyError naming it when it's missing.
+fn required_item<'py>(dict: &Bound<'py, PyDict>, key: &str) -> PyResult<Bound<'py, PyAny>> {
+    dict.get_item(key)?
+        .ok_or_else(|| PyErr::new::<PyKeyError, _>(key.to_string()))
+}
+
+fn py_timestamp_epoch(value: &Bound<'_, PyAny>) -> PyResult<f64> {
     if let Ok(epoch) = value.extract::<f64>() {
         return Ok(epoch);
     }
@@ -113,13 +120,12 @@ fn py_timestamp_epoch(value: &PyAny) -> PyResult<f64> {
 #[derive(Clone)]
 struct PyFeatureRecordInput(FeatureRecordInput);
 
-impl<'py> FromPyObject<'py> for PyFeatureRecordInput {
-    fn extract(ob: &'py PyAny) -> PyResult<Self> {
-        let dict: &PyDict = ob.downcast()?;
-        let get_required = |key: &str| -> PyResult<&PyAny> {
-            dict.get_item(key)?
-                .ok_or_else(|| PyErr::new::<PyKeyError, _>(key.to_string()))
-        };
+impl<'a, 'py> FromPyObject<'a, 'py> for PyFeatureRecordInput {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        let dict = ob.cast::<PyDict>()?;
+        let get_required = |key: &str| required_item(&dict, key);
         Ok(Self(FeatureRecordInput {
             ip: get_required("ip")?.extract()?,
             path_lower: get_required("path_lower")?.extract()?,
@@ -135,36 +141,33 @@ impl<'py> FromPyObject<'py> for PyFeatureRecordInput {
 
 struct PyRawFeatureRecord(RawFeatureRecord);
 
-impl<'py> FromPyObject<'py> for PyRawFeatureRecord {
-    fn extract(ob: &'py PyAny) -> PyResult<Self> {
-        let dict: &PyDict = ob.downcast()?;
-        let get_required = |key: &str| -> PyResult<&PyAny> {
-            dict.get_item(key)?
-                .ok_or_else(|| PyErr::new::<PyKeyError, _>(key.to_string()))
-        };
+impl<'a, 'py> FromPyObject<'a, 'py> for PyRawFeatureRecord {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        let dict = ob.cast::<PyDict>()?;
+        let get_required = |key: &str| required_item(&dict, key);
         Ok(Self(RawFeatureRecord {
             ip: get_required("ip")?.extract()?,
             path: get_required("path")?.extract()?,
-            timestamp: py_timestamp_epoch(get_required("timestamp")?)?,
+            timestamp: py_timestamp_epoch(&get_required("timestamp")?)?,
             response_time: get_required("response_time")?.extract()?,
-            status: get_required("status")?.str()?.to_str()?.to_string(),
+            status: get_required("status")?.str()?.extract::<String>()?,
         }))
     }
 }
 
-#[derive(Clone)]
 struct PyParsedFeatureRecord {
     record: ParsedFeatureRecord,
-    timestamp: PyObject,
+    timestamp: Py<PyAny>,
 }
 
-impl<'py> FromPyObject<'py> for PyParsedFeatureRecord {
-    fn extract(ob: &'py PyAny) -> PyResult<Self> {
-        let dict: &PyDict = ob.downcast()?;
-        let get_required = |key: &str| -> PyResult<&PyAny> {
-            dict.get_item(key)?
-                .ok_or_else(|| PyErr::new::<PyKeyError, _>(key.to_string()))
-        };
+impl<'a, 'py> FromPyObject<'a, 'py> for PyParsedFeatureRecord {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        let dict = ob.cast::<PyDict>()?;
+        let get_required = |key: &str| required_item(&dict, key);
         let timestamp = get_required("timestamp")?;
         Ok(Self {
             record: ParsedFeatureRecord {
@@ -172,9 +175,9 @@ impl<'py> FromPyObject<'py> for PyParsedFeatureRecord {
                 path: get_required("path")?.extract()?,
                 response_time: get_required("response_time")?.extract()?,
                 status: get_required("status")?.extract()?,
-                timestamp: py_timestamp_epoch(timestamp)?,
+                timestamp: py_timestamp_epoch(&timestamp)?,
             },
-            timestamp: timestamp.into_py(ob.py()),
+            timestamp: timestamp.unbind(),
         })
     }
 }
@@ -182,16 +185,15 @@ impl<'py> FromPyObject<'py> for PyParsedFeatureRecord {
 #[derive(Clone)]
 struct PyBuiltFeatureRecord(BuiltFeatureRecord);
 
-impl<'py> FromPyObject<'py> for PyBuiltFeatureRecord {
-    fn extract(ob: &'py PyAny) -> PyResult<Self> {
-        let dict: &PyDict = ob.downcast()?;
-        let get_required = |key: &str| -> PyResult<&PyAny> {
-            dict.get_item(key)?
-                .ok_or_else(|| PyErr::new::<PyKeyError, _>(key.to_string()))
-        };
+impl<'a, 'py> FromPyObject<'a, 'py> for PyBuiltFeatureRecord {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        let dict = ob.cast::<PyDict>()?;
+        let get_required = |key: &str| required_item(&dict, key);
         let timestamp_epoch = match dict.get_item("timestamp_epoch")? {
             Some(value) => value.extract::<f64>()?,
-            None => py_timestamp_epoch(get_required("timestamp")?)?,
+            None => py_timestamp_epoch(&get_required("timestamp")?)?,
         };
         Ok(Self(BuiltFeatureRecord {
             ip: get_required("ip")?.extract()?,
@@ -210,13 +212,12 @@ impl<'py> FromPyObject<'py> for PyBuiltFeatureRecord {
 #[derive(Clone)]
 struct PyRecentEntryInput(RecentEntryInput);
 
-impl<'py> FromPyObject<'py> for PyRecentEntryInput {
-    fn extract(ob: &'py PyAny) -> PyResult<Self> {
-        let dict: &PyDict = ob.downcast()?;
-        let get_required = |key: &str| -> PyResult<&PyAny> {
-            dict.get_item(key)?
-                .ok_or_else(|| PyErr::new::<PyKeyError, _>(key.to_string()))
-        };
+impl<'a, 'py> FromPyObject<'a, 'py> for PyRecentEntryInput {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        let dict = ob.cast::<PyDict>()?;
+        let get_required = |key: &str| required_item(&dict, key);
         Ok(Self(RecentEntryInput {
             path_lower: get_required("path_lower")?.extract()?,
             timestamp: get_required("timestamp")?.extract()?,
@@ -278,7 +279,7 @@ fn build_records<'py>(
     path_exempt_fn: Bound<'py, PyAny>,
     status_idx_list: Vec<i32>,
 ) -> PyResult<Vec<Py<PyDict>>> {
-    let timestamps: Vec<PyObject> = parsed
+    let timestamps: Vec<Py<PyAny>> = parsed
         .iter()
         .map(|record| record.timestamp.clone_ref(py))
         .collect();
@@ -370,7 +371,7 @@ fn extract_features<'py>(
 ) -> PyResult<Vec<Py<PyDict>>> {
     let core_records: Vec<FeatureRecordInput> = records.into_iter().map(|r| r.0).collect();
     let output: Vec<FeatureRecordOutput> =
-        py.allow_threads(move || core_extract_features(core_records, static_keywords));
+        py.detach(move || core_extract_features(core_records, static_keywords));
     output
         .into_iter()
         .map(|rec| feature_output_to_pydict(py, &rec))
@@ -384,7 +385,7 @@ fn extract_training_features<'py>(
     static_keywords: Vec<String>,
 ) -> PyResult<Vec<Py<PyDict>>> {
     let core_records: Vec<FeatureRecordInput> = records.into_iter().map(|r| r.0).collect();
-    py.allow_threads(move || core_extract_training_features(core_records, static_keywords))
+    py.detach(move || core_extract_training_features(core_records, static_keywords))
         .into_iter()
         .map(|rec| feature_output_to_pydict(py, &rec))
         .collect()
@@ -400,7 +401,7 @@ fn extract_raw_features<'py>(
     static_keywords: Vec<String>,
 ) -> PyResult<Vec<Py<PyDict>>> {
     let records = records.into_iter().map(|record| record.0).collect();
-    let output = py.allow_threads(move || {
+    let output = py.detach(move || {
         core_extract_raw_features(
             records,
             static_keywords,
@@ -417,6 +418,7 @@ fn extract_raw_features<'py>(
 }
 
 #[pyfunction]
+#[pyo3(signature = (records, static_keywords, state=None))]
 fn extract_features_batch_with_state<'py>(
     py: Python<'py>,
     records: Vec<PyFeatureRecordInput>,
@@ -424,10 +426,10 @@ fn extract_features_batch_with_state<'py>(
     state: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyDict>> {
     let state_map = if let Some(state_any) = state {
-        let dict = state_any.downcast::<PyDict>()?;
+        let dict = state_any.cast::<PyDict>()?;
         match dict.get_item("timestamps_by_ip")? {
             Some(v) => {
-                let ts_dict = v.downcast::<PyDict>()?;
+                let ts_dict = v.cast::<PyDict>()?;
                 Some(FeatureState {
                     timestamps_by_ip: pydict_to_map(&ts_dict)?,
                 })
@@ -439,7 +441,7 @@ fn extract_features_batch_with_state<'py>(
     };
 
     let core_records: Vec<FeatureRecordInput> = records.into_iter().map(|r| r.0).collect();
-    let result: FeatureBatchResult = py.allow_threads(move || {
+    let result: FeatureBatchResult = py.detach(move || {
         core_extract_features_batch_with_state(core_records, static_keywords, state_map)
     });
 
@@ -449,9 +451,9 @@ fn extract_features_batch_with_state<'py>(
         .map(|rec| feature_output_to_pydict(py, rec))
         .collect::<PyResult<Vec<_>>>()?;
 
-    let result_dict = PyDict::new_bound(py);
+    let result_dict = PyDict::new(py);
     result_dict.set_item("features", features)?;
-    let state_dict = PyDict::new_bound(py);
+    let state_dict = PyDict::new(py);
     state_dict.set_item(
         "timestamps_by_ip",
         map_to_pydict(py, &result.state.timestamps_by_ip)?,
@@ -461,13 +463,14 @@ fn extract_features_batch_with_state<'py>(
 }
 
 #[pyfunction]
+#[pyo3(signature = (_static_keywords, _state=None))]
 fn finalize_feature_state<'py>(
     py: Python<'py>,
     _static_keywords: Vec<String>,
     _state: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyDict>> {
     let _ = core_finalize_feature_state();
-    let result = PyDict::new_bound(py);
+    let result = PyDict::new(py);
     let empty: Vec<Py<PyDict>> = Vec::new();
     result.set_item("features", empty)?;
     Ok(result.into())
@@ -485,7 +488,7 @@ fn analyze_recent_behavior<'py>(
     match result {
         None => Ok(None),
         Some(r) => {
-            let dict = PyDict::new_bound(py);
+            let dict = PyDict::new(py);
             dict.set_item("avg_kw_hits", r.avg_kw_hits)?;
             dict.set_item("max_404s", r.max_404s)?;
             dict.set_item("avg_burst", r.avg_burst)?;
@@ -535,7 +538,7 @@ impl NativeTrainingBatch {
         mut model: PyRefMut<'_, IsolationForest>,
     ) -> HashMap<String, (f64, f64, f64, usize)> {
         let inner = &mut model.inner;
-        py.allow_threads(|| {
+        py.detach(|| {
             let matrix: Vec<Vec<f64>> = self
                 .features
                 .iter()
@@ -583,7 +586,7 @@ fn extract_native_training_features(
 ) -> NativeTrainingBatch {
     let records = records.into_iter().map(|r| r.0).collect();
     NativeTrainingBatch {
-        features: py.allow_threads(|| {
+        features: py.detach(|| {
             core_extract_raw_features(
                 records,
                 static_keywords,
@@ -618,7 +621,7 @@ impl NativeTrainingBuilder {
         keywords: Vec<String>,
     ) {
         let records = records.into_iter().map(|r| r.0).collect();
-        let result = py.allow_threads(|| {
+        let result = py.detach(|| {
             core_extract_features_batch_with_state(records, keywords, self.state.take())
         });
         self.features.extend(result.features);
@@ -680,11 +683,11 @@ impl IsolationForest {
     }
 
     fn fit(&mut self, py: Python<'_>, data: Vec<Vec<f64>>) {
-        py.allow_threads(|| self.inner.fit(data));
+        py.detach(|| self.inner.fit(data));
     }
 
     fn retrain(&mut self, py: Python<'_>, data: Vec<Vec<f64>>) {
-        py.allow_threads(|| self.inner.retrain(data));
+        py.detach(|| self.inner.retrain(data));
     }
 
     fn anomaly_score(&self, point: Vec<f64>) -> f64 {
@@ -697,15 +700,15 @@ impl IsolationForest {
     }
 
     fn score_samples(&self, py: Python<'_>, data: Vec<Vec<f64>>) -> Vec<f64> {
-        py.allow_threads(|| self.inner.score_samples(&data))
+        py.detach(|| self.inner.score_samples(&data))
     }
 
     fn decision_function(&self, py: Python<'_>, data: Vec<Vec<f64>>) -> Vec<f64> {
-        py.allow_threads(|| self.inner.decision_function(&data))
+        py.detach(|| self.inner.decision_function(&data))
     }
 
     fn predict(&self, py: Python<'_>, data: Vec<Vec<f64>>) -> Vec<i32> {
-        py.allow_threads(|| self.inner.predict(&data))
+        py.detach(|| self.inner.predict(&data))
     }
 
     fn to_json<'py>(&self, py: Python<'py>) -> PyResult<Py<PyDict>> {
@@ -715,7 +718,7 @@ impl IsolationForest {
 
     #[staticmethod]
     fn from_json(obj: Bound<'_, PyAny>) -> PyResult<Self> {
-        let dict = obj.downcast::<PyDict>()?;
+        let dict = obj.cast::<PyDict>()?;
         let state = pydict_to_state(dict)?;
         Ok(Self {
             inner: CoreForest::from_state(state),
@@ -787,7 +790,7 @@ fn parse_contamination(value: Option<Bound<'_, PyAny>>) -> PyResult<Contaminatio
 }
 
 fn tree_state_to_pydict<'py>(py: Python<'py>, state: &IsolationTreeState) -> PyResult<Py<PyDict>> {
-    let dict = PyDict::new_bound(py);
+    let dict = PyDict::new(py);
     dict.set_item("depth", state.depth)?;
     dict.set_item("maxDepth", state.max_depth)?;
     dict.set_item("splitAttr", state.split_attr)?;
@@ -810,7 +813,7 @@ fn feature_output_to_pydict<'py>(
     py: Python<'py>,
     rec: &FeatureRecordOutput,
 ) -> PyResult<Py<PyDict>> {
-    let feature = PyDict::new_bound(py);
+    let feature = PyDict::new(py);
     feature.set_item("ip", rec.ip.clone())?;
     feature.set_item("path_len", rec.path_len)?;
     feature.set_item("kw_hits", rec.kw_hits)?;
@@ -822,7 +825,7 @@ fn feature_output_to_pydict<'py>(
 }
 
 fn feature_input_to_pydict<'py>(py: Python<'py>, rec: &FeatureRecordInput) -> PyResult<Py<PyDict>> {
-    let feature = PyDict::new_bound(py);
+    let feature = PyDict::new(py);
     feature.set_item("ip", rec.ip.clone())?;
     feature.set_item("path_lower", rec.path_lower.clone())?;
     feature.set_item("path_len", rec.path_len)?;
@@ -837,9 +840,9 @@ fn feature_input_to_pydict<'py>(py: Python<'py>, rec: &FeatureRecordInput) -> Py
 fn built_record_to_pydict<'py>(
     py: Python<'py>,
     rec: &BuiltFeatureRecord,
-    timestamp: Option<&PyObject>,
+    timestamp: Option<&Py<PyAny>>,
 ) -> PyResult<Py<PyDict>> {
-    let feature = PyDict::new_bound(py);
+    let feature = PyDict::new(py);
     feature.set_item("ip", rec.ip.clone())?;
     feature.set_item("path_len", rec.path_len)?;
     feature.set_item("path_lower", rec.path_lower.clone())?;
@@ -859,7 +862,7 @@ fn pydict_to_epoch_map(state: &Bound<'_, PyDict>) -> PyResult<HashMap<String, Ve
     let mut map = HashMap::new();
     for (k, v) in state.iter() {
         let key: String = k.extract()?;
-        let list = v.downcast::<PyList>()?;
+        let list = v.cast::<PyList>()?;
         let mut vals = Vec::with_capacity(list.len());
         for item in list.iter() {
             let epoch = item
@@ -907,7 +910,7 @@ fn feature_from_built_record(
 }
 
 fn state_to_pydict<'py>(py: Python<'py>, state: &IsolationForestState) -> PyResult<Py<PyDict>> {
-    let dict = PyDict::new_bound(py);
+    let dict = PyDict::new(py);
     dict.set_item("nEstimators", state.n_estimators)?;
     dict.set_item("maxSamples", max_samples_to_py(py, &state.max_samples))?;
     dict.set_item(
@@ -929,13 +932,12 @@ fn state_to_pydict<'py>(py: Python<'py>, state: &IsolationForestState) -> PyResu
         .map(|t| tree_state_to_pydict(py, t))
         .collect::<PyResult<Vec<_>>>()?;
     dict.set_item("trees", trees)?;
-    let feats = PyList::new_bound(
-        py,
-        state
-            .estimators_features
-            .iter()
-            .map(|v| PyList::new_bound(py, v.iter().copied())),
-    );
+    let feature_lists = state
+        .estimators_features
+        .iter()
+        .map(|v| PyList::new(py, v.iter().copied()))
+        .collect::<PyResult<Vec<_>>>()?;
+    let feats = PyList::new(py, feature_lists)?;
     dict.set_item("estimatorsFeatures", feats)?;
     Ok(dict.into())
 }
@@ -957,14 +959,14 @@ fn pydict_to_tree_state(dict: &Bound<'_, PyDict>) -> PyResult<IsolationTreeState
         .extract()?;
     let left = match dict.get_item("left")? {
         Some(v) if !v.is_none() => {
-            let ld = v.downcast::<PyDict>()?;
+            let ld = v.cast::<PyDict>()?;
             Some(Box::new(pydict_to_tree_state(&ld)?))
         }
         _ => None,
     };
     let right = match dict.get_item("right")? {
         Some(v) if !v.is_none() => {
-            let rd = v.downcast::<PyDict>()?;
+            let rd = v.cast::<PyDict>()?;
             Some(Box::new(pydict_to_tree_state(&rd)?))
         }
         _ => None,
@@ -1006,19 +1008,19 @@ fn pydict_to_state(dict: &Bound<'_, PyDict>) -> PyResult<IsolationForestState> {
     let trees_any = dict
         .get_item("trees")?
         .ok_or_else(|| PyErr::new::<PyKeyError, _>("trees".to_string()))?;
-    let trees_list = trees_any.downcast::<PyList>()?;
+    let trees_list = trees_any.cast::<PyList>()?;
     let mut trees = Vec::with_capacity(trees_list.len());
     for item in trees_list.iter() {
-        let tree_dict = item.downcast::<PyDict>()?;
+        let tree_dict = item.cast::<PyDict>()?;
         trees.push(pydict_to_tree_state(&tree_dict)?);
     }
     let feats_any = dict
         .get_item("estimatorsFeatures")?
         .ok_or_else(|| PyErr::new::<PyKeyError, _>("estimatorsFeatures".to_string()))?;
-    let feats_list = feats_any.downcast::<PyList>()?;
+    let feats_list = feats_any.cast::<PyList>()?;
     let mut estimators_features = Vec::with_capacity(feats_list.len());
     for item in feats_list.iter() {
-        let list = item.downcast::<PyList>()?;
+        let list = item.cast::<PyList>()?;
         let mut v = Vec::with_capacity(list.len());
         for idx in list.iter() {
             v.push(idx.extract::<usize>()?);
@@ -1044,25 +1046,36 @@ fn pydict_to_state(dict: &Bound<'_, PyDict>) -> PyResult<IsolationForestState> {
     })
 }
 
-fn max_samples_to_py<'py>(py: Python<'py>, value: &MaxSamples) -> PyObject {
-    match value {
-        MaxSamples::Auto => "auto".into_py(py),
-        MaxSamples::Int(v) => (*v as u64).into_py(py),
-        MaxSamples::Float(v) => (*v).into_py(py),
+/// A Rust value whose conversion to Python can't fail, as a Python object.
+fn py_value<'py, T>(py: Python<'py>, value: T) -> Py<PyAny>
+where
+    T: IntoPyObject<'py, Error = std::convert::Infallible>,
+{
+    match value.into_pyobject(py) {
+        Ok(object) => object.into_any().unbind(),
+        Err(never) => match never {},
     }
 }
 
-fn max_features_to_py<'py>(py: Python<'py>, value: &MaxFeatures) -> PyObject {
+fn max_samples_to_py<'py>(py: Python<'py>, value: &MaxSamples) -> Py<PyAny> {
     match value {
-        MaxFeatures::Int(v) => (*v as u64).into_py(py),
-        MaxFeatures::Float(v) => (*v).into_py(py),
+        MaxSamples::Auto => py_value(py, "auto"),
+        MaxSamples::Int(v) => py_value(py, *v as u64),
+        MaxSamples::Float(v) => py_value(py, *v),
     }
 }
 
-fn contamination_to_py<'py>(py: Python<'py>, value: &Contamination) -> PyObject {
+fn max_features_to_py<'py>(py: Python<'py>, value: &MaxFeatures) -> Py<PyAny> {
     match value {
-        Contamination::Auto => "auto".into_py(py),
-        Contamination::Fixed(v) => (*v).into_py(py),
+        MaxFeatures::Int(v) => py_value(py, *v as u64),
+        MaxFeatures::Float(v) => py_value(py, *v),
+    }
+}
+
+fn contamination_to_py<'py>(py: Python<'py>, value: &Contamination) -> Py<PyAny> {
+    match value {
+        Contamination::Auto => py_value(py, "auto"),
+        Contamination::Fixed(v) => py_value(py, *v),
     }
 }
 

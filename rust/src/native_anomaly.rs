@@ -52,7 +52,7 @@ impl NativeAnomalyHistory {
         self.entries.iter().all(|entry| entry.1.is_ascii())
     }
     fn trimmed(&self, py: Python<'_>, now: f64, window: f64) -> Self {
-        py.allow_threads(|| Self {
+        py.detach(|| Self {
             entries: self
                 .entries
                 .iter()
@@ -81,7 +81,7 @@ impl NativeAnomalyHistory {
         include_features: bool,
     ) -> (i32, Option<Vec<f64>>) {
         let forest = &model.inner;
-        py.allow_threads(|| {
+        py.detach(|| {
             let lower = path.to_ascii_lowercase();
             let hits = if kw_check {
                 keywords
@@ -155,7 +155,7 @@ impl NativeAnomalyHistory {
                 kw_check,
             })
             .collect();
-        Ok(py.allow_threads(|| analyze_recent_behavior(entries, keywords).map(stats)))
+        Ok(py.detach(|| analyze_recent_behavior(entries, keywords).map(stats)))
     }
 }
 
@@ -176,7 +176,7 @@ fn analyze_recent_tuples(
             },
         )
         .collect();
-    py.allow_threads(|| analyze_recent_behavior(entries, keywords).map(stats))
+    py.detach(|| analyze_recent_behavior(entries, keywords).map(stats))
 }
 
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {

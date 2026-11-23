@@ -100,7 +100,7 @@ impl TrainingEvidence {
 impl TrainingEvidence {
     #[new]
     fn new(py: Python<'_>, directory: String) -> PyResult<Self> {
-        py.allow_threads(|| Self::open(directory))
+        py.detach(|| Self::open(directory))
     }
     #[getter]
     fn had_history(&self) -> bool {
@@ -111,13 +111,13 @@ impl TrainingEvidence {
         py: Python<'_>,
         records: Vec<(String, String, String, String)>,
     ) -> PyResult<Vec<usize>> {
-        py.allow_threads(|| self.observe(records))
+        py.detach(|| self.observe(records))
     }
     fn can_block(&self, ip: &str) -> bool {
         self.allowed(ip)
     }
     fn commit(&mut self, py: Python<'_>, ip: String) -> PyResult<()> {
-        py.allow_threads(|| self.persist(ip))
+        py.detach(|| self.persist(ip))
     }
     fn close(&mut self) {
         self.lock.take();

@@ -34,7 +34,7 @@ pub fn policy_path_exempt(
     rules: Vec<(String, Option<String>)>,
     allow_prefix: bool,
 ) -> Option<bool> {
-    py.allow_threads(|| {
+    py.detach(|| {
         for (exact, wildcard) in rules {
             if let Some(pattern) = wildcard {
                 if matches(&path, &pattern)? {
@@ -108,7 +108,7 @@ pub fn policy_ip_exempt(
     patterns: Vec<String>,
     networks: Vec<(String, u8)>,
 ) -> Option<bool> {
-    py.allow_threads(|| ip_exempt(&ip, &ips, &patterns, &networks))
+    py.detach(|| ip_exempt(&ip, &ips, &patterns, &networks))
 }
 
 #[pyfunction]
@@ -117,7 +117,7 @@ pub fn policy_path_rule_index(
     path: String,
     prefixes: Vec<String>,
 ) -> Option<usize> {
-    py.allow_threads(|| {
+    py.detach(|| {
         let mut best = None;
         let mut best_length = 0;
         for (index, prefix) in prefixes.iter().enumerate() {
@@ -143,7 +143,7 @@ pub fn policy_route_plan(
     exempt: HashSet<String>,
     required: HashSet<String>,
 ) -> (Option<usize>, HashSet<String>) {
-    py.allow_threads(|| {
+    py.detach(|| {
         // Caller supplies the compiled longest-prefix-first list; first tie wins.
         let index = rules.iter().position(|(prefix, _)| {
             path == prefix.trim_end_matches('/') || path.starts_with(prefix)

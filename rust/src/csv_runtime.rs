@@ -108,7 +108,7 @@ fn indexed_row<'a>(snapshot: &'a mut Snapshot, field: &str, key: &str) -> Option
 
 #[pyfunction]
 pub fn csv_read(py: Python<'_>, path: String, use_cache: bool) -> PyResult<Table> {
-    py.allow_threads(|| with_table(&path, use_cache, |table| Ok(table.clone())))
+    py.detach(|| with_table(&path, use_cache, |table| Ok(table.clone())))
 }
 
 #[pyfunction]
@@ -119,7 +119,7 @@ pub fn csv_contains(
     key: String,
     use_cache: bool,
 ) -> PyResult<bool> {
-    py.allow_threads(|| {
+    py.detach(|| {
         with_snapshot(&path, use_cache, |snapshot| {
             Ok(indexed_row(snapshot, &key_field, &key).is_some())
         })
@@ -133,7 +133,7 @@ pub fn csv_read_set(
     key_field: String,
     use_cache: bool,
 ) -> PyResult<HashSet<String>> {
-    py.allow_threads(|| {
+    py.detach(|| {
         with_table(&path, use_cache, |(headers, rows)| {
             let Some(index) = headers.iter().position(|h| h == &key_field) else {
                 return Ok(HashSet::new());
@@ -156,7 +156,7 @@ pub fn csv_read_dict(
     value_field: String,
     use_cache: bool,
 ) -> PyResult<HashMap<String, String>> {
-    py.allow_threads(|| {
+    py.detach(|| {
         with_table(&path, use_cache, |(headers, rows)| {
             let Some(index) = headers.iter().position(|h| h == &key_field) else {
                 return Ok(HashMap::new());
@@ -199,7 +199,7 @@ pub fn csv_log_append(
     row: Vec<String>,
     durable: bool,
 ) -> PyResult<()> {
-    py.allow_threads(|| cached_log_append(&path, &headers, &row, durable))
+    py.detach(|| cached_log_append(&path, &headers, &row, durable))
 }
 
 static LOG_FILES: OnceLock<Mutex<HashMap<(u32, PathBuf), Arc<Mutex<File>>>>> = OnceLock::new();
@@ -308,8 +308,9 @@ fn cached_log_append(
 }
 
 #[pyfunction]
+#[pyo3(signature = (path=None))]
 pub fn csv_log_close(py: Python<'_>, path: Option<String>) -> PyResult<()> {
-    py.allow_threads(|| {
+    py.detach(|| {
         let absolute = path
             .map(|path| {
                 let path = PathBuf::from(path);
@@ -338,7 +339,7 @@ pub fn csv_log_append_uncached(
     row: Vec<String>,
     durable: bool,
 ) -> PyResult<()> {
-    py.allow_threads(|| {
+    py.detach(|| {
         let path = Path::new(&path);
         if let Some(parent) = path.parent().filter(|parent| !parent.is_dir()) {
             std::fs::create_dir_all(parent).map_err(error)?;
@@ -383,7 +384,7 @@ fn write_csv(
     append: bool,
     durable: bool,
 ) -> PyResult<()> {
-    py.allow_threads(|| {
+    py.detach(|| {
         let path = Path::new(&path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(error)?;
@@ -428,7 +429,7 @@ fn write_csv(
 
 #[pyfunction]
 pub fn csv_headers_match(py: Python<'_>, path: String, expected: Vec<String>) -> PyResult<bool> {
-    py.allow_threads(|| headers_match(&path, &expected))
+    py.detach(|| headers_match(&path, &expected))
 }
 
 /// Compares only the header record, read from at most the first 64 KiB, so checking an
@@ -455,7 +456,7 @@ pub fn csv_lookup(
     key_field: String,
     key: String,
 ) -> PyResult<Option<HashMap<String, String>>> {
-    py.allow_threads(|| {
+    py.detach(|| {
         with_snapshot(&path, true, |snapshot| {
             let row = indexed_row(snapshot, &key_field, &key).cloned();
             Ok(row.map(|row| snapshot.1 .0.iter().cloned().zip(row).collect()))
@@ -524,7 +525,7 @@ pub fn csv_blocklist_check(
     ip: String,
     now: f64,
 ) -> PyResult<bool> {
-    py.allow_threads(|| {
+    py.detach(|| {
         let state = with_snapshot(&path, true, |snapshot| {
             Ok(indexed_row(snapshot, "ip", &ip).map(|row| {
                 row.get(8)
@@ -570,7 +571,7 @@ pub fn csv_blocklist_block(
     now: f64,
     duration: Option<i64>,
 ) -> PyResult<()> {
-    py.allow_threads(|| {
+    py.detach(|| {
         mutate(&path, &headers, |rows| {
             let old = rows.iter().rev().find(|r| r.first() == Some(&ip));
             let old = old.filter(|r| {
@@ -635,7 +636,7 @@ pub fn csv_remove_key(
     headers: Vec<String>,
     key: String,
 ) -> PyResult<()> {
-    py.allow_threads(|| {
+    py.detach(|| {
         mutate(&path, &headers, |rows| {
             rows.retain(|r| r.first() != Some(&key));
             Ok(())
@@ -645,7 +646,7 @@ pub fn csv_remove_key(
 
 #[pyfunction]
 pub fn csv_kv_get(py: Python<'_>, path: String, key: String, now: f64) -> PyResult<Option<String>> {
-    py.allow_threads(|| {
+    py.detach(|| {
         if !Path::new(&path).exists() {
             return Ok(None);
         }
@@ -670,7 +671,7 @@ pub fn csv_kv_get(py: Python<'_>, path: String, key: String, now: f64) -> PyResu
 
 #[pyfunction]
 pub fn csv_kv_keys(py: Python<'_>, path: String, now: f64) -> PyResult<Vec<String>> {
-    py.allow_threads(|| {
+    py.detach(|| {
         if !Path::new(&path).exists() {
             return Ok(Vec::new());
         }
@@ -701,7 +702,7 @@ pub fn csv_kv_update(
     expires_at: Option<f64>,
     now: f64,
 ) -> PyResult<bool> {
-    py.allow_threads(|| {
+    py.detach(|| {
         let path = Path::new(&path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(error)?;
@@ -776,7 +777,7 @@ pub fn csv_rate_consume(
     max_requests: i64,
     flood: i64,
 ) -> PyResult<(String, usize, Vec<f64>)> {
-    py.allow_threads(|| {
+    py.detach(|| {
         mutate(&path, &kv_headers(), |rows| {
             let old = kv_value(rows, &key, now);
             let timestamps = old
@@ -842,7 +843,7 @@ pub fn csv_runtime_list_update(
     reason: String,
     now: f64,
 ) -> PyResult<bool> {
-    py.allow_threads(|| {
+    py.detach(|| {
         mutate(&path, &kv_headers(), |rows| {
             let (key, field, remove) = match operation.as_str() {
                 "add_ip" => ("exemptions", "ips", false),
@@ -949,7 +950,7 @@ pub fn csv_policy_list_update(
         _ => value.trim().to_owned(),
     };
     let key = normalize(&key);
-    py.allow_threads(|| {
+    py.detach(|| {
         mutate(&path, &headers, |rows| {
             let matches = |r: &Vec<String>| r.first().is_some_and(|v| normalize(v) == key);
             if remove {
@@ -980,7 +981,7 @@ pub fn csv_runtime_block(
     let info = info_json
         .map(|v| serde_json::from_str::<serde_json::Value>(&v).map_err(error))
         .transpose()?;
-    py.allow_threads(|| mutate(&path, &kv_headers(), |rows| {
+    py.detach(|| mutate(&path, &kv_headers(), |rows| {
         let key = format!("blocked:{ip}");
         let old = kv_value(rows, &key, now);
         let score = old.get("score").and_then(|v| v.as_i64()).unwrap_or(if old.is_string() {100} else {0});
@@ -1022,7 +1023,7 @@ pub fn csv_runtime_keyword(
     remove: bool,
     now: f64,
 ) -> PyResult<()> {
-    py.allow_threads(|| {
+    py.detach(|| {
         mutate(&path, &kv_headers(), |rows| {
             let value = kv_value(rows, "keyword_counts", now);
             let mut counts = value.as_object().cloned().unwrap_or_default();
@@ -1055,7 +1056,7 @@ pub fn csv_runtime_keywords_update(
     removed: HashSet<String>,
     now: f64,
 ) -> PyResult<()> {
-    py.allow_threads(|| {
+    py.detach(|| {
         mutate(&path, &kv_headers(), |rows| {
             let value = kv_value(rows, "keyword_counts", now);
             let mut counts = value.as_object().cloned().unwrap_or_default();
@@ -1089,7 +1090,7 @@ pub fn csv_set_update(
     row: Vec<String>,
     remove: bool,
 ) -> PyResult<()> {
-    py.allow_threads(|| {
+    py.detach(|| {
         mutate(&path, &headers, |rows| {
             if remove {
                 rows.retain(|r| r.first() != Some(&key));
@@ -1125,7 +1126,7 @@ pub fn csv_keyword_apply(
         prefixes, malicious,
     );
     if learning && !decision.1.is_empty() {
-        py.allow_threads(|| {
+        py.detach(|| {
             mutate(&file, &["keyword".into(), "added_date".into()], |rows| {
                 let mut present: HashSet<String> = rows
                     .iter()
@@ -1174,9 +1175,9 @@ pub fn csv_keyword_apply_from_store(
             )?;
         }
         let values = csv_read_set(py, file.clone(), "keyword".into(), true)?;
-        let raw = PySet::new_bound(py, values.iter())?;
-        let copied = py.import_bound("builtins")?.getattr("set")?.call1((raw,))?;
-        let copied = copied.downcast::<PySet>()?;
+        let raw = PySet::new(py, values.iter())?;
+        let copied = py.import("builtins")?.getattr("set")?.call1((raw,))?;
+        let copied = copied.cast::<PySet>()?;
         let count = if top_n < 0 {
             copied
                 .len()
@@ -1207,7 +1208,7 @@ pub fn csv_keywords_update(
     added: Vec<String>,
     removed: HashSet<String>,
 ) -> PyResult<()> {
-    py.allow_threads(|| {
+    py.detach(|| {
         mutate(&path, &["keyword".into(), "added_date".into()], |rows| {
             rows.retain(|row| !row.first().is_some_and(|key| removed.contains(key.trim())));
             let mut present: HashSet<String> = rows
