@@ -106,6 +106,7 @@ public final class PathManifestCore {
                 if (existing == null) {
                     routeMap.put(path, fresh);
                 } else {
+                    addView(existing, fresh);
                     TreeSet<String> methods = new TreeSet<>();
                     addStrings(methods, existing.get("methods"));
                     addStrings(methods, fresh.get("methods"));
@@ -263,10 +264,37 @@ public final class PathManifestCore {
             routes.put(path, fresh);
             return;
         }
+        addView(existing, fresh);
         TreeSet<String> methods = new TreeSet<>();
         addStrings(methods, existing.get("methods"));
         addStrings(methods, fresh.get("methods"));
         existing.put("methods", List.copyOf(methods));
+    }
+
+    /** Every handler serving a path, as views, so each one's inputs are linked to it. */
+    @SuppressWarnings("unchecked")
+    private static void addView(Map<String, Object> existing, Map<String, Object> fresh) {
+        // Each view and the methods it serves, so its inputs are linked to it and its methods.
+        Map<String, Set<String>> viewMethods = new TreeMap<>();
+        for (Map<String, Object> entry : List.of(existing, fresh)) {
+            Map<String, Object> known = entry.get("view_methods") instanceof Map<?, ?> saved
+                    ? (Map<String, Object>) saved : Map.of(String.valueOf(entry.getOrDefault("view", "")), entry.getOrDefault("methods", List.of()));
+            known.forEach((view, methods) -> {
+                if (!view.isEmpty()) addStrings(viewMethods.computeIfAbsent(view, key -> new TreeSet<>()), methods);
+            });
+        }
+        if (viewMethods.size() > 1) {
+            existing.put("views", List.copyOf(viewMethods.keySet()));
+            Map<String, Object> saved = new TreeMap<>();
+            viewMethods.forEach((view, methods) -> saved.put(view, List.copyOf(methods)));
+            existing.put("view_methods", saved);
+        }
+    }
+
+    /** Every view serving a route: its views when several share the path, else its view. */
+    public static List<String> views(Map<?, ?> entry) {
+        if (entry.get("views") instanceof List<?> listed && !listed.isEmpty()) return listed.stream().map(String::valueOf).toList();
+        return List.of(entry.get("view") == null ? "" : String.valueOf(entry.get("view")));
     }
 
     private static Map<String, Object> routeEntry(RouteInfo route, String path) {

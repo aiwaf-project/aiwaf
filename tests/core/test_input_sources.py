@@ -334,3 +334,67 @@ def test_sources_from_environment(tmp_path, monkeypatch):
     found = sources_from_environment(str(tmp_path))
     assert set(found) == {"declarations", "openapi", "observations"}
     assert found["declarations"]["/a"]["inputs"] == {"q": "text"}
+
+
+def test_fastapi_dict_bodies_are_open():
+    from fastapi import Body, FastAPI
+
+    app = FastAPI()
+
+    @app.post("/events")
+    def events(body: dict = Body(...)):
+        return body
+
+    @app.post("/any")
+    def anything(body: typing.Any = Body(...)):
+        return body
+
+    @app.post("/mapping")
+    def mapping(body: typing.Mapping[str, int] = Body(...)):
+        return body
+
+    for path in ("/events", "/any", "/mapping"):
+        route = next(item for item in app.routes if getattr(item, "path", None) == path)
+        found = input_sources.fastapi_inputs(route)
+        assert found["inputs"] == {}, path
+        assert [reason["code"] for reason in found["reasons"]] == ["container_whole"], path
+
+
+def test_closure_schemas_of_a_views_own_decorators():
+    import functools
+
+    import marshmallow as ma
+    from pydantic import BaseModel
+
+    class Body(BaseModel):
+        name: str
+        qty: int
+
+    class Query(ma.Schema):
+        page = ma.fields.Int()
+
+    @dataclasses.dataclass
+    class Settings:
+        debug: bool = False
+
+    def validate(schema, where="json", settings=Settings()):
+        def decorate(view):
+            @functools.wraps(view)
+            def wrapper(*args, **kwargs):
+                return view(*args, **kwargs) if schema and settings else None
+            return wrapper
+        return decorate
+
+    @validate(Body)
+    @validate(Query(), "query")
+    def view():
+        return None
+
+    assert input_sources.closure_inputs(view)["inputs"] == {"name": "text", "qty": "int", "page": "int"}
+    assert input_sources.closure_inputs(validate(Settings)(lambda: None)) is None
+    assert input_sources.closure_inputs(lambda: None) is None
+
+    class Items:
+        post = view
+
+    assert input_sources.view_arguments(type("V", (), {"view_class": Items})(), ["POST", "GET"])["inputs"]["qty"] == "int"

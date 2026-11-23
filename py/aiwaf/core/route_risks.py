@@ -33,18 +33,27 @@ SCHEMA_MODES = ("enforce", "monitor", "off")
 # engine's own: CSRF tokens, utm_*, fbclid, gclid, msclkid and _.
 STRICT_SETTING = "AIWAF_STRICT_INPUTS"
 STRICT_ALLOW_SETTING = "AIWAF_STRICT_INPUTS_ALLOW"
+# Path prefixes strict inputs skips, as /webhooks/ or /legacy/*.
+STRICT_EXEMPT_SETTING = "AIWAF_STRICT_INPUTS_EXEMPT"
 STRICT_WARNING = ("Strict inputs need aiwaf-rust 0.2.16 or newer, so they aren't checked. "
                   "Run: pip install -U aiwaf-rust")
+STRICT_EXEMPT_WARNING = ("AIWAF_STRICT_INPUTS_EXEMPT needs aiwaf-rust 0.2.17 or newer, so strict inputs aren't checked "
+                         "rather than checked on exempt paths. Run: pip install -U aiwaf-rust")
 
 
-def strict_inputs(value: Any = None, allow: Any = None) -> Optional[dict]:
-    """{"allow": [...]} when strict inputs is on (the setting, or AIWAF_STRICT_INPUTS), else None."""
+def _names(value: Any, setting: str) -> list[str]:
+    listed = value if value is not None else os.getenv(setting, "")
+    names = listed if isinstance(listed, (list, tuple, set)) else str(listed).split(",")
+    return [str(name).strip() for name in names if str(name).strip()]
+
+
+def strict_inputs(value: Any = None, allow: Any = None, exempt: Any = None) -> Optional[dict]:
+    """{"allow": [...], "exempt": [...]} when strict inputs is on (the setting, or
+    AIWAF_STRICT_INPUTS), else None."""
     raw = value if value is not None else os.getenv(STRICT_SETTING, "")
     if not (raw is True or str(raw).strip().lower() in {"1", "true", "yes", "on"}):
         return None
-    listed = allow if allow is not None else os.getenv(STRICT_ALLOW_SETTING, "")
-    names = listed if isinstance(listed, (list, tuple, set)) else str(listed).split(",")
-    return {"allow": [str(name).strip() for name in names if str(name).strip()]}
+    return {"allow": _names(allow, STRICT_ALLOW_SETTING), "exempt": _names(exempt, STRICT_EXEMPT_SETTING)}
 
 # The operations a saved finding can name. The rules for each run in aiwaf-rust.
 SINKS = (
@@ -67,7 +76,11 @@ class RouteRisks:
         # Strict inputs ride in the manifest the engine gets.
         given = {**manifest, "strict_inputs": strict} if strict and isinstance(manifest, Mapping) else manifest
         self._checker = rust().RouteRiskChecker(json.dumps(given if isinstance(given, Mapping) else None))
-        if strict and not getattr(self._checker, "strict", False):
+        if strict and strict.get("exempt") and not getattr(self._checker, "strict_exempt", False):
+            # An older engine would check the exempt paths too: better none at all.
+            SCHEMA_LOGGER.warning(STRICT_EXEMPT_WARNING)
+            self._checker = rust().RouteRiskChecker(json.dumps(manifest if isinstance(manifest, Mapping) else None))
+        elif strict and not getattr(self._checker, "strict", False):
             SCHEMA_LOGGER.warning(STRICT_WARNING)
         routes = manifest.get("routes") if isinstance(manifest, Mapping) else None
         self.has_inputs = isinstance(routes, Mapping) and any(
@@ -83,11 +96,14 @@ class RouteRisks:
         events = self._checker.inspect(str(path or "/"), str(query or ""), _as_bytes(body))
         return [dict(zip(("route", "sink", "input", "rule", "confidence"), event)) for event in events]
 
-    def review(self, path: str, query: Any, body: Any, max_bytes: int, found: Optional[str]) -> Optional[tuple]:
+    def review(self, path: str, query: Any, body: Any, max_bytes: int, found: Optional[str], method: str = "") -> Optional[tuple]:
         """("mismatch", route, input, type), ("unexpected", route, input, ""), ("relax", route, rule,
-        ""), or None. See aiwaf-rust."""
+        ""), or None. See aiwaf-rust. With method, strict inputs check that method's own list."""
         if isinstance(query, (bytes, bytearray)):
             query = bytes(query).decode("utf-8", errors="replace")
+        by_method = getattr(self._checker, "review_method", None)
+        if method and by_method is not None:
+            return by_method(str(method), str(path or "/"), str(query or ""), _as_bytes(body), int(max_bytes), found)
         return self._checker.review(str(path or "/"), str(query or ""), _as_bytes(body), int(max_bytes), found)
 
     def review_path(self, path: str, max_bytes: int, found: str) -> Optional[tuple]:
@@ -106,7 +122,7 @@ MODES = ("block", "log", "off")
 
 
 def observer_for(mode: Any, manifest_path: Any, path: str, method: str = "", schema_mode: Any = None,
-                 strict: Any = None, strict_allow: Any = None):
+                 strict: Any = None, strict_allow: Any = None, strict_exempt: Any = None):
     """Return a callable taking (query, body), or None when there's nothing to check.
 
     The callable returns a blocking Finding in block mode, and None otherwise. Its ``review``
@@ -122,7 +138,7 @@ def observer_for(mode: Any, manifest_path: Any, path: str, method: str = "", sch
     if selected == "off" and schema == "off":
         return None
     location = str(manifest_path or DEFAULT_MANIFEST_PATH)
-    strictness = strict_inputs(strict, strict_allow) if schema != "off" else None
+    strictness = strict_inputs(strict, strict_allow, strict_exempt) if schema != "off" else None
     key = (location, json.dumps(strictness, sort_keys=True))
     risks = _cache.get(key)
     if risks is None:
@@ -147,7 +163,7 @@ def observer_for(mode: Any, manifest_path: Any, path: str, method: str = "", sch
 
     def review(query: Any, body: Any, finding: Optional[Finding], max_bytes: int) -> Optional[Finding]:
         found = finding.rule if finding is not None and finding.status == 403 else None
-        return decide(lambda: risks.review(path, query, body, max_bytes, found), finding)
+        return decide(lambda: risks.review(path, query, body, max_bytes, found, str(method or "")), finding)
 
     def review_path(request_path: str, finding: Finding, max_bytes: int) -> Optional[Finding]:
         if finding.status != 403:
@@ -208,13 +224,20 @@ def _view_matches(view: str, entry: str, filename: str) -> bool:
     return stem[-1] == modules[-1] or (stem[-1] == "__init__" and len(stem) > 1 and stem[-2] == modules[-1])
 
 
-def _routes_for(finding: Mapping[str, Any], routes: Mapping[str, Any]) -> list[str]:
+def _views(data: Mapping[str, Any]) -> list[str]:
+    """Every view serving a route: its views when several share the path, else its view."""
+    views = data.get("views")
+    return [str(view) for view in views] if isinstance(views, list) and views else [str(data.get("view", ""))]
+
+
+def _matching_views(finding: Mapping[str, Any], data: Mapping[str, Any]) -> list[str]:
     entry = str(finding.get("function", "")).split(" -> ")[0]
-    return [
-        path for path, data in routes.items()
-        if isinstance(data, Mapping) and _view_matches(str(data.get("view", "")), entry,
-                                                       str(finding.get("entry_file") or finding.get("file", "")))
-    ]
+    filename = str(finding.get("entry_file") or finding.get("file", ""))
+    return [view for view in _views(data) if _view_matches(view, entry, filename)]
+
+
+def _routes_for(finding: Mapping[str, Any], routes: Mapping[str, Any]) -> list[str]:
+    return [path for path, data in routes.items() if isinstance(data, Mapping) and _matching_views(finding, data)]
 
 
 def apply_report(report: Mapping[str, Any], manifest: dict, sources: Optional[Mapping[str, Any]] = None) -> dict[str, int]:
@@ -228,7 +251,7 @@ def apply_report(report: Mapping[str, Any], manifest: dict, sources: Optional[Ma
         raise ValueError("The manifest has no routes")
     for data in routes.values():
         if isinstance(data, dict):
-            for key in ("injection_risks", "inputs", "inputs_complete", "inputs_incomplete"):
+            for key in ("injection_risks", "inputs", "inputs_complete", "inputs_incomplete", "inputs_by_method", "inputs_nested"):
                 data.pop(key, None)
     linked, unlinked = 0, 0
     collected: dict[str, dict[tuple, dict[str, str]]] = {}
@@ -243,9 +266,29 @@ def apply_report(report: Mapping[str, Any], manifest: dict, sources: Optional[Ma
         routes[path]["injection_risks"] = [risks[key] for key in sorted(risks)]
     # What each route reads, with types. A route whose views weren't all found gets none.
     typed = 0
+    read: dict[str, set] = {}
+    claims: dict[str, dict[str, set]] = {}
     for entry in report.get("inputs", ()):
         for path in _routes_for(entry, routes):
             merge_into(routes, path, entry)
+            matched = _matching_views(entry, routes[path])
+            read.setdefault(path, set()).update(matched)
+            # The names each method's views read, so strict inputs can check each method's own.
+            view_methods = routes[path].get("view_methods") or {}
+            for view in matched:
+                for method in view_methods.get(view, routes[path].get("methods") or ()):
+                    claims.setdefault(path, {}).setdefault(str(method).upper(), set()).update(entry["inputs"])
+    for path, methods in claims.items():
+        routes[path]["_input_methods"] = {method: sorted(names) for method, names in methods.items()}
+    # A path several views serve is only complete when every one's code was read.
+    for path, seen in read.items():
+        data = routes[path]
+        for view in sorted(set(_views(data)) - seen):
+            data["inputs_complete"] = False
+            reasons = data.setdefault("inputs_incomplete", [])
+            reason = {"code": "unread_view", "detail": f"{view} also serves this path, and its code wasn't found"}
+            if reason not in reasons:
+                reasons.append(reason)
     completeness = input_sources.finalize(routes, **dict(sources or {}))
     for data in routes.values():
         if isinstance(data, dict) and "inputs" in data:

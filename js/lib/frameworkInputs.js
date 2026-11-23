@@ -421,8 +421,9 @@ function closureValues(fn) {
     const own = target && call('Runtime.getProperties', { objectId: target.result.objectId, ownProperties: true });
     const scopes = own && (own.internalProperties || []).find(item => item.name === '[[Scopes]]');
     const list = scopes && call('Runtime.getProperties', { objectId: scopes.value.objectId });
-    // Named factories' scopes, as Closure (validate); a bare Closure is the module's own.
-    const closures = ((list && list.result) || []).filter(item => /^Closure \(/.test(String(item.value && item.value.description)));
+    // Named factories' scopes, as Closure (validate), and block scopes in them; a bare Closure is
+    // the module's own.
+    const closures = ((list && list.result) || []).filter(item => /^(?:Closure \(|Block)/.test(String(item.value && item.value.description)));
     for (const scope of closures) {
       const variables = call('Runtime.getProperties', { objectId: scope.value.objectId });
       for (const variable of (variables && variables.result) || []) {

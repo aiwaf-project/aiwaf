@@ -405,6 +405,12 @@ impl RouteRiskChecker {
         self.risks.strict()
     }
 
+    /// Whether this engine skips strict inputs' exempt paths; an older one would check them.
+    #[getter]
+    fn strict_exempt(&self) -> bool {
+        self.risks.strict_exempt()
+    }
+
     /// Reviews a request against its route's saved inputs, after the general check found
     /// `found` (or nothing). Returns ("mismatch", route, input, type), ("unexpected", route,
     /// input, ""), ("relax", route, rule, ""), or None to keep the general check's answer.
@@ -420,6 +426,28 @@ impl RouteRiskChecker {
     ) -> Option<(String, String, String, String)> {
         use aiwaf_core::route_risks::Review;
         py.detach(|| match self.risks.review(path, query, &body, max_bytes, found.as_deref())? {
+            Review::Mismatch { route, input, kind } => Some(("mismatch".into(), route, input, kind)),
+            Review::Unexpected { route, input } => Some(("unexpected".into(), route, input, String::new())),
+            Review::Relax { route, rule } => Some(("relax".into(), route, rule, String::new())),
+        })
+    }
+
+    /// As `review`, for a request with this method: strict inputs check the names that method
+    /// reads when the manifest saved them. An engine without this method checks the whole list.
+    #[pyo3(signature = (method, path, query, body, max_bytes, found=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn review_method(
+        &self,
+        py: Python<'_>,
+        method: &str,
+        path: &str,
+        query: &str,
+        body: Vec<u8>,
+        max_bytes: usize,
+        found: Option<String>,
+    ) -> Option<(String, String, String, String)> {
+        use aiwaf_core::route_risks::Review;
+        py.detach(|| match self.risks.review_method(method, path, query, &body, max_bytes, found.as_deref())? {
             Review::Mismatch { route, input, kind } => Some(("mismatch".into(), route, input, kind)),
             Review::Unexpected { route, input } => Some(("unexpected".into(), route, input, String::new())),
             Review::Relax { route, rule } => Some(("relax".into(), route, rule, String::new())),

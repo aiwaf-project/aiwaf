@@ -53,6 +53,10 @@ public final class RouteSchemaCore {
             "csrfmiddlewaretoken", "csrf_token", "_csrf", "_token", "authenticity_token", "utm_*", "fbclid", "gclid", "msclkid", "_");
     private static final int MAX_LOGGED_NAME = 64;
 
+    private static String logged(String name) {
+        return name.codePoints().limit(MAX_LOGGED_NAME).collect(StringBuilder::new, StringBuilder::appendCodePoint, StringBuilder::append).toString();
+    }
+
     static boolean allowed(List<String> patterns, String name) {
         for (String pattern : patterns) {
             if (pattern.endsWith("*") ? name.startsWith(pattern.substring(0, pattern.length() - 1)) : pattern.equals(name)) return true;
@@ -63,8 +67,20 @@ public final class RouteSchemaCore {
     /** action is "mismatch" (with input and type), "unexpected" (with input) or "relax" (with rule). */
     public record Review(String action, String route, String input, String type, String rule) {}
 
+    /**
+     * byMethod: the names each method reads, when init could tell them apart
+     * (inputs_by_method); a method without its own list reads the route's whole list.
+     */
     private record Route(String path, RouteRiskCore.CompiledRoute compiled, Map<String, String> inputs, boolean complete,
-                         Set<String> reached, boolean unnamedRisk, List<String> pathTypes) {}
+                         Set<String> reached, boolean unnamedRisk, List<String> pathTypes, Map<String, Set<String>> byMethod,
+                         Map<String, Set<String>> nested) {
+        boolean reads(String method, String name) {
+            String upper = method == null ? "" : method.toUpperCase(Locale.ROOT);
+            Set<String> own = byMethod.get(upper);
+            if (own == null && upper.equals("HEAD")) own = byMethod.get("GET");
+            return own != null ? own.contains(name) : inputs.containsKey(name);
+        }
+    }
 
     /** The type a route segment's own syntax gives, as in <int:id> or {id:uuid}, or null. */
     static String segmentType(String segment) {
@@ -77,6 +93,44 @@ public final class RouteSchemaCore {
     }
 
     private record Field(String name, JsonNode value, String raw) {}
+
+    /**
+     * A multipart form's parts as fields, found by its opening boundary line: text parts with
+     * their values, file parts with null. Null when the body isn't one.
+     */
+    static List<Field> multipartFields(String text) {
+        if (text == null || !text.startsWith("--")) return null;
+        int lineEnd = text.indexOf("\r\n");
+        if (lineEnd < 3 || lineEnd > 202) return null;
+        String delimiter = "\r\n" + text.substring(0, lineEnd);
+        List<Field> fields = new ArrayList<>();
+        int at = lineEnd + 2;
+        while (at < text.length() && fields.size() < MAX_ITEMS) {
+            int end = text.indexOf(delimiter, at);
+            if (end < 0) end = text.length();
+            String chunk = text.substring(at, end);
+            int split = chunk.indexOf("\r\n\r\n");
+            String headers = split < 0 ? chunk : chunk.substring(0, split);
+            String name = MultipartPreview.param(headers, "name");
+            boolean file = MultipartPreview.param(headers, "filename") != null || MultipartPreview.param(headers, "filename*") != null;
+            if (name != null && !name.isEmpty()) {
+                String content = split < 0 ? "" : chunk.substring(split + 4);
+                fields.add(new Field(inputName(name), file ? com.fasterxml.jackson.databind.node.NullNode.getInstance() : TextNode.valueOf(content), name));
+            }
+            if (end + delimiter.length() >= text.length() || text.startsWith("--", end + delimiter.length())) break;
+            at = end + delimiter.length() + 2;
+        }
+        return fields;
+    }
+
+    /** A form name's key inside its input, as role in user[role]; null for a plain name. */
+    static String[] bracketKey(String raw) {
+        String key = decode(raw.split("=", 2)[0]);
+        int open = key.indexOf('[');
+        int close = key.indexOf(']', open + 1);
+        if (open <= 0 || close <= open + 1) return null;
+        return new String[] {key.substring(0, open), key.substring(open + 1, close)};
+    }
 
     private RouteSchemaCore() {}
 
@@ -121,14 +175,20 @@ public final class RouteSchemaCore {
     /** Saved inputs for one manifest, compiled for lookup by request path. */
     public static final class Schemas {
         private final List<Route> routes = new ArrayList<>();
-        /** Strict inputs' allowed names, when the manifest's strict_inputs turns it on. */
+        /** Strict inputs' allowed names, when the manifest's strict_inputs turns it on, and the path prefixes it skips. */
         private List<String> strict;
+        private final List<String> exempt = new ArrayList<>();
 
         public Schemas(Map<String, Object> manifest) {
             if (manifest != null && manifest.get("strict_inputs") instanceof Map<?, ?> settings) {
                 strict = new ArrayList<>(STRICT_ALLOWED);
                 if (settings.get("allow") instanceof List<?> names) {
                     for (Object name : names) if (name instanceof String text) strict.add(text);
+                }
+                if (settings.get("exempt") instanceof List<?> prefixes) {
+                    for (Object prefix : prefixes) {
+                        if (prefix instanceof String text && !text.replaceAll("\\*+$", "").isEmpty()) exempt.add(text.replaceAll("\\*+$", ""));
+                    }
                 }
             }
             if (manifest != null && manifest.get("routes") instanceof Map<?, ?> all) {
@@ -157,8 +217,26 @@ public final class RouteSchemaCore {
                     for (String segment : path.split("/")) {
                         if (!segment.isEmpty() && "<{:*".indexOf(segment.charAt(0)) >= 0) pathTypes.add(segmentType(segment));
                     }
+                    Map<String, Set<String>> byMethod = new HashMap<>();
+                    if (entry.get("inputs_by_method") instanceof Map<?, ?> methods) {
+                        for (Map.Entry<?, ?> method : methods.entrySet()) {
+                            if (!(method.getValue() instanceof List<?> names)) continue;
+                            Set<String> listed = new java.util.HashSet<>();
+                            for (Object name : names) if (name instanceof String text) listed.add(text);
+                            byMethod.put(String.valueOf(method.getKey()).toUpperCase(Locale.ROOT), listed);
+                        }
+                    }
+                    Map<String, Set<String>> nested = new HashMap<>();
+                    if (entry.get("inputs_nested") instanceof Map<?, ?> keys) {
+                        for (Map.Entry<?, ?> key : keys.entrySet()) {
+                            if (!(key.getValue() instanceof List<?> names)) continue;
+                            Set<String> listed = new java.util.HashSet<>();
+                            for (Object name : names) if (name instanceof String text) listed.add(text);
+                            nested.put(String.valueOf(key.getKey()), listed);
+                        }
+                    }
                     routes.add(new Route(path, RouteRiskCore.compileRoute(path), inputs,
-                            inputs != null && Boolean.TRUE.equals(entry.get("inputs_complete")), reached, unnamed, pathTypes));
+                            inputs != null && Boolean.TRUE.equals(entry.get("inputs_complete")), reached, unnamed, pathTypes, byMethod, nested));
                 }
             }
             // Exact routes win over routes with parameters, as in RouteRiskCore.
@@ -176,6 +254,11 @@ public final class RouteSchemaCore {
 
         /** The review of one request, after the general check found {@code found} (or null); null keeps its answer. */
         public Review review(String path, Map<String, String> query, String body, int budget, String found) {
+            return review("", path, query, body, budget, found);
+        }
+
+        /** As review, for a request with this method: strict inputs check that method's own list when saved. */
+        public Review review(String method, String path, Map<String, String> query, String body, int budget, String found) {
             Route route = routes.stream().filter(item -> item.compiled().pattern().matcher(path == null || path.isEmpty() ? "/" : path).matches())
                     .findFirst().orElse(null);
             if (route == null || route.inputs() == null) return null;
@@ -188,6 +271,7 @@ public final class RouteSchemaCore {
             }
             // The body as a form or JSON object; null when it's neither and can't be reviewed.
             List<Field> bodyFields = null;
+            boolean multipart = false;
             ObjectNode json = null;
             String text = body == null ? "" : body;
             String start = text.stripLeading();
@@ -203,6 +287,9 @@ public final class RouteSchemaCore {
                 } catch (Exception ex) {
                     bodyFields = null;
                 }
+            } else if (multipartFields(text) != null) {
+                bodyFields = multipartFields(text);
+                multipart = true;
             } else if (text.contains("=") && !start.startsWith("[") && !start.startsWith("<") && !start.startsWith("-")) {
                 bodyFields = new ArrayList<>();
                 for (String pair : text.split("&")) {
@@ -222,16 +309,37 @@ public final class RouteSchemaCore {
             }
             // Strict inputs: on a route whose list is complete, a name it never reads. Only the
             // query and a form or JSON object body are named; another body's names aren't known.
-            if (strict != null && route.complete()) {
+            String requestPath = path == null || path.isEmpty() ? "/" : path;
+            if (strict != null && route.complete() && exempt.stream().noneMatch(requestPath::startsWith)) {
                 for (Field field : all) {
-                    if (!route.inputs().containsKey(field.name()) && !allowed(strict, field.name())) {
-                        String name = field.name().codePoints().limit(MAX_LOGGED_NAME)
-                                .collect(StringBuilder::new, StringBuilder::appendCodePoint, StringBuilder::append).toString();
-                        return new Review("unexpected", route.path(), name, null, null);
+                    if (!route.reads(method, field.name()) && !allowed(strict, field.name())) {
+                        return new Review("unexpected", route.path(), logged(field.name()), null, null);
                     }
                 }
+                // Keys inside an object-valued input whose keys init knows, as user.role.
+                if (json != null) {
+                    for (Map.Entry<String, JsonNode> entry : json.properties()) {
+                        Set<String> keys = route.nested().get(entry.getKey());
+                        if (keys == null || !(entry.getValue() instanceof ObjectNode inner)) continue;
+                        for (Map.Entry<String, JsonNode> sub : inner.properties()) {
+                            String key = sub.getKey();
+                            String full = entry.getKey() + "." + key;
+                            if (!keys.contains(key) && !allowed(strict, full)) return new Review("unexpected", route.path(), logged(full), null, null);
+                        }
+                    }
+                }
+                List<Field> pairs = new ArrayList<>(queryFields);
+                if (bodyFields != null && json == null) pairs.addAll(bodyFields);
+                for (Field field : pairs) {
+                    String[] split = bracketKey(field.raw());
+                    if (split == null) continue;
+                    Set<String> keys = route.nested().get(split[0]);
+                    String full = split[0] + "." + split[1];
+                    if (keys != null && !keys.contains(split[1]) && !allowed(strict, full)) return new Review("unexpected", route.path(), logged(full), null, null);
+                }
             }
-            if (found == null || !RELAXED_RULES.contains(found) || !route.complete() || route.unnamedRisk() || bodyFields == null) return null;
+            // A multipart body can't be rebuilt without the parts the schema clears.
+            if (found == null || !RELAXED_RULES.contains(found) || !route.complete() || route.unnamedRisk() || bodyFields == null || multipart) return null;
             // A finding from headers or the path isn't the query's or body's to clear.
             if (SqlInjectionCore.inspectQueryAndBody(query, body, budget) == null) return null;
             Map<String, String> keptQuery = new LinkedHashMap<>();
@@ -335,11 +443,12 @@ public final class RouteSchemaCore {
             String location = config.pathManifestPath == null || config.pathManifestPath.isBlank()
                     ? PathManifestCore.DEFAULT_MANIFEST_PATH : config.pathManifestPath;
             List<String> allow = config.strictInputs ? List.copyOf(config.strictInputsAllow == null ? List.of() : config.strictInputsAllow) : null;
-            Schemas schemas = CACHE.computeIfAbsent(location + "\u0000" + allow, key -> {
+            List<String> exempt = List.copyOf(config.strictInputsExempt == null ? List.of() : config.strictInputsExempt);
+            Schemas schemas = CACHE.computeIfAbsent(location + "\u0000" + allow + "\u0000" + exempt, key -> {
                 Map<String, Object> manifest = PathManifestCore.loadManifest(Path.of(location));
                 if (allow == null || manifest == null) return new Schemas(manifest);
                 Map<String, Object> strict = new LinkedHashMap<>(manifest);
-                strict.put("strict_inputs", Map.of("allow", allow));
+                strict.put("strict_inputs", Map.of("allow", allow, "exempt", exempt));
                 return new Schemas(strict);
             });
             if (!schemas.hasInputs()) return finding;
@@ -347,7 +456,7 @@ public final class RouteSchemaCore {
             String rule = "payload_inspection_limit".equals(finding) ? null : finding;
             Review review = found != null && found.source().equals("path")
                     ? (rule == null ? null : schemas.reviewPath(request.path(), config.requestBodyInspectionBytes, rule))
-                    : schemas.review(request.path(), request.query(), body, config.requestBodyInspectionBytes, rule);
+                    : schemas.review(request.method(), request.path(), request.query(), body, config.requestBodyInspectionBytes, rule);
             if (review == null) return finding;
             Map<String, String> line = new LinkedHashMap<>();
             line.put("event", "aiwaf.route_schema");

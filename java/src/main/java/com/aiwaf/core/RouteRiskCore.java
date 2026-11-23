@@ -10,6 +10,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -17,6 +18,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
@@ -375,7 +377,7 @@ public final class RouteRiskCore {
         Map<String, Object> routes = (Map<String, Object>) rawRoutes;
         for (Object entry : routes.values()) {
             if (entry instanceof Map<?, ?> data) {
-                for (String key : List.of("injection_risks", "inputs", "inputs_complete")) ((Map<String, Object>) data).remove(key);
+                for (String key : List.of("injection_risks", "inputs", "inputs_complete", "inputs_incomplete", "inputs_by_method", "inputs_nested")) ((Map<String, Object>) data).remove(key);
             }
         }
         int linked = 0;
@@ -386,8 +388,8 @@ public final class RouteRiskCore {
             boolean matched = false;
             for (Map.Entry<String, Object> route : routes.entrySet()) {
                 if (route.getValue() instanceof Map<?, ?> data
-                        && viewMatches(String.valueOf(data.get("view")), entry,
-                                finding.entryFile() == null || finding.entryFile().isEmpty() ? finding.file() : finding.entryFile())) {
+                        && PathManifestCore.views(data).stream().anyMatch(view -> viewMatches(view, entry,
+                                finding.entryFile() == null || finding.entryFile().isEmpty() ? finding.file() : finding.entryFile()))) {
                     matched = true;
                     String input = inputFromSource(finding.source());
                     Map<String, String> risk = new LinkedHashMap<>();
@@ -403,10 +405,44 @@ public final class RouteRiskCore {
         collected.forEach((path, risks) ->
                 ((Map<String, Object>) routes.get(path)).put("injection_risks", List.copyOf(risks.values())));
         // What each route reads, with types. A route whose handlers weren't all found gets none.
+        Map<String, Set<String>> read = new HashMap<>();
         for (JavaInputSchemaCore.Inputs entry : report.inputs()) {
             for (Map.Entry<String, Object> route : routes.entrySet()) {
-                if (route.getValue() instanceof Map<?, ?> data && viewMatches(String.valueOf(data.get("view")), entry.function(), entry.file())) {
+                if (!(route.getValue() instanceof Map<?, ?> data)) continue;
+                List<String> matched = PathManifestCore.views(data).stream().filter(view -> viewMatches(view, entry.function(), entry.file())).toList();
+                if (!matched.isEmpty()) {
+                    read.computeIfAbsent(route.getKey(), key -> new HashSet<>()).addAll(matched);
                     Map<String, Object> target = (Map<String, Object>) data;
+                    // The names each method's handlers read, so strict inputs can check each method's own.
+                    Map<String, Object> viewMethods = target.get("view_methods") instanceof Map<?, ?> saved
+                            ? (Map<String, Object>) saved : Map.of();
+                    Map<String, Object> claims = target.get("_input_methods") instanceof Map<?, ?> saved
+                            ? (Map<String, Object>) saved : new TreeMap<>();
+                    for (String view : matched) {
+                        Object methods = viewMethods.getOrDefault(view, target.getOrDefault("methods", List.of()));
+                        for (Object method : methods instanceof List<?> list ? list : List.of()) {
+                            String upper = String.valueOf(method).toUpperCase(Locale.ROOT);
+                            Set<String> names = new TreeSet<>((java.util.Collection<String>) claims.getOrDefault(upper, List.of()));
+                            names.addAll(entry.inputs().keySet());
+                            claims.put(upper, List.copyOf(names));
+                        }
+                    }
+                    target.put("_input_methods", claims);
+                    // An input's inner keys are only known when every handler reading it has them.
+                    Map<String, Object> nested = target.get("_nested") instanceof Map<?, ?> saved ? (Map<String, Object>) saved : new TreeMap<>();
+                    Set<String> flat = target.get("_flat") instanceof Set<?> saved ? (Set<String>) saved : new TreeSet<>();
+                    for (String name : entry.inputs().keySet()) {
+                        List<String> keys = entry.nested().get(name);
+                        if (keys == null) {
+                            flat.add(name);
+                        } else {
+                            Set<String> merged = new TreeSet<>((java.util.Collection<String>) nested.getOrDefault(name, List.of()));
+                            merged.addAll(keys);
+                            nested.put(name, List.copyOf(merged));
+                        }
+                    }
+                    target.put("_nested", nested);
+                    target.put("_flat", flat);
                     Map<String, Object> inputs = target.get("inputs") instanceof Map<?, ?> saved
                             ? (Map<String, Object>) saved : new TreeMap<>();
                     entry.inputs().forEach((name, kind) -> inputs.merge(name, kind, (old, now) -> old.equals(now) ? old : "text"));
@@ -424,6 +460,21 @@ public final class RouteRiskCore {
                 }
             }
         }
+        // A path several handlers serve is only complete when every one's code was read.
+        read.forEach((path, seen) -> {
+            Map<String, Object> target = (Map<String, Object>) routes.get(path);
+            for (String view : new TreeSet<>(PathManifestCore.views(target))) {
+                if (seen.contains(view)) continue;
+                target.put("inputs_complete", false);
+                List<Map<String, Object>> reasons = target.get("inputs_incomplete") instanceof List<?> saved
+                        ? new ArrayList<>((List<Map<String, Object>>) saved) : new ArrayList<>();
+                Map<String, Object> reason = new LinkedHashMap<>();
+                reason.put("code", "unread_view");
+                reason.put("detail", view + " also serves this path, and its code wasn't found");
+                if (!reasons.contains(reason)) reasons.add(reason);
+                target.put("inputs_incomplete", reasons);
+            }
+        });
         InputSourcesCore.Counts completeness = InputSourcesCore.finalize(routes, sources == null ? InputSourcesCore.Sources.none() : sources);
         int typed = (int) routes.values().stream().filter(data -> data instanceof Map<?, ?> map && map.containsKey("inputs")).count();
         Map<String, Object> audit = new LinkedHashMap<>();

@@ -20,6 +20,8 @@ code reading didn't, unless the framework itself lists every input.
 
 from __future__ import annotations
 
+import collections.abc
+import dataclasses
 import json
 import re
 import sys
@@ -341,6 +343,11 @@ def fastapi_inputs(route: Any) -> Optional[dict]:
     for param in bodies:
         embedded = bool(getattr(getattr(param, "field_info", None), "embed", False))
         model = annotation(param)
+        origin = typing.get_origin(model) or model
+        if origin in (dict, typing.Any, object) or (isinstance(origin, type) and issubclass(origin, collections.abc.Mapping)):
+            # A dict (or Any) body takes whatever names the client sends.
+            reasons.append(_reason("container_whole", f"the body {param.alias} is a whole {getattr(origin, '__name__', 'object')}"))
+            continue
         fields = class_fields(model) if len(bodies) == 1 and not embedded else None
         if fields is not None:
             for name, kind in fields.items():
@@ -444,7 +451,7 @@ def webargs_inputs(view: Any) -> Optional[dict]:
     if not layers:
         return None
     exact = bool(closed.get("query") and closed.get("body"))
-    covers = [code for code in REASON_CODES if code != "raw_body"] if exact else []
+    covers = [code for code in REASON_CODES if code not in {"raw_body", "unread_view"}] if exact else []
     return {"inputs": found, "covers": covers, "reasons": reasons, "standalone": exact}
 
 
@@ -460,21 +467,60 @@ def combine(first: Optional[dict], second: Optional[dict]) -> Optional[dict]:
     }
 
 
+def _request_schema(value: Any) -> Optional[type]:
+    """The class when value is a request schema or one's instance: a pydantic model, a
+    marshmallow schema, a DRF serializer or a Django or WTForms form. Not a dataclass or
+    TypedDict, which closures hold for other reasons."""
+    cls = value if isinstance(value, type) else type(value)
+    if dataclasses.is_dataclass(cls) or typing.is_typeddict(cls):
+        return None
+    markers = ("model_fields", "_declared_fields", "base_fields", "_unbound_fields")
+    return cls if any(hasattr(cls, marker) for marker in markers) and class_fields(cls) is not None else None
+
+
+def closure_inputs(view: Any) -> Optional[dict]:
+    """What a view's own decorators validate with, as @validate(Body): a request schema in a
+    decorator layer's closure, through __wrapped__. Its fields are names the view may read; the
+    view's code still says what else it reads. None when no layer holds one."""
+    found: Dict[str, str] = {}
+    seen, current, any_schema = set(), view, False
+    while callable(current) and id(current) not in seen and len(seen) < 32:
+        seen.add(id(current))
+        values = _closure(current)
+        if not hasattr(values.get("self"), "DEFAULT_UNKNOWN_BY_LOCATION"):  # webargs has its own reader.
+            for value in values.values():
+                schema = _request_schema(value)
+                if schema is not None:
+                    any_schema = True
+                    for name, kind in (class_fields(schema) or {}).items():
+                        _merge(found, name, kind)
+        current = getattr(current, "__wrapped__", None)
+    return {"inputs": found, "covers": [], "reasons": [], "standalone": False} if any_schema else None
+
+
 def view_arguments(view: Any, methods: Iterable[str] = ()) -> Optional[dict]:
     """webargs arguments (and flask-smorest's) on a view function, or on each method of a class
     view (Flask's MethodView, Django's View): any webargs parser, as their decorators are alike."""
     view_class = getattr(view, "view_class", None)
     if view_class is None:
-        return webargs_inputs(view)
+        return combine(webargs_inputs(view), closure_inputs(view))
     declared = None
     for method in methods:
         handler = getattr(view_class, str(method).lower(), None)
         if handler is not None:
-            declared = combine(declared, webargs_inputs(handler))
+            declared = combine(declared, combine(webargs_inputs(handler), closure_inputs(handler)))
     return declared
 
 
 flask_inputs = view_arguments
+
+
+_PATH_PARAMETER = re.compile(r"<(?:[^:>]+:)?([^>]+)>|\{([^}:]+)(?::[^}]*)?\}|:([A-Za-z_]\w*)\??|\[(?:\.\.\.)?([^\]]+)\]")
+
+
+def path_parameters(route: str) -> List[str]:
+    """The parameter names in a route, as id in /a/<int:id>, /a/{id}, /a/:id or /a/[id]."""
+    return [next(group for group in match.groups() if group) for match in _PATH_PARAMETER.finditer(str(route))]
 
 
 def canonical(path: str) -> str:
@@ -664,6 +710,14 @@ def finalize(
             continue
         framework = data.pop("declared_inputs", None)
         declaration = data.pop("input_declaration", None)
+        # Which method reads what: the code reading's and the framework's, per method. Names
+        # from anywhere else are shared by every method.
+        claims = {str(method).upper(): set(names) for method, names in (data.pop("_input_methods", None) or {}).items()}
+        for method, names in (data.pop("declared_methods", None) or {}).items():
+            claims.setdefault(str(method).upper(), set()).update(names)
+        shared: set = set()
+        nested = data.pop("_nested", None) or {}
+        flat = set(data.pop("_flat", None) or ())
         read = "inputs_complete" in data
         found: Dict[str, str] = dict(data.get("inputs") or {})
         reasons: List[dict] = list(data.get("inputs_incomplete") or [])
@@ -673,22 +727,28 @@ def finalize(
             reasons.extend(framework.get("reasons") or ())
             for name, kind in (framework.get("inputs") or {}).items():
                 _merge(found, name, kind)
+                flat.add(name)
             read = read or bool(framework.get("standalone"))
+        before = set(found)
         reasons = _resolve_classes(data, found, reasons)
+        shared |= set(found) - before
         key = canonical(path)
         authoritative = False
         for declared in (declaration, (declarations or {}).get(key)):
             if isinstance(declared, Mapping):
                 authoritative = _declare(found, declared) or authoritative
+                shared |= set(declared.get("inputs") or {})
+                flat |= set(declared.get("inputs") or {})
                 read = True
                 counts["declared"] += 1
         operations = (openapi or {}).get(key)
         if operations:
             methods = [method for method in data.get("methods") or operations.keys()]
             listed = [operations[method] for method in methods if method in operations]
-            for operation in listed:
-                for name, kind in operation["inputs"].items():
+            for method in methods:
+                for name, kind in (operations.get(method) or {"inputs": {}})["inputs"].items():
                     _merge(found, name, kind)
+                    claims.setdefault(str(method).upper(), set()).add(name)
             if listed and len(listed) == len(methods) and all(operation["complete"] for operation in listed):
                 authoritative = True
             read = True
@@ -705,9 +765,13 @@ def finalize(
             if name not in found and read:
                 reasons.append(_reason("observed", f"{name} was read while recording, but the analysis didn't find it"))
             _merge(found, name, kind)
+            shared.add(name)
             read = True
         if not read:
             continue
+        # A route's own parameters come from the path, not the query or body.
+        for name in path_parameters(path):
+            found.pop(name, None)
         data["inputs"] = found
         data["inputs_complete"] = not reasons
         if reasons:
@@ -719,7 +783,31 @@ def finalize(
         else:
             data.pop("inputs_incomplete", None)
             counts["complete"] += 1
+        # Keys inside an input, when every reading of it reads constant keys.
+        inner = {name: sorted(keys) for name, keys in nested.items() if name in found and name not in flat}
+        if inner and not reasons:
+            data["inputs_nested"] = inner
+        else:
+            data.pop("inputs_nested", None)
+        by_method = _by_method(found, data.get("methods") or (), claims, shared) if not reasons else None
+        if by_method:
+            data["inputs_by_method"] = by_method
+        else:
+            data.pop("inputs_by_method", None)
     return counts
+
+
+def _by_method(found: Mapping[str, str], methods: Iterable[str], claims: Mapping[str, set], shared: set) -> Optional[dict]:
+    """Each method's names, when the route's complete list is read by different methods' code: a
+    method takes the names its own code reads, and every name no method's code claims. None when
+    every method reads them all."""
+    methods = sorted({str(method).upper() for method in methods})
+    if len(methods) < 2 or not claims:
+        return None
+    claimed = set().union(*claims.values())
+    by_method = {method: sorted(name for name in found if name in claims.get(method, ()) or name in shared or name not in claimed)
+                 for method in methods}
+    return by_method if any(len(names) < len(found) for names in by_method.values()) else None
 
 
 def describe(counts: Mapping[str, Any]) -> str:

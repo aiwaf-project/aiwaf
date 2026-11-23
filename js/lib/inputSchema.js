@@ -23,6 +23,8 @@ const CONVERTERS = new Map([
 const RAW_MEMBERS = new Set(['rawBody', 'read', 'pipe', 'on', 'once', 'body_raw', 'files', 'file']);
 const URL_PARSERS = /^(?:URL|URLSearchParams|url\.parse|querystring\.parse|qs\.parse|parseUrl)$/;
 // Route middleware that only parses or guards: anything else may read the body itself.
+const ROUTE_HOOKS = new Set(['onRequest', 'preParsing', 'preValidation', 'preHandler', 'preSerialization']);
+const RAW_PARSERS = /^(?:express|bodyParser)\.(?:raw|text)$/;
 const SAFE_MIDDLEWARE = /^(?:express\.(?:json|urlencoded|text|raw)|bodyParser\.\w+|cors|helmet|compression|multer)\b/;
 const ROUTE_METHODS = new Set(['all', 'delete', 'get', 'head', 'options', 'patch', 'post', 'put']);
 const SKIPPED = new Set(['loc', 'start', 'end', 'extra', 'leadingComments', 'trailingComments', 'innerComments', 'typeAnnotation', 'returnType', 'typeParameters']);
@@ -117,9 +119,21 @@ function zodSchemas(ast, source) {
  * request is followed into when passed to one, and its string constants. named, when given, is
  * the parameter that holds the request in a followed function.
  */
-function handlerInputs(node, schemas, scope = { functions: new Map(), constants: new Map(), active: new Set() }, named = null) {
+function handlerInputs(node, schemas, scope = { functions: new Map(), constants: new Map(), active: new Set() }, named = null, given = null) {
   const inputs = {};
   const reasons = [];
+  // Keys read inside an input, as name in req.body.user.name; and inputs used any other way.
+  const nested = {};
+  const flat = new Set();
+  // Where each name was read: from a body container, or something else.
+  const fromBody = new Set();
+  const elsewhere = new Set();
+  const inner = (read, key) => {
+    const parent = parents.get(read);
+    const sub = isMember(parent) && parent.object === read ? memberKey(parent, scope.constants) : null;
+    if (sub === null || sub === undefined) flat.add(key);
+    else (nested[key] = nested[key] || new Set()).add(sub);
+  };
   const incomplete = (code, detail, at) => {
     const reason = { code, detail };
     const line = at && at.loc && at.loc.start && at.loc.start.line;
@@ -137,8 +151,9 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
     else if (target.type === 'Identifier' && CONTEXT_NAMES.has(target.name)) contexts.add(target.name);
     else if (target.type === 'ObjectPattern') incomplete('container_whole', 'the request is destructured in the parameters', target);
   }
-  const follow = (call, item) => {
-    // The request passed to a function in this file or one it imports, as in return render(req, res): its reads count.
+  // The request, or a query or body container (label), passed to a function in this file or one
+  // it imports, as in return render(req, res) or readAddress(req.body): its reads count.
+  const follow = (call, item, label = null) => {
     const found = lookup(scope, 'function', dotted(call.callee));
     if (!found || scope.active.has(found.node) || scope.active.size >= 4) return false;
     const target = found.node;
@@ -149,8 +164,14 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
     scope.active.add(target);
     try {
       const other = found.scope === scope ? scope : { ...found.scope, active: scope.active };
-      const result = handlerInputs(target, found.scope.schemas || schemas, other, name.name);
-      for (const [key, kind] of Object.entries(result.inputs)) merge(inputs, key, kind);
+      const result = label === null
+        ? handlerInputs(target, found.scope.schemas || schemas, other, name.name)
+        : handlerInputs(target, found.scope.schemas || schemas, other, '', { [name.name]: label });
+      for (const [key, kind] of Object.entries(result.inputs)) {
+        merge(inputs, key, kind);
+        if (result.nested && result.nested[key]) for (const sub of result.nested[key]) (nested[key] = nested[key] || new Set()).add(sub);
+        else flat.add(key);
+      }
       for (const reason of result.reasons) {
         if (!reasons.some(item => item.code === reason.code && item.detail === reason.detail && item.line === reason.line)) reasons.push(reason);
       }
@@ -168,7 +189,8 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
   };
   // The body only: the parameters themselves aren't uses of the request.
   if (node.body) index(node.body, node);
-  const aliases = new Map();
+  // A container this function was given, as a helper's body parameter, is read like an alias.
+  const aliases = new Map(Object.entries(given || {}));
 
   const converted = read => {
     let current = read;
@@ -189,8 +211,14 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
       const key = memberKey(parent, scope.constants);
       const imported = key === null && parent.computed && parent.property.type === 'Identifier'
         ? lookup(scope, 'constant', parent.property.name) : null;
-      if (key !== null) merge(inputs, key, converted(parent));
-      else if (imported) merge(inputs, imported.node, converted(parent));
+      if (key !== null) {
+        merge(inputs, key, converted(parent));
+        inner(parent, key);
+        (/\bbody\b/.test(label) ? fromBody : elsewhere).add(key);
+      } else if (imported) {
+        merge(inputs, imported.node, converted(parent));
+        flat.add(imported.node);
+      }
       else incomplete('dynamic_key', `${label} is read with a key that isn't a constant`, parent);
       return;
     }
@@ -225,6 +253,7 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
       }
     }
     if (isCall(parent) && parent.arguments.includes(expr)) {
+      if (follow(parent, expr, label)) return;
       incomplete('container_whole', `${label} is passed whole to ${dotted(parent.callee) || 'a call'}`, parent);
       return;
     }
@@ -273,7 +302,10 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
       container(item, aliases.get(item.name));
     }
   }
-  return { inputs, complete: reasons.length === 0, reasons };
+  const known = Object.fromEntries(Object.entries(nested).filter(([key]) => !flat.has(key) && key in inputs)
+    .map(([key, subs]) => [key, [...subs].sort()]));
+  const bodyOnly = [...fromBody].filter(key => !elsewhere.has(key));
+  return { inputs, complete: reasons.length === 0, reasons, nested: known, bodyOnly };
 }
 
 const MAX_DEPTH = 6;
@@ -430,19 +462,38 @@ function fileInputs(ast, filename, source, label, scope = null) {
   if (!scope) scope = moduleScope(ast, source, filename);
   const schemas = scope.schemas;
   const results = [];
+  // The handler of a route call, as app.get('/health', () => ...), even when it takes nothing.
+  const routeHandler = (node, parent) => isCall(parent) && isMember(parent.callee) && ROUTE_METHODS.has(parent.callee.property.name)
+    && parent.arguments.length > 1 && parent.arguments[parent.arguments.length - 1] === node
+    && parent.arguments[0] && ['StringLiteral', 'TemplateLiteral'].includes(parent.arguments[0].type);
   const visit = (node, parent) => {
-    if (isFunction(node) && (node.params || []).some(parameter => {
+    if (isFunction(node) && (routeHandler(node, parent) || (node.params || []).some(parameter => {
       const target = parameter.type === 'AssignmentPattern' ? parameter.left : parameter;
       return target.type === 'Identifier' && (REQUEST_NAMES.has(target.name) || CONTEXT_NAMES.has(target.name));
-    })) {
+    }))) {
       scope.active.add(node);
       const found = handlerInputs(node, schemas, scope);
       scope.active.delete(node);
+      // Names read by validators or route middleware, whose inner keys aren't known.
+      let middlewareNames = {};
       // app.post('/x', auth, handler): middleware before the handler may read the body itself.
       if (isCall(parent) && isMember(parent.callee) && ROUTE_METHODS.has(parent.callee.property.name)) {
         const others = parent.arguments.slice(1).filter(argument => argument !== node);
         const validated = { inputs: {}, exact: false, segments: {} };
+        middlewareNames = validated.inputs;
         for (const argument of others) {
+          // Fastify's route options, as { schema }: only their hooks run before the handler.
+          if (argument.type === 'ObjectExpression' && !argument.properties.some(property => property.type !== 'ObjectProperty'
+            || ROUTE_HOOKS.has(property.key.name || property.key.value))) continue;
+          if (isCall(argument) && RAW_PARSERS.test(dotted(argument.callee))) {
+            // express.raw() and express.text(): the handler gets the body as bytes or text, not
+            // names, so what it reads off req.body (as .length) aren't inputs.
+            const reason = { code: 'raw_body', detail: `${dotted(argument.callee)}() gives the handler the raw body`, file: filename };
+            if (argument.loc) reason.line = argument.loc.start.line;
+            found.reasons.push(reason);
+            for (const name of found.bodyOnly || []) delete found.inputs[name];
+            continue;
+          }
           if (isCall(argument) && SAFE_MIDDLEWARE.test(dotted(argument.callee))) continue;
           if (routeValidator(argument, validated)) continue;
           // Middleware of the project's own is read like the handler: what it reads is the route's.
@@ -451,7 +502,10 @@ function fileInputs(ast, filename, source, label, scope = null) {
             own.scope.active.add(own.node);
             const read = handlerInputs(own.node, own.scope.schemas, own.scope);
             own.scope.active.delete(own.node);
-            for (const [name, kind] of Object.entries(read.inputs)) merge(found.inputs, name, kind);
+            for (const [name, kind] of Object.entries(read.inputs)) {
+              merge(found.inputs, name, kind);
+              validated.inputs[name] = validated.inputs[name] || kind; // Its inner keys aren't merged, so unknown.
+            }
             found.reasons.push(...read.reasons);
             continue;
           }
@@ -465,7 +519,9 @@ function fileInputs(ast, filename, source, label, scope = null) {
           found.reasons = found.reasons.filter(reason => reason.code === 'raw_body');
         }
       }
+      const nested = Object.fromEntries(Object.entries(found.nested || {}).filter(([key]) => !(key in middlewareNames)));
       const entry = { function: label(node, parent), file: filename, inputs: found.inputs, complete: found.reasons.length === 0 };
+      if (Object.keys(nested).length) entry.nested = nested;
       if (found.reasons.length) entry.reasons = found.reasons;
       results.push(entry);
     }
@@ -627,7 +683,16 @@ const MAX_REASONS = 20;
 function mergeInto(routes, path, entry) {
   const data = routes[path];
   data.inputs = data.inputs || {};
-  for (const [name, kind] of Object.entries(entry.inputs)) merge(data.inputs, name, kind);
+  for (const [name, kind] of Object.entries(entry.inputs)) {
+    merge(data.inputs, name, kind);
+    // An input's inner keys are only known when every handler reading it reads them.
+    if (entry.nested && entry.nested[name]) {
+      data._nested = data._nested || {};
+      data._nested[name] = [...new Set([...(data._nested[name] || []), ...entry.nested[name]])].sort();
+    } else {
+      data._flat = [...new Set([...(data._flat || []), name])];
+    }
+  }
   data.inputs_complete = (data.inputs_complete ?? true) && Boolean(entry.complete);
   const reasons = data.inputs_incomplete || [];
   for (const reason of entry.reasons || []) {

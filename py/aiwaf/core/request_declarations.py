@@ -70,6 +70,25 @@ def merge_entries(previous, current):
     if previous is None:
         return current
     result = {**current, 'methods': sorted(set(previous['methods']) | set(current['methods']))}
+    # Every view serving the path, and the methods each serves, so each one's inputs are linked
+    # to it and to its methods.
+    view_methods = {}
+    declared_methods = {}
+    for entry in (previous, current):
+        for view, methods in (entry.get('view_methods') or {entry.get('view'): entry.get('methods') or []}).items():
+            if view:
+                view_methods[str(view)] = sorted(set(view_methods.get(str(view), [])) | set(methods))
+        known = entry.get('declared_methods')
+        if known is None and isinstance(entry.get('declared_inputs'), dict):
+            names = sorted((entry['declared_inputs'].get('inputs') or {}).keys())
+            known = {method: names for method in entry.get('methods') or []}
+        for method, names in (known or {}).items():
+            declared_methods[method] = sorted(set(declared_methods.get(method, [])) | set(names))
+    if len(view_methods) > 1:
+        result['views'] = sorted(view_methods)
+        result['view_methods'] = view_methods
+    if declared_methods:
+        result['declared_methods'] = declared_methods
     if previous.get('declared_inputs') or current.get('declared_inputs'):
         from aiwaf.core.input_sources import combine
 

@@ -383,10 +383,11 @@ describe('route schemas saved by init', () => {
     expect(() => createObserver({ AIWAF_ROUTE_SCHEMA_MODE: 'strict' })).toThrow('AIWAF_ROUTE_SCHEMA_MODE');
   });
 
-  const strictManifest = () => ({ ...SCHEMA.manifest, strict_inputs: { allow: SCHEMA.strict_cases.allow } });
+  const strictManifest = () => ({ ...SCHEMA.manifest, strict_inputs: { allow: SCHEMA.strict_cases.allow, exempt: SCHEMA.strict_cases.exempt } });
   test.each(SCHEMA.strict_cases.cases.map(item => [item.path, item.expect, item]))('shared strict case %s %s', (_path, _expect, item) => {
     const general = JSON.parse(wasm().sql_inspect(Buffer.from(item.query), Buffer.from(item.body), 65536));
-    const review = reviewRequest(compileRisks(strictManifest()), item.path, item.query, Buffer.from(item.body), 65536, general && general.rule);
+    const review = reviewRequest(compileRisks(strictManifest()), item.path, item.query, Buffer.from(item.body), 65536, general && general.rule,
+      item.method || '');
     const outcome = review ? review.action : (general ? 'block' : 'pass');
     expect(outcome).toBe(item.expect);
     if (item.input) expect(review.input).toBe(item.input);
@@ -395,8 +396,8 @@ describe('route schemas saved by init', () => {
   test('strict inputs log or block names a complete route never reads', () => {
     expect(strictInputs({})).toBeNull();
     expect(strictInputs({ AIWAF_STRICT_INPUTS: 'no' })).toBeNull();
-    expect(strictInputs({ AIWAF_STRICT_INPUTS: true, AIWAF_STRICT_INPUTS_ALLOW: 'a, b*,' })).toEqual({ allow: ['a', 'b*'] });
-    expect(strictInputs({ AIWAF_STRICT_INPUTS: 'on', AIWAF_STRICT_INPUTS_ALLOW: ['x'] })).toEqual({ allow: ['x'] });
+    expect(strictInputs({ AIWAF_STRICT_INPUTS: true, AIWAF_STRICT_INPUTS_ALLOW: 'a, b*,' })).toEqual({ allow: ['a', 'b*'], exempt: [] });
+    expect(strictInputs({ AIWAF_STRICT_INPUTS: 'on', AIWAF_STRICT_INPUTS_ALLOW: ['x'] })).toEqual({ allow: ['x'], exempt: [] });
     expect(withStrict(null, { allow: [] })).toBeNull();
     expect(withStrict({ routes: {} }, null)).toEqual({ routes: {} });
     const warn = jest.fn();
@@ -411,6 +412,26 @@ describe('route schemas saved by init', () => {
     // Off unless turned on.
     const plain = createObserver({ ...options, AIWAF_STRICT_INPUTS: undefined, AIWAF_ROUTE_SCHEMA_MODE: 'enforce' });
     expect(plain.review(req('q=a&debug=1'), null, 65536)).toBeNull();
+  });
+
+  test('an engine without exempt paths checks no strict inputs', () => {
+    const wasmChecks = require('../lib/wasmChecks');
+    const real = wasmChecks.get();
+    const warn = jest.fn();
+    class Old { constructor(manifest) { this.inner = new real.RouteRiskChecker(manifest); this.strict = this.inner.strict; }
+      review(...args) { return this.inner.review(...args); } }
+    const spy = jest.spyOn(wasmChecks, 'get').mockReturnValue({ ...real, RouteRiskChecker: Old });
+    try {
+      const observer = createObserver({ AIWAF_PATH_MANIFEST: save(SCHEMA.manifest), AIWAF_INJECTION_RISK_MODE: 'off', AIWAF_ROUTE_SCHEMA_MODE: 'enforce',
+        AIWAF_STRICT_INPUTS: true, AIWAF_STRICT_INPUTS_EXEMPT: '/legacy/', logger: { warn } });
+      expect(observer.review({ method: 'GET', path: '/search', url: '/search?q=a&debug=1' }, null, 65536)).toBeNull();
+      expect(warn.mock.calls[0][0]).toContain('AIWAF_STRICT_INPUTS_EXEMPT needs aiwaf-wasm 0.2.13');
+      const throwing = createObserver({ AIWAF_PATH_MANIFEST: save(SCHEMA.manifest), AIWAF_INJECTION_RISK_MODE: 'off',
+        AIWAF_STRICT_INPUTS: true, AIWAF_STRICT_INPUTS_EXEMPT: '/legacy/', logger: { warn: () => { throw new Error('log'); } } });
+      expect(throwing.review({ method: 'GET', path: '/search', url: '/search?q=a' }, null, 65536)).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('strict inputs warn when the engine is too old', () => {
@@ -446,5 +467,105 @@ describe('route schemas saved by init', () => {
     expect(manifest.injection_audit.routes_with_inputs).toBe(2);
     applyReport({ findings: [] }, manifest);
     expect(manifest.routes['/search']).toEqual({ view: 'x' });
+  });
+});
+
+describe('per-method input lists', () => {
+  const inputSources = require('../lib/inputSources');
+  let directory;
+  beforeEach(() => { directory = fs.mkdtempSync(path.join(os.tmpdir(), 'aiwaf-methods-')); });
+  afterEach(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const save = manifest => {
+    const file = path.join(directory, 'paths.json');
+    fs.writeFileSync(file, JSON.stringify(manifest));
+    return file;
+  };
+  test('init gives each method the names its own handler reads', () => {
+    const manifest = { routes: { '/posts': { view: 'p', methods: ['GET', 'POST'] }, '/one': { view: 'o', methods: ['GET', 'POST'] } } };
+    applyReport({ findings: [], inputs: [
+      { function: 'app.get /posts', file: 'app.js', inputs: { q: 'text' }, complete: true },
+      { function: 'router.post /posts', file: 'app.js', inputs: { title: 'text' }, complete: true },
+      { function: 'app.post /posts', file: 'app.js', inputs: { draft: 'bool' }, complete: true },
+      { function: 'app.all /one', file: 'app.js', inputs: { a: 'text' }, complete: true }
+    ] }, manifest, { declarations: { '/posts': { inputs: { trace: 'text' } } }, observations: { '/posts': { q: 'text' } } });
+    expect(manifest.routes['/posts'].inputs_by_method).toEqual({ GET: ['q', 'trace'], POST: ['draft', 'q', 'title', 'trace'] });
+    expect(manifest.routes['/posts']._input_methods).toBeUndefined();
+    // A handler whose method isn't in its label (app.all, or a named one) is every method's.
+    expect(manifest.routes['/one'].inputs_by_method).toBeUndefined();
+  });
+
+  test('the framework\'s per-route names and OpenAPI operations count per method', () => {
+    const { extractFastifyRoutes } = require('../lib/pathManifest');
+    const routes = extractFastifyRoutes(null, [
+      { method: 'GET', path: '/items', schema: { querystring: { type: 'object', properties: { q: { type: 'string' } }, additionalProperties: false } } },
+      { method: 'POST', path: '/items', schema: { body: { type: 'object', properties: { name: { type: 'string' } }, additionalProperties: false } } }
+    ]);
+    expect(routes['/items'].declared_methods).toEqual({ GET: ['q'], POST: ['name'] });
+    inputSources.finalize(routes);
+    expect(routes['/items'].inputs_by_method).toBeUndefined(); // standalone: false, so nothing is read on its own.
+    const spec = { paths: { '/notes': {
+      get: { parameters: [{ name: 'q', in: 'query', schema: { type: 'string' } }] },
+      post: { requestBody: { content: { 'application/json': { schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string' } } } } } } }
+    } } };
+    const notes = { '/notes': { methods: ['GET', 'POST'] } };
+    inputSources.finalize(notes, { openapi: inputSources.openapiInputs(spec) });
+    expect(notes['/notes'].inputs_by_method).toEqual({ GET: ['q'], POST: ['text'] });
+    const same = { '/x': { methods: ['GET', 'POST'], inputs: { a: 'text' }, inputs_complete: true, _input_methods: { GET: ['a'], POST: ['a'] } } };
+    inputSources.finalize(same);
+    expect(same['/x'].inputs_by_method).toBeUndefined();
+  });
+
+  test('handlers passed by name get their methods from the app, and nested keys are saved', () => {
+    const express = require('express');
+    const { extractExpressRoutes } = require('../lib/pathManifest');
+    const app = express();
+    function list(req, res) { res.json(req.query.q); }
+    function create(req, res) { res.json(req.body.t); }
+    function audit(_req, _res, next) { next(); }
+    app.get('/posts', list);
+    app.post('/posts', create);
+    app.all('/posts', audit);
+    const routes = extractExpressRoutes(app);
+    expect(routes['/posts'].handler_methods.list).toEqual(['GET']);
+    expect(routes['/posts'].handler_methods.audit.length).toBeGreaterThan(2);
+    const manifest = { routes };
+    applyReport({ findings: [], inputs: [
+      { function: 'list', file: 'app.js', inputs: { q: 'text' }, complete: true },
+      { function: 'create', file: 'app.js', inputs: { t: 'text', user: 'text' }, complete: true, nested: { user: ['name'] } }
+    ] }, manifest);
+    expect(manifest.routes['/posts'].inputs_by_method.GET).toEqual(['q']);
+    expect(manifest.routes['/posts'].inputs_by_method.POST).toEqual(['t', 'user']);
+    expect(manifest.routes['/posts'].inputs_nested).toEqual({ user: ['name'] });
+    const declared = { '/d': { inputs: { user: 'text' }, inputs_complete: true, _nested: { user: ['name'] } } };
+    inputSources.finalize(declared, { declarations: { '/d': { inputs: { user: 'text' } } } });
+    expect(declared['/d'].inputs_nested).toBeUndefined();
+  });
+
+  test('strict inputs skip exempt paths and check keys inside inputs', () => {
+    expect(strictInputs({ AIWAF_STRICT_INPUTS: true, AIWAF_STRICT_INPUTS_EXEMPT: '/a/, /b/*' }).exempt).toEqual(['/a/', '/b/*']);
+    const manifest = { routes: {
+      '/p': { view: 'p', inputs: { user: 'text' }, inputs_complete: true, inputs_nested: { user: ['name'] } },
+      '/legacy/x': { view: 'l', inputs: { x: 'text' }, inputs_complete: true } } };
+    const options = { AIWAF_PATH_MANIFEST: save(manifest), AIWAF_INJECTION_RISK_MODE: 'off', AIWAF_ROUTE_SCHEMA_MODE: 'enforce',
+      AIWAF_STRICT_INPUTS: true, AIWAF_STRICT_INPUTS_EXEMPT: ['/legacy/'], logger: { warn() {} } };
+    const observer = createObserver(options);
+    const req = (path, body) => ({ method: 'POST', url: path, path, body });
+    expect(observer.review(req('/p', { user: { name: 'a', role: 'x' } }), null, 65536)).toEqual({ rule: 'schema_unexpected_input', status: 403, mode: 'block' });
+    expect(observer.review(req('/p', { user: { name: 'a' } }), null, 65536)).toBeNull();
+    expect(observer.review(req('/legacy/x', { anything: 1 }), null, 65536)).toBeNull();
+  });
+
+  test('the engine checks each method\'s own list, and older engines the whole list', () => {
+    const warn = jest.fn();
+    const manifest = { routes: { '/posts': { view: 'p', methods: ['GET', 'POST'], inputs: { q: 'text', title: 'text' }, inputs_complete: true,
+      inputs_by_method: { GET: ['q'], POST: ['title'] } } } };
+    const enforce = createObserver({ AIWAF_PATH_MANIFEST: save(manifest), AIWAF_INJECTION_RISK_MODE: 'off', AIWAF_ROUTE_SCHEMA_MODE: 'enforce',
+      AIWAF_STRICT_INPUTS: true, logger: { warn } });
+    const req = (method, query) => ({ method, url: `/posts?${query}`, originalUrl: `/posts?${query}`, path: '/posts', query: {} });
+    expect(enforce.review(req('GET', 'title=x'), null, 65536)).toEqual({ rule: 'schema_unexpected_input', status: 403, mode: 'block' });
+    expect(enforce.review(req('POST', 'title=x'), null, 65536)).toBeNull();
+    const old = { review: jest.fn(() => 'null') };
+    expect(reviewRequest(old, '/posts', 'title=x', null, 65536, null, 'GET')).toBeNull();
+    expect(old.review).toHaveBeenCalled();
   });
 });

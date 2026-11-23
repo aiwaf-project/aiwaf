@@ -93,6 +93,9 @@ test('strict inputs block names a complete route never reads, in the engine', as
   expect((await post(strict, '/comments').send({ body: 'hi', post_id: 7, role: 'admin' })).body).toEqual({ error: 'schema_unexpected_input' });
   expect((await post(strict, '/comments').send({ body: 'hi', post_id: 7, trace_id: 1 })).status).toBe(200);
   expect((await post(strict, '/notes').send({ anything: 1 })).status).toBe(200);
+  // Each method's own list: /articles' POST reads title, its GET q.
+  expect((await post(strict, '/articles').send({ title: 't' })).status).toBe(200);
+  expect((await post(strict, '/articles').send({ title: 't', q: 'x' })).body).toEqual({ error: 'schema_unexpected_input' });
   const off = await appWith({}, { manifestPath, routeSchemaMode: 'enforce', logger: { warn() {} } });
   expect((await post(off, '/comments').send({ body: 'hi', post_id: 7, role: 'admin' })).status).toBe(200);
   // An engine without strict inputs warns and leaves them off.
@@ -104,7 +107,7 @@ test('strict inputs block names a complete route never reads, in the engine', as
       createRequestPipeline: async (...args) => {
         const pipeline = await adapter.createRequestPipeline(...args);
         const supports = pipeline.native.supports.bind(pipeline.native);
-        pipeline.native.supports = feature => feature !== 'strict_inputs' && supports(feature);
+        pipeline.native.supports = feature => !['strict_inputs', 'strict_exempt'].includes(feature) && supports(feature);
         return pipeline;
       }
     }));
@@ -116,6 +119,13 @@ test('strict inputs block names a complete route never reads, in the engine', as
     profile: { enabled: ['ip_keyword_block'] } });
   handles.push(middleware);
   expect(warn).toHaveBeenCalledWith(expect.stringContaining('strict inputs need aiwaf-wasm 0.2.12'));
+  const exempted = await older({ dataDir: temp(), manifestPath, routeSchemaMode: 'enforce', strictInputs: true, strictInputsExempt: ['/legacy/'],
+    logger: { warn }, profile: { enabled: ['ip_keyword_block'] } });
+  handles.push(exempted);
+  expect(warn).toHaveBeenCalledWith(expect.stringContaining('AIWAF_STRICT_INPUTS_EXEMPT needs aiwaf-wasm 0.2.13'));
+  // The exempt list works with this engine.
+  const exempting = await appWith({}, { manifestPath, routeSchemaMode: 'enforce', strictInputs: true, strictInputsExempt: ['/comments'], logger: { warn() {} } });
+  expect((await post(exempting, '/comments').send({ body: 'hi', post_id: 7, role: 'admin' })).status).toBe(200);
 });
 
 test('unparsed JSON and form bodies are inspected, then parsed by the app as sent', async () => {

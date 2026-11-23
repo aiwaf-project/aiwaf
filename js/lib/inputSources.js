@@ -73,6 +73,13 @@ function declaredOn(...handlers) {
 
 const PARAMETER = /^(?:<[^>]+>|\{[^}]+\}|:[A-Za-z_]\w*\??|\*\w*|\[[^\]]+\])$/;
 
+const PATH_PARAMETER = /<(?:[^:>]+:)?([^>]+)>|\{([^}:]+)(?::[^}]*)?\}|:([A-Za-z_]\w*)\??|\[(?:\.\.\.)?([^\]]+)\]/g;
+
+/** The parameter names in a route, as id in /a/<int:id>, /a/{id}, /a/:id or /a/[id]. */
+function pathParameters(route) {
+  return [...String(route).matchAll(PATH_PARAMETER)].map(match => match.slice(1).find(Boolean));
+}
+
 /** A route template with every parameter written {}, so /a/:id, /a/{id} and /a/<int:id> match. */
 function canonical(route) {
   const parts = String(route || '').split('?')[0].trim().split('/').filter(Boolean);
@@ -230,22 +237,39 @@ function finalize(routes, sources = {}) {
     if (!data || typeof data !== 'object' || Array.isArray(data)) continue;
     const framework = data.declared_inputs;
     const declaration = data.input_declaration;
-    delete data.declared_inputs;
-    delete data.input_declaration;
+    // Which method reads what: the code reading's and the framework's, per method. Names from
+    // anywhere else are shared by every method.
+    const claims = {};
+    for (const source of [data._input_methods, data.declared_methods]) {
+      for (const [method, names] of Object.entries(source || {})) {
+        claims[method.toUpperCase()] = new Set([...(claims[method.toUpperCase()] || []), ...names]);
+      }
+    }
+    const shared = new Set(data._input_shared || []);
+    const nested = data._nested || {};
+    const flat = new Set(data._flat || []);
+    for (const key of ['declared_inputs', 'input_declaration', 'declared_methods', '_input_methods', '_input_shared', '_nested', '_flat']) delete data[key];
     let read = 'inputs_complete' in data;
     const found = { ...(data.inputs || {}) };
     let reasons = [...(data.inputs_incomplete || [])];
     if (framework && typeof framework === 'object') {
       const covered = new Set(framework.covers || []);
       reasons = reasons.filter(item => !covered.has(item.code)).concat(framework.reasons || []);
-      for (const [name, kind] of Object.entries(framework.inputs || {})) merge(found, name, kind);
+      for (const [name, kind] of Object.entries(framework.inputs || {})) {
+        merge(found, name, kind);
+        flat.add(name);
+      }
       read = read || Boolean(framework.standalone);
     }
     const key = canonical(route);
     let authoritative = false;
     for (const declared of [declaration, (sources.declarations || {})[key]]) {
       if (!declared || typeof declared !== 'object') continue;
-      for (const [name, kind] of Object.entries(declared.inputs || {})) found[name] = kind;
+      for (const [name, kind] of Object.entries(declared.inputs || {})) {
+        found[name] = kind;
+        shared.add(name);
+        flat.add(name);
+      }
       authoritative = declared.complete !== false || authoritative;
       read = true;
       counts.declared += 1;
@@ -254,7 +278,12 @@ function finalize(routes, sources = {}) {
     if (operations) {
       const methods = data.methods && data.methods.length ? data.methods : Object.keys(operations);
       const listed = methods.filter(method => operations[method]).map(method => operations[method]);
-      for (const operation of listed) for (const [name, kind] of Object.entries(operation.inputs)) merge(found, name, kind);
+      for (const method of methods.filter(item => operations[item])) {
+        for (const [name, kind] of Object.entries(operations[method].inputs)) {
+          merge(found, name, kind);
+          claims[method] = new Set([...(claims[method] || []), name]);
+        }
+      }
       if (listed.length && listed.length === methods.length && listed.every(operation => operation.complete)) authoritative = true;
       read = true;
       counts.openapi += 1;
@@ -269,9 +298,12 @@ function finalize(routes, sources = {}) {
       }
       if (!(name in found) && read) reasons.push(reason('observed', `${name} was read while recording, but the analysis didn't find it`));
       merge(found, name, kind);
+      shared.add(name);
       read = true;
     }
     if (!read) continue;
+    // A route's own parameters come from the path, not the query or body.
+    for (const name of pathParameters(route)) delete found[name];
     data.inputs = found;
     data.inputs_complete = reasons.length === 0;
     if (reasons.length) {
@@ -282,8 +314,29 @@ function finalize(routes, sources = {}) {
       delete data.inputs_incomplete;
       counts.complete += 1;
     }
+    // Keys inside an input, when every reading of it reads constant keys.
+    const inner = Object.fromEntries(Object.entries(nested).filter(([name]) => name in found && !flat.has(name)));
+    if (Object.keys(inner).length && !reasons.length) data.inputs_nested = inner;
+    else delete data.inputs_nested;
+    const methods = byMethod(found, data.methods || [], claims, shared);
+    if (methods && !reasons.length) data.inputs_by_method = methods;
+    else delete data.inputs_by_method;
   }
   return counts;
+}
+
+/**
+ * Each method's names, when the route's complete list is read by different methods' code: a
+ * method takes the names its own code reads, and every name no method's code claims. Null when
+ * every method reads them all.
+ */
+function byMethod(found, methods, claims, shared) {
+  const all = [...new Set(methods.map(method => String(method).toUpperCase()))].sort();
+  if (all.length < 2 || !Object.keys(claims).length) return null;
+  const claimed = new Set(Object.values(claims).flatMap(names => [...names]));
+  const result = Object.fromEntries(all.map(method => [method, Object.keys(found)
+    .filter(name => (claims[method] && claims[method].has(name)) || shared.has(name) || !claimed.has(name)).sort()]));
+  return Object.values(result).some(names => names.length < Object.keys(found).length) ? result : null;
 }
 
 /**
@@ -312,6 +365,7 @@ module.exports = {
   loadObservations,
   loadSpec,
   openapiInputs,
+  pathParameters,
   schemaKind: openapiKind,
   sourcesFromEnvironment
 };

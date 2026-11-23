@@ -1,6 +1,53 @@
 # Changelog
 
-## Python 1.3.1 / Node.js 1.3.1 / Java 1.4.0 — prepared release
+## Python 1.3.2 / aiwaf-rust 0.2.17 / Node.js 1.3.2 / WASM 0.2.13 / Java 1.4.0 — prepared release
+
+- **Release note:** Python 1.3.1, npm 1.3.1, aiwaf-rust 0.2.16 and aiwaf-wasm 0.2.12 are
+  published. Publish aiwaf-rust 0.2.17 (`rust-v0.2.17`) before Python 1.3.2, which requires
+  `aiwaf-rust>=0.2.17`, and aiwaf-wasm 0.2.13 (`wasm-v0.2.13`) before npm 1.3.2, then update
+  `js/package-lock.json` to it (`^0.2.11` already allows it). With an older engine, per-method
+  lists, nested keys and multipart names aren't checked, and setting `AIWAF_STRICT_INPUTS_EXEMPT`
+  turns strict inputs off with a warning rather than checking the exempt paths. Java 1.4.0 isn't
+  on Maven Central yet, so it carries the Java changes listed under 1.3.1 and 1.3.0 too.
+- `init` accuracy, measured with a benchmark of seven apps with known inputs (Django + DRF,
+  Flask, FastAPI, Express, NestJS, Fastify, Spring): name recall from 88.6% to 100%, routes
+  called complete correctly from 42 to all 52 that can be, and none wrongly called complete
+  (was 5). The fixes:
+  - A path several handlers serve (GET and POST views, two controller methods) takes every
+    handler's inputs, not only the last one's (Python and Java); a handler whose code isn't
+    found makes the list incomplete (`unread_view`).
+  - Express routers mounted with `app.use('/prefix', router)` are found, nested and with
+    parameters, in Express 4 and 5.
+  - A FastAPI `dict` or `Any` body, and `express.raw()` or `express.text()` before a handler,
+    make the route incomplete instead of listing a field named `body` or `length`.
+  - A query or body container passed to a project helper, as `parse_filters(request.args)` or
+    `readAddress(req.body)`, is followed into it.
+  - Path parameters aren't listed as query or body inputs; Flask's `request.files` names are;
+    `request.get_json(silent=True) or {}` and loops over constant keys are read; Fastify's route
+    options object isn't counted as middleware; and handlers that read nothing get an empty,
+    complete list.
+- Strict inputs check each method's own list. When different handlers serve a path's methods,
+  `init` saves `inputs_by_method` (Python, Node.js and Java): each method takes the names its
+  handler's code, its framework schema or its OpenAPI operation reads, plus every name nothing
+  ties to one method (declarations, recordings). The engines take the request's method
+  (`review_method` in aiwaf-rust and aiwaf-wasm, an overload in Java); HEAD uses GET's list, and
+  an engine without it checks the whole list. In the init benchmark, names a method accepts
+  without reading them went from 34 to 0, with no method's list missing a name it reads.
+- Strict inputs check multipart form field names (a file part by its field name), and keys
+  inside object-valued inputs when `init` knows them all (`inputs_nested`, from code that reads
+  only constant keys inside them, or Java body classes' nested classes): `user.role` in a JSON
+  object or a form's `user[role]`. `AIWAF_STRICT_INPUTS_EXEMPT` lists path prefixes it skips
+  (`aiwaf.strict-inputs-exempt`, `security.strict_inputs_exempt`, Node.js
+  `strictInputsExempt`). Shared cases cover all three engines.
+- Node.js handlers passed by name (`app.get('/x', list)`) get their own method's list, from the
+  methods Express routed them for; and names read off a raw body (`express.raw()`) aren't listed.
+- Python reads request schemas from a view's own decorators' closures, as `@validate(Body)`:
+  pydantic models, marshmallow schemas, DRF serializers and forms.
+- The Java recorder records the application's own whole reads of the request
+  (`getParameterMap`, `getParameterNames`, the body stream or reader) as `*`, telling them from
+  Spring's binding reads by the calling code.
+
+## Python 1.3.1 / aiwaf-rust 0.2.16 / Node.js 1.3.1 / WASM 0.2.12 — released
 
 - **Release note:** Python 1.3.0, npm 1.3.0 and aiwaf-rust 0.2.15 are published; this release
   adds the route input work below. aiwaf-rust and aiwaf-wasm are unchanged, so Python 1.3.1

@@ -31,7 +31,8 @@ import ast
 from typing import Dict, List, Optional, Tuple
 
 # Request attributes that hold the query or body. Called ones, as get_json(), are read by calling.
-_CONTAINERS = {"GET", "POST", "args", "form", "json", "values", "data", "query_params", "body", "get_json", "get_data"}
+_CONTAINERS = {"GET", "POST", "args", "form", "json", "values", "data", "query_params", "body", "get_json", "get_data",
+               "files", "FILES"}
 _CALLED = {"get_json", "get_data", "json", "form", "body"}
 # Request attributes that read the query string or body some other way.
 _RAW = {"query_string", "full_path", "stream", "get_full_path", "receive", "content"}
@@ -64,6 +65,7 @@ _UNKNOWN = {"RAISE": "raise", "EXCLUDE": "exclude", "INCLUDE": "include"}
 # Class views whose handlers read nothing the class doesn't show.
 _PLAIN_VIEWS = {"View", "APIView", "MethodView", "HTTPEndpoint"}
 _ROUTE_DECORATORS = {"api_route", "delete", "get", "patch", "post", "put", "route"}
+_OPEN_ANNOTATIONS = {"dict", "Dict", "Mapping", "MutableMapping", "Any", "JsonValue", "Json"}
 _NON_INPUT_ANNOTATIONS = {"AsyncSession", "BackgroundTasks", "Connection", "Request", "Response", "Session", "WebSocket"}
 _NON_INPUT_PARAMETERS = {"self", "cls", "request", "req", "db", "session", "response", "background_tasks"}
 # How far imports and helpers are followed.
@@ -71,6 +73,7 @@ _MAX_DEPTH = 6
 
 REASON_CODES = (
     "helper", "container_whole", "dynamic_key", "raw_body", "class_view", "dependency", "external_class", "model_fields",
+    "unread_view",
 )
 
 
@@ -317,6 +320,10 @@ class _Reads:
         self.active: set = set()
         # Locations whose webargs arguments reject any name they don't list.
         self.closed: Dict[str, bool] = {}
+        # Keys read inside an input, as name in data["user"]["name"]; and inputs used any other
+        # way, whose keys aren't known.
+        self.nested: Dict[str, set] = {}
+        self.flat: set = set()
 
     @property
     def complete(self) -> bool:
@@ -401,7 +408,9 @@ class _Reads:
                 names.add(parameter.arg)
         return names
 
-    def walk(self, node, requests: set) -> None:
+    def walk(self, node, requests: set, containers: Optional[Dict[str, str]] = None) -> None:
+        """What node reads from the request (its names in requests), and from query or body
+        containers it was given, as a helper's args parameter (containers: name to label)."""
         parents: Dict[int, ast.AST] = {}
         for parent in ast.walk(node):
             for child in ast.iter_child_nodes(parent):
@@ -427,23 +436,65 @@ class _Reads:
         def label(expr) -> str:
             return _dotted(expr) or "the request body"
 
+        def loop_keys(node) -> Optional[List[str]]:
+            """The keys a loop variable takes, as key in for key in ("theme", "lang"), or None."""
+            if not isinstance(node, ast.Name):
+                return None
+            current = parents.get(id(node))
+            while current is not None:
+                loops = current.generators if isinstance(current, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)) \
+                    else [current] if isinstance(current, ast.For) else []
+                for loop in loops:
+                    if isinstance(loop.target, ast.Name) and loop.target.id == node.id:
+                        values = loop.iter.elts if isinstance(loop.iter, (ast.Tuple, ast.List, ast.Set)) else None
+                        keys = [self.key(value) for value in values or ()]
+                        return keys if values and all(key is not None for key in keys) else None
+                current = parents.get(id(current))
+            return None
+
+        def keys(node) -> Optional[List[str]]:
+            key = self.key(node)
+            return [key] if key is not None else loop_keys(node)
+
+        def inner(read, key: str) -> None:
+            """What's done with an input's value: a constant-key read inside it, or anything else."""
+            _, parent = up(read)
+            sub = None
+            if isinstance(parent, ast.Subscript) and parent.value is read:
+                sub = self.key(parent.slice)
+            elif isinstance(parent, ast.Attribute) and parent.attr == "get":
+                call = parents.get(id(parent))
+                if isinstance(call, ast.Call) and call.func is parent and call.args:
+                    sub = self.key(call.args[0])
+            if sub is None:
+                self.flat.add(key)
+            else:
+                self.nested.setdefault(key, set()).add(sub)
+
         def container(expr, name: str) -> None:
             """A query or body container, as request.GET, and what's done with it."""
             expr, parent = up(expr)
+            if isinstance(parent, ast.BoolOp) and isinstance(parent.op, ast.Or) and parent.values[0] is expr:
+                container(parent, name)  # request.get_json(silent=True) or {}
+                return
             if isinstance(parent, ast.Subscript) and parent.value is expr:
-                key = self.key(parent.slice)
-                if key is not None:
-                    _merge(self.inputs, key, converted(parent))
+                found = keys(parent.slice)
+                if found is not None:
+                    for key in found:
+                        _merge(self.inputs, key, converted(parent))
+                        inner(parent, key)
                 else:
                     self.incomplete("dynamic_key", f"{name} is read with a key that isn't a constant", parent)
                 return
             if isinstance(parent, ast.Attribute) and parent.value is expr:
                 call = parents.get(id(parent))
                 if parent.attr in {"get", "getlist", "get_list", "getall"} and isinstance(call, ast.Call) and call.func is parent:
-                    key = self.key(call.args[0]) if call.args else None
-                    if key is not None:
+                    found = keys(call.args[0]) if call.args else None
+                    if found is not None:
                         kind = next((_CONVERTERS.get(_dotted(k.value), "text") for k in call.keywords if k.arg == "type"), None)
-                        _merge(self.inputs, key, kind or converted(call))
+                        for key in found:
+                            _merge(self.inputs, key, kind or converted(call))
+                            inner(call, key)
                     else:
                         self.incomplete("dynamic_key", f"{name}.{parent.attr}() is called with a key that isn't a constant", call)
                     return
@@ -474,6 +525,8 @@ class _Reads:
                     if callee.split(".")[-1][:1].isupper():  # A class, as a form or serializer.
                         self.class_reason(reason or ("external_class", callee), call)
                         return
+                    if self.follow(call, expr, parent, container=name):
+                        return  # A helper of the project's, read with the container as its parameter.
                     self.incomplete("container_whole", f"{name} is passed whole to {callee}", call)
                     return
             self.incomplete("container_whole", f"{name} is used whole", parent or expr)
@@ -501,6 +554,10 @@ class _Reads:
                     self.incomplete("helper", f"the request is passed to {_dotted(call.func) or 'a call'}, which isn't followed", call)
                 else:
                     self.incomplete("helper", "the request is stored or returned where it may be read", expr)
+        # A container this function was given, as a helper's args parameter.
+        for expr in ast.walk(node):
+            if isinstance(expr, ast.Name) and expr.id in (containers or {}) and isinstance(expr.ctx, ast.Load):
+                container(expr, containers[expr.id])
         # What's read from an alias, as data = request.json, then data["q"].
         for expr in ast.walk(node):
             if isinstance(expr, ast.Name) and expr.id in aliases and isinstance(expr.ctx, ast.Load):
@@ -521,15 +578,16 @@ class _Reads:
                     return source.constants.get(target[1])
         return None
 
-    def follow(self, call: ast.Call, request: ast.AST, holder: ast.AST) -> bool:
-        """Whether a call the request is passed to is one these reads cover, following it if needed."""
+    def follow(self, call: ast.Call, request: ast.AST, holder: ast.AST, container: Optional[str] = None) -> bool:
+        """Whether a call the request is passed to is one these reads cover, following it if needed.
+        With container, what's passed is that query or body container (its label), not the request."""
         callee = _dotted(call.func)
         method = callee.split(".")[-1]
         # A class view is read whole, so its own methods are covered; a plain View's dispatch and
         # setup only route the request to them.
-        if callee.startswith("self.") and callee.count(".") == 1 and method in self.methods:
+        if container is None and callee.startswith("self.") and callee.count(".") == 1 and method in self.methods:
             return True
-        if callee.startswith("super.") and self.plain_class and method in {"dispatch", "setup", "get", "post", "put", "patch", "delete", "head", "options"}:
+        if container is None and callee.startswith("super.") and self.plain_class and method in {"dispatch", "setup", "get", "post", "put", "patch", "delete", "head", "options"}:
             return True
         found = self.module.lookup("function", callee)
         if found is None:
@@ -551,7 +609,10 @@ class _Reads:
         caller = self.module
         self.module = module
         try:
-            self.walk(target, {name})
+            if container is None:
+                self.walk(target, {name})
+            else:
+                self.walk(target, set(), {name: container})
         finally:
             self.module = caller
             self.active.discard(id(target))
@@ -576,7 +637,10 @@ class _Reads:
                 alias = next((k.value.value for k in default.keywords if k.arg == "alias" and isinstance(k.value, ast.Constant)), None)
                 name = alias if isinstance(alias, str) else name
             model = self.module.model(annotation)
-            if model is not None:
+            if _last(annotation) in _OPEN_ANNOTATIONS or (isinstance(annotation, ast.Subscript) and _last(annotation.value) in _OPEN_ANNOTATIONS):
+                # A dict or Any body takes whatever names the client sends.
+                self.incomplete("container_whole", f"parameter {parameter.arg} takes a whole {_last(annotation) or 'body'}", parameter)
+            elif model is not None:
                 models.append((name, model, parameter))
             elif _annotation_type(annotation) == "text" and _last(annotation) not in {"", "str", "Optional", "List", "list"} \
                     and _last(annotation) not in _ANNOTATIONS:
@@ -616,6 +680,9 @@ def _flask_request(tree: ast.Module) -> bool:
 
 def _entry(function: str, filename: str, reads: _Reads) -> dict:
     entry = {"function": function, "file": filename, "inputs": dict(reads.inputs), "complete": reads.complete}
+    nested = {key: sorted(keys) for key, keys in reads.nested.items() if key not in reads.flat and key in reads.inputs}
+    if nested:
+        entry["nested"] = nested
     if reads.reasons:  # Only on incomplete entries, so complete ones keep the shared report shape.
         entry["reasons"] = [dict(reason) for reason in reads.reasons]
     return entry
@@ -661,9 +728,12 @@ def module_inputs(tree: ast.Module, filename: str, module: Optional[_Module] = N
             reads = _Reads(module, flask_request)
             reads.active.add(id(node))
             requests = reads.request_names(node)
-            # Only what can be a view: a route-decorated function, or one that takes the request.
+            # Only what can be a view: a route-decorated function, or one that takes the request
+            # (even unused, as def detail(request, pk) that reads nothing).
             routed = _route_decorated(node)
-            if not routed and not _uses_request(node, requests):
+            takes_request = any(parameter.arg in _REQUEST_NAMES or _last(parameter.annotation) in _REQUEST_ANNOTATIONS
+                                for parameter in node.args.args[:1])
+            if not routed and not takes_request and not _uses_request(node, requests):
                 continue
             # webargs arguments say what the view's parameters hold; otherwise each is an input.
             if not reads.arguments(node) and routed:
@@ -701,8 +771,14 @@ def merge_into(routes: dict, path: str, entry: dict) -> None:
     """Adds one function's inputs to a route; a route served by several takes them all."""
     data = routes[path]
     inputs = data.setdefault("inputs", {})
+    nested = entry.get("nested") or {}
     for name, kind in entry["inputs"].items():
         _merge(inputs, name, kind)
+        # An input's inner keys are only known when every function reading it reads them.
+        if name in nested:
+            data.setdefault("_nested", {}).setdefault(name, set()).update(nested[name])
+        else:
+            data.setdefault("_flat", set()).add(name)
     data["inputs_complete"] = bool(data.get("inputs_complete", True)) and bool(entry["complete"])
     reasons = data.setdefault("inputs_incomplete", [])
     for reason in entry.get("reasons", ()):

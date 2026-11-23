@@ -16,6 +16,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -29,9 +30,10 @@ import java.util.TreeSet;
  *
  * <p>Each request appends a line per parameter read with {@code getParameter} or
  * {@code getParameterValues}: {@code {"route", "method", "key"}}, the route being Spring's matched
- * pattern when there is one. Reads of the whole parameter map and of the body aren't recorded,
- * since Spring's binders and message converters make them for every handler; the source scan
- * reports handlers that make them themselves. {@code init} reads the file (see InputSourcesCore).
+ * pattern when there is one. A read of the whole parameter map or names, or of the body as a
+ * stream or reader, is recorded as the key {@code *} when the application's own code makes it:
+ * Spring's binders and message converters make them for every handler, so reads from framework
+ * and container code aren't counted. {@code init} reads the file (see InputSourcesCore).
  */
 public final class AiwafInputRecorderFilter implements Filter {
     public static final String ENVIRONMENT = "AIWAF_RECORD_INPUTS";
@@ -40,6 +42,21 @@ public final class AiwafInputRecorderFilter implements Filter {
     // Read by CSRF protection on every form post, not by the handler.
     private static final Set<String> IGNORED = Set.of("_csrf", "csrf_token", "csrfmiddlewaretoken");
     private static final ObjectMapper JSON = new ObjectMapper();
+    static final String WHOLE = "*";
+    // Code whose reads of the whole request are the framework's or the container's, not the app's.
+    private static final List<String> FRAMEWORK = List.of(
+            "java.", "javax.", "jakarta.", "jdk.", "sun.", "com.sun.", "org.springframework.", "org.apache.", "com.fasterxml.",
+            "io.undertow.", "org.eclipse.jetty.", "org.glassfish.", "com.aiwaf.");
+    private static final StackWalker WALKER = StackWalker.getInstance();
+
+    /** Whether the code calling into the request is the application's own. */
+    static boolean calledByApplication() {
+        return WALKER.walk(frames -> frames.map(StackWalker.StackFrame::getClassName)
+                .filter(name -> !name.startsWith(AiwafInputRecorderFilter.class.getName()))
+                .findFirst()
+                .map(name -> FRAMEWORK.stream().noneMatch(name::startsWith))
+                .orElse(false));
+    }
 
     private final Path target;
 
@@ -83,6 +100,34 @@ public final class AiwafInputRecorderFilter implements Filter {
             public String[] getParameterValues(String name) {
                 note(name);
                 return super.getParameterValues(name);
+            }
+
+            @Override
+            public java.util.Map<String, String[]> getParameterMap() {
+                whole();
+                return super.getParameterMap();
+            }
+
+            @Override
+            public java.util.Enumeration<String> getParameterNames() {
+                whole();
+                return super.getParameterNames();
+            }
+
+            @Override
+            public jakarta.servlet.ServletInputStream getInputStream() throws IOException {
+                whole();
+                return super.getInputStream();
+            }
+
+            @Override
+            public java.io.BufferedReader getReader() throws IOException {
+                whole();
+                return super.getReader();
+            }
+
+            private void whole() {
+                if (calledByApplication()) keys.add(WHOLE);
             }
 
             private void note(String name) {

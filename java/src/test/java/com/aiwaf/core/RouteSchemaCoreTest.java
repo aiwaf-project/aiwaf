@@ -98,7 +98,8 @@ class RouteSchemaCoreTest {
     void sharedStrictCases() throws Exception {
         JsonNode cases = fixture();
         Map<String, Object> manifest = new LinkedHashMap<>(MAPPER.convertValue(cases.get("manifest"), Map.class));
-        manifest.put("strict_inputs", Map.of("allow", MAPPER.convertValue(cases.get("strict_cases").get("allow"), List.class)));
+        manifest.put("strict_inputs", Map.of("allow", MAPPER.convertValue(cases.get("strict_cases").get("allow"), List.class),
+                "exempt", MAPPER.convertValue(cases.get("strict_cases").get("exempt"), List.class)));
         RouteSchemaCore.Schemas schemas = new RouteSchemaCore.Schemas(manifest);
         assertTrue(schemas.strict());
         assertFalse(new RouteSchemaCore.Schemas(MAPPER.convertValue(cases.get("manifest"), Map.class)).strict());
@@ -106,7 +107,8 @@ class RouteSchemaCoreTest {
             Map<String, String> query = query(item.get("query").asText());
             String body = item.get("body").asText();
             String found = SqlInjectionCore.inspectQueryAndBody(query, body, 65536);
-            RouteSchemaCore.Review review = schemas.review(item.get("path").asText(), query, body, 65536, found);
+            RouteSchemaCore.Review review = schemas.review(item.has("method") ? item.get("method").asText() : "",
+                    item.get("path").asText(), query, body, 65536, found);
             String outcome = review != null ? review.action() : found != null ? "block" : "pass";
             assertEquals(item.get("expect").asText(), outcome, item.toString());
             if (item.has("input")) assertEquals(item.get("input").asText(), review.input(), item.toString());
@@ -127,6 +129,17 @@ class RouteSchemaCoreTest {
         strict.strictInputsAllow = List.of("role");
         assertTrue(new AiwafEngine(strict).evaluate(post("/comments", extra)).allowed());
         assertTrue(new AiwafEngine(config("enforce")).evaluate(post("/comments", extra)).allowed());
+        // Each method's own list: /articles' POST reads title, its GET q.
+        strict.strictInputsAllow = List.of();
+        assertTrue(new AiwafEngine(strict).evaluate(post("/articles", "{\"title\": \"t\"}")).allowed());
+        assertEquals("schema_unexpected_input", new AiwafEngine(strict).evaluate(post("/articles", "{\"title\": \"t\", \"q\": \"x\"}")).reason());
+        // An exempt path prefix skips strict inputs.
+        strict.strictInputsExempt = List.of("/comments");
+        assertTrue(new AiwafEngine(strict).evaluate(post("/comments", extra.replace("role", "other"))).allowed());
+        strict.strictInputsExempt = null;
+        AiwafConfig fromEnvironment = new AiwafConfig();
+        AiwafConfigCompatCore.applyEnv(fromEnvironment, Map.of("AIWAF_STRICT_INPUTS_EXEMPT", "/a/, /b/*"));
+        assertEquals(List.of("/a/", "/b/*"), fromEnvironment.strictInputsExempt);
         AiwafConfig monitor = config("monitor");
         monitor.strictInputs = true;
         monitor.strictInputsAllow = null;

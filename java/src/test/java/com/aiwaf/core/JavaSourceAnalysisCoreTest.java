@@ -485,6 +485,49 @@ class JavaSourceAnalysisCoreTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void everyHandlerOnASharedPathIsLinked() throws IOException {
+        JavaSourceAnalysisCore.Report report = analyze("""
+                @RestController
+                @RequestMapping("/api")
+                class Books {
+                    @GetMapping("/books/{id}")
+                    String list(@RequestParam String q, @PathVariable long id) { return q; }
+                    @PostMapping("/books/{id}")
+                    String create(@RequestBody Book book) { return ""; }
+                }
+                class Book { String title; int year; Author author; static int count; @JsonIgnore Author hidden; java.util.List<String> tags; }
+                class Author { String name; @JsonProperty("mail") String email; }
+                """);
+        Map<String, Object> manifest = PathManifestCore.buildManifestFromSource("java-source", report.routes());
+        Map<String, Object> books = ((Map<String, Map<String, Object>>) manifest.get("routes")).get("/api/books/{id}");
+        assertEquals(List.of("Books.create", "Books.list"), books.get("views"));
+        RouteRiskCore.applyReport(report, manifest);
+        assertEquals(Map.of("q", "text", "title", "text", "year", "int", "author", "text", "tags", "text"), books.get("inputs"));
+        assertEquals(true, books.get("inputs_complete"));
+        assertEquals(Map.of("GET", List.of("q"), "POST", List.of("author", "tags", "title", "year")), books.get("inputs_by_method"));
+        assertEquals(Map.of("author", List.of("mail", "name")), books.get("inputs_nested"));
+        assertEquals(Map.of("Books.create", List.of("POST"), "Books.list", List.of("GET")), books.get("view_methods"));
+        // Names a declaration or recording adds are every method's.
+        assertEquals(Map.of("GET", List.of("a", "s"), "POST", List.of("b", "s")), InputSourcesCore.byMethod(
+                new java.util.TreeMap<>(Map.of("a", "text", "b", "text", "s", "text")), List.of("GET", "POST"),
+                Map.of("GET", java.util.Set.of("a"), "POST", java.util.Set.of("b", "s")), java.util.Set.of("s")));
+        assertEquals(null, InputSourcesCore.byMethod(Map.of("a", "text"), List.of("GET"), Map.of("GET", java.util.Set.of("a")), java.util.Set.of()));
+        assertEquals(null, InputSourcesCore.byMethod(Map.of("a", "text"), "GET", Map.of(), java.util.Set.of()));
+        assertEquals(null, InputSourcesCore.byMethod(Map.of("a", "text"), List.of("GET", "POST"),
+                Map.of("GET", java.util.Set.of("a"), "POST", java.util.Set.of("a")), java.util.Set.of()));
+        // One handler's code not found: incomplete, and says which.
+        JavaSourceAnalysisCore.Report partial = new JavaSourceAnalysisCore.Report(report.filesScanned(), report.findings(), report.errors(),
+                report.routes(), 0, 0, report.inputs().stream().filter(entry -> entry.function().endsWith("list")).toList());
+        Map<String, Object> again = PathManifestCore.buildManifestFromSource("java-source", report.routes());
+        RouteRiskCore.applyReport(partial, again);
+        Map<String, Object> route = ((Map<String, Map<String, Object>>) again.get("routes")).get("/api/books/{id}");
+        assertEquals(false, route.get("inputs_complete"));
+        assertEquals("unread_view", ((List<Map<String, Object>>) route.get("inputs_incomplete")).get(0).get("code"));
+        assertEquals(List.of("id", "slug", "name"), InputSourcesCore.pathParameters("/a/{id}/<slug>/:name"));
+    }
+
+    @Test
     void sourceRoutesBuildASharedFormatManifest() throws IOException {
         JavaSourceAnalysisCore.Report report = analyze("""
                 @Controller

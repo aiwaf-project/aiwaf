@@ -100,6 +100,47 @@
         "view": "tickets",
         "inputs": {},
         "inputs_complete": true
+      },
+      "/articles": {
+        "view": "articles",
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "inputs": {
+          "q": "text",
+          "title": "text"
+        },
+        "inputs_complete": true,
+        "inputs_by_method": {
+          "GET": [
+            "q"
+          ],
+          "POST": [
+            "title"
+          ]
+        }
+      },
+      "/profile": {
+        "view": "profile",
+        "inputs": {
+          "user": "text",
+          "page": "int"
+        },
+        "inputs_complete": true,
+        "inputs_nested": {
+          "user": [
+            "name",
+            "email"
+          ]
+        }
+      },
+      "/legacy/import": {
+        "view": "legacy_import",
+        "inputs": {
+          "x": "text"
+        },
+        "inputs_complete": true
       }
     }
   },
@@ -310,7 +351,7 @@
     }
   ],
   "strict_cases": {
-    "_comment": "The same manifest with {\"strict_inputs\": {\"allow\": allow}} added: names a complete route never reads are unexpected.",
+    "_comment": "The same manifest with {\"strict_inputs\": {\"allow\": allow}} added: names a complete route never reads are unexpected. A case's method, when given, checks that method's own list (inputs_by_method). exempt: path prefixes strict inputs skip. Keys inside an object-valued input are checked when the route lists them (inputs_nested).",
     "allow": [
       "trace_*"
     ],
@@ -371,8 +412,108 @@
         "path": "/comments",
         "query": "",
         "body": "--boundary\r\nContent-Disposition: form-data; name=\"role\"\r\n\r\nadmin\r\n--boundary--",
+        "expect": "unexpected",
+        "input": "role"
+      },
+      {
+        "path": "/articles",
+        "method": "GET",
+        "query": "q=news&title=x",
+        "body": "",
+        "expect": "unexpected",
+        "input": "title"
+      },
+      {
+        "path": "/articles",
+        "method": "HEAD",
+        "query": "title=x",
+        "body": "",
+        "expect": "unexpected",
+        "input": "title"
+      },
+      {
+        "path": "/articles",
+        "method": "GET",
+        "query": "q=news",
+        "body": "",
+        "expect": "pass"
+      },
+      {
+        "path": "/articles",
+        "method": "POST",
+        "query": "",
+        "body": "{\"title\": \"t\", \"q\": \"x\"}",
+        "expect": "unexpected",
+        "input": "q"
+      },
+      {
+        "path": "/articles",
+        "method": "PATCH",
+        "query": "q=1&title=2",
+        "body": "",
+        "expect": "pass"
+      },
+      {
+        "path": "/articles",
+        "query": "q=1&title=2",
+        "body": "",
+        "expect": "pass"
+      },
+      {
+        "path": "/profile",
+        "query": "",
+        "body": "{\"user\": {\"name\": \"a\", \"role\": \"admin\"}}",
+        "expect": "unexpected",
+        "input": "user.role"
+      },
+      {
+        "path": "/profile",
+        "query": "",
+        "body": "{\"user\": {\"name\": \"a\", \"email\": \"e\"}, \"page\": 2}",
+        "expect": "pass"
+      },
+      {
+        "path": "/profile",
+        "query": "",
+        "body": "{\"user\": \"plain text\"}",
+        "expect": "pass"
+      },
+      {
+        "path": "/profile",
+        "query": "user%5Bname%5D=a&user[role]=b",
+        "body": "",
+        "expect": "unexpected",
+        "input": "user.role"
+      },
+      {
+        "path": "/profile",
+        "query": "user[name]=a&user[email]=e",
+        "body": "",
+        "expect": "pass"
+      },
+      {
+        "path": "/profile",
+        "query": "",
+        "body": "--b\r\nContent-Disposition: form-data; name=\"page\"\r\n\r\n2\r\n--b\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"a.png\"\r\nContent-Type: image/png\r\n\r\nPNG\r\n--b--\r\n",
+        "expect": "unexpected",
+        "input": "avatar"
+      },
+      {
+        "path": "/profile",
+        "query": "",
+        "body": "--b\r\nContent-Disposition: form-data; name=\"page\"\r\n\r\ntwo\r\n--b--\r\n",
+        "expect": "mismatch",
+        "input": "page"
+      },
+      {
+        "path": "/legacy/import",
+        "query": "x=1&anything=2",
+        "body": "",
         "expect": "pass"
       }
+    ],
+    "exempt": [
+      "/legacy/"
     ]
   }
 }

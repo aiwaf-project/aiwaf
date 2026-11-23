@@ -65,6 +65,34 @@ class AiwafInputRecorderFilterTest {
     }
 
     @Test
+    void recordsWholeReadsTheApplicationMakesButNotTheFrameworks() throws Exception {
+        Path target = directory.resolve("whole.jsonl");
+        AiwafInputRecorderFilter filter = new AiwafInputRecorderFilter(target);
+        String[] routes = {"/map", "/names", "/stream", "/reader"};
+        for (String route : routes) {
+            MockHttpServletRequest request = new MockHttpServletRequest("POST", route);
+            request.setServletPath(route);
+            filter.doFilter(request, new MockHttpServletResponse(), new MockFilterChain(new jakarta.servlet.http.HttpServlet() {
+                @Override
+                protected void service(HttpServletRequest req, jakarta.servlet.http.HttpServletResponse res) throws java.io.IOException {
+                    switch (route) {
+                        case "/map" -> example.WholeReads.parameters(req);
+                        case "/names" -> example.WholeReads.names(req);
+                        case "/stream" -> example.WholeReads.stream(req);
+                        default -> example.WholeReads.reader(req);
+                    }
+                    req.getParameterMap(); // From com.aiwaf (here, standing in for framework code): not counted.
+                }
+            }));
+        }
+        assertEquals(List.of(
+                "{\"route\":\"/map\",\"method\":\"POST\",\"key\":\"*\"}",
+                "{\"route\":\"/names\",\"method\":\"POST\",\"key\":\"*\"}",
+                "{\"route\":\"/stream\",\"method\":\"POST\",\"key\":\"*\"}",
+                "{\"route\":\"/reader\",\"method\":\"POST\",\"key\":\"*\"}"), Files.readAllLines(target));
+    }
+
+    @Test
     void offAndUnwritableOnlyPassTheRequestOn() throws Exception {
         MockFilterChain chain = new MockFilterChain();
         new AiwafInputRecorderFilter((Path) null).doFilter(new MockHttpServletRequest(), new MockHttpServletResponse(), chain);

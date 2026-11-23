@@ -218,6 +218,24 @@ struct RiskRoute {
     complete: bool,
     /// Each route parameter's type from the route's own syntax, in the order of compiled.names.
     path_types: Vec<Option<&'static str>>,
+    /// The names each method reads, when init could tell them apart (`inputs_by_method`); a
+    /// method without its own list reads the route's whole list.
+    by_method: HashMap<String, HashSet<String>>,
+    /// The keys read inside object-valued inputs, as {"user": ["email", "name"]}
+    /// (`inputs_nested`), for inputs whose every use reads a constant key.
+    nested: HashMap<String, HashSet<String>>,
+}
+
+impl RiskRoute {
+    /// The names a request with this method may send under strict inputs.
+    fn reads(&self, method: &str, name: &str) -> bool {
+        let method = method.to_ascii_uppercase();
+        let own = self.by_method.get(&method).or_else(|| if method == "HEAD" { self.by_method.get("GET") } else { None });
+        match own {
+            Some(names) => names.contains(name),
+            None => self.inputs.as_ref().is_some_and(|inputs| inputs.contains_key(name)),
+        }
+    }
 }
 
 /// What a route's saved inputs say about a request, from `RouteRisks::review`.
@@ -235,6 +253,21 @@ pub enum Review {
 /// Names strict inputs always allows: CSRF tokens, read by middleware rather than the handler,
 /// and tracking and cache-busting parameters that links and clients add. A trailing * matches
 /// any rest.
+/// Strict inputs' settings from the manifest's `strict_inputs`: names always allowed, and path
+/// prefixes it skips.
+struct Strict {
+    allow: Vec<String>,
+    exempt: Vec<String>,
+}
+
+/// A form name's key inside its input, as role in user[role]; None for a plain name.
+fn bracket_key(raw: &str) -> Option<(String, String)> {
+    let key = decode(raw.split('=').next().unwrap_or_default().as_bytes());
+    let (top, rest) = key.split_once('[')?;
+    let inner = rest.split(']').next()?;
+    (!top.is_empty() && !inner.is_empty()).then(|| (top.to_owned(), inner.to_owned()))
+}
+
 pub const STRICT_ALLOWED: &[&str] = &[
     "csrfmiddlewaretoken", "csrf_token", "_csrf", "_token", "authenticity_token", "utm_*", "fbclid", "gclid", "msclkid", "_",
 ];
@@ -336,6 +369,8 @@ enum BodyFields {
     Empty,
     Form(Vec<(String, Value, String)>),
     Json(serde_json::Map<String, Value>),
+    /// A multipart form's parts, with text parts' values; a file part's value is null.
+    Multipart(Vec<(String, Value, String)>),
 }
 
 fn form_fields(text: &str) -> Vec<(String, Value, String)> {
@@ -350,6 +385,21 @@ fn form_fields(text: &str) -> Vec<(String, Value, String)> {
 }
 
 fn fields(query: &str, body: &[u8]) -> Fields {
+    if let Some(parts) = crate::payload::multipart_parts(body) {
+        let items = parts
+            .into_iter()
+            .take(MAX_ITEMS)
+            .filter(|part| !part.name.is_empty())
+            .map(|part| {
+                let value = match part.filename {
+                    Some(_) => Value::Null,
+                    None => Value::String(String::from_utf8_lossy(&part.content[..part.content.len().min(MAX_VALUE_CHARS)]).into_owned()),
+                };
+                (input_name(&part.name), value, part.name)
+            })
+            .collect();
+        return Fields { query: form_fields(query), body: Some(BodyFields::Multipart(items)) };
+    }
     let body = match std::str::from_utf8(body) {
         Ok(text) if text.trim().is_empty() => Some(BodyFields::Empty),
         Ok(text) if text.trim_start().starts_with('{') => match serde_json::from_str::<Value>(text) {
@@ -375,8 +425,8 @@ pub const RELAXED_RULES: &[&str] = &["sql_function", "sql_comment", "sql_breakou
 /// Saved risks for one manifest, compiled for lookup by request path.
 pub struct RouteRisks {
     routes: Vec<RiskRoute>,
-    /// Strict inputs' allowed names, when the manifest's `strict_inputs` turns it on.
-    strict: Option<Vec<String>>,
+    /// Strict inputs' settings, when the manifest's `strict_inputs` turns it on.
+    strict: Option<Strict>,
 }
 
 fn text_field(value: &Value, key: &str) -> String {
@@ -419,7 +469,40 @@ impl RouteRisks {
                         .filter(|segment| segment.starts_with(['<', '{', ':', '*']))
                         .map(segment_type)
                         .collect();
-                    routes.push(RiskRoute { path: path.clone(), compiled: compile_route(path), risks, inputs, complete, path_types });
+                    let nested = entry
+                        .get("inputs_nested")
+                        .and_then(Value::as_object)
+                        .map(|keys| {
+                            keys.iter()
+                                .filter_map(|(name, keys)| {
+                                    Some((name.clone(), keys.as_array()?.iter().filter_map(Value::as_str).map(str::to_owned).collect()))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let by_method = entry
+                        .get("inputs_by_method")
+                        .and_then(Value::as_object)
+                        .map(|methods| {
+                            methods
+                                .iter()
+                                .filter_map(|(method, names)| {
+                                    let names = names.as_array()?.iter().filter_map(Value::as_str).map(str::to_owned).collect();
+                                    Some((method.to_ascii_uppercase(), names))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    routes.push(RiskRoute {
+                        path: path.clone(),
+                        compiled: compile_route(path),
+                        risks,
+                        inputs,
+                        complete,
+                        path_types,
+                        by_method,
+                        nested,
+                    });
                 }
             }
         }
@@ -429,12 +512,14 @@ impl RouteRisks {
         });
         // Hosts turn strict inputs on by adding {"strict_inputs": {"allow": [...]}}, the names
         // to allow besides STRICT_ALLOWED, to the manifest they pass.
+        let strings = |value: &Value, key: &str| -> Vec<String> {
+            value.get(key).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect()
+        };
         let strict = manifest.get("strict_inputs").filter(|value| value.is_object()).map(|value| {
             let mut allow: Vec<String> = STRICT_ALLOWED.iter().map(|name| (*name).to_owned()).collect();
-            allow.extend(
-                value.get("allow").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned),
-            );
-            allow
+            allow.extend(strings(value, "allow"));
+            let exempt = strings(value, "exempt").into_iter().map(|prefix| prefix.trim_end_matches('*').to_owned()).filter(|prefix| !prefix.is_empty()).collect();
+            Strict { allow, exempt }
         });
         Self { routes, strict }
     }
@@ -448,6 +533,12 @@ impl RouteRisks {
         self.strict.is_some()
     }
 
+    /// Whether this engine skips strict inputs' exempt paths, and checks multipart names and
+    /// keys inside inputs: hosts give an older one no exempt list it would ignore.
+    pub fn strict_exempt(&self) -> bool {
+        true
+    }
+
     fn route(&self, path: &str) -> Option<&RiskRoute> {
         let path = if path.is_empty() { "/" } else { path };
         self.routes.iter().find(|route| route.compiled.pattern.is_match(path))
@@ -456,9 +547,23 @@ impl RouteRisks {
     /// Reviews the payload check's finding, by where it came from, or a request with none. A
     /// header's finding always stands. A path's is reviewed by `review_path`.
     pub fn review_found(&self, path: &str, query: &str, body: &[u8], budget: usize, found: Option<(&str, Source)>) -> Option<Review> {
+        self.review_found_method("", path, query, body, budget, found)
+    }
+
+    /// As `review_found`, for a request with this method: strict inputs check the method's own
+    /// list when the manifest has one.
+    pub fn review_found_method(
+        &self,
+        method: &str,
+        path: &str,
+        query: &str,
+        body: &[u8],
+        budget: usize,
+        found: Option<(&str, Source)>,
+    ) -> Option<Review> {
         match found {
-            None => self.review(path, query, body, budget, None),
-            Some((rule, Source::Payload)) => self.review(path, query, body, budget, Some(rule)),
+            None => self.review_method(method, path, query, body, budget, None),
+            Some((rule, Source::Payload)) => self.review_method(method, path, query, body, budget, Some(rule)),
             Some((_, Source::Headers)) => None,
             Some((rule, Source::Path)) => self.review_path(path, budget, rule),
         }
@@ -512,12 +617,18 @@ impl RouteRisks {
     /// the route's inputs aren't known in full: an incomplete list, an operation reached by an
     /// input the audit couldn't name, or a body that isn't a form or JSON object.
     pub fn review(&self, path: &str, query: &str, body: &[u8], budget: usize, found: Option<&str>) -> Option<Review> {
+        self.review_method("", path, query, body, budget, found)
+    }
+
+    /// As `review`, for a request with this method ("" for any): strict inputs check the names
+    /// that method reads when the manifest saved them (`inputs_by_method`).
+    pub fn review_method(&self, method: &str, path: &str, query: &str, body: &[u8], budget: usize, found: Option<&str>) -> Option<Review> {
         let route = self.route(path)?;
         let inputs = route.inputs.as_ref()?;
         let fields = fields(query, body);
         let mut all: Vec<(&String, &Value)> = fields.query.iter().map(|(name, value, _)| (name, value)).collect();
         match &fields.body {
-            Some(BodyFields::Form(items)) => all.extend(items.iter().map(|(name, value, _)| (name, value))),
+            Some(BodyFields::Form(items) | BodyFields::Multipart(items)) => all.extend(items.iter().map(|(name, value, _)| (name, value))),
             Some(BodyFields::Json(map)) => all.extend(map.iter()),
             _ => (),
         }
@@ -532,9 +643,35 @@ impl RouteRisks {
         }
         // Strict inputs: on a route whose list is complete, a name it never reads. Only the query
         // and a form or JSON object body are named; another body's names aren't known.
-        if let Some(allow) = self.strict.as_ref().filter(|_| route.complete) {
-            if let Some((name, _)) = all.iter().find(|(name, _)| !inputs.contains_key(*name) && !allowed(allow, name)) {
+        let request_path = if path.is_empty() { "/" } else { path };
+        if let Some(strict) = self
+            .strict
+            .as_ref()
+            .filter(|strict| route.complete && !strict.exempt.iter().any(|prefix| request_path.starts_with(prefix.as_str())))
+        {
+            let allow = &strict.allow;
+            if let Some((name, _)) = all.iter().find(|(name, _)| !route.reads(method, name) && !allowed(allow, name)) {
                 return Some(Review::Unexpected { route: route.path.clone(), input: (*name).clone() });
+            }
+            // Keys inside an object-valued input whose keys init knows, as user.role.
+            let inner = |top: &str, key: &str| {
+                route.nested.get(top).is_some_and(|keys| !keys.contains(key) && !allowed(allow, &format!("{top}.{key}")))
+            };
+            if let Some(BodyFields::Json(map)) = &fields.body {
+                for (top, value) in map {
+                    if let Some(key) = value.as_object().and_then(|object| object.keys().find(|key| inner(top, key))) {
+                        return Some(Review::Unexpected { route: route.path.clone(), input: format!("{top}.{key}") });
+                    }
+                }
+            }
+            let raw_pairs = fields.query.iter().map(|(_, _, raw)| raw.as_str()).chain(match &fields.body {
+                Some(BodyFields::Form(items) | BodyFields::Multipart(items)) => items.iter().map(|(_, _, raw)| raw.as_str()).collect::<Vec<_>>(),
+                _ => Vec::new(),
+            });
+            for raw in raw_pairs {
+                if let Some((top, key)) = bracket_key(raw).filter(|(top, key)| inner(top, key)) {
+                    return Some(Review::Unexpected { route: route.path.clone(), input: format!("{top}.{key}") });
+                }
             }
         }
         let found = found?;
@@ -565,6 +702,8 @@ impl RouteRisks {
             }
         }
         let kept_body = match body_fields {
+            // A multipart body can't be rebuilt without the parts the schema clears.
+            BodyFields::Multipart(_) => return None,
             BodyFields::Empty => String::new(),
             BodyFields::Form(items) => {
                 let mut kept = Vec::new();
@@ -761,9 +900,32 @@ mod tests {
         assert!(!RouteRisks::new(&json!({"routes": routes, "strict_inputs": true})).strict());
     }
 
+    #[test]
+    fn strict_inputs_check_each_methods_own_list() {
+        let manifest = json!({"strict_inputs": {}, "routes": {"/posts": {
+            "view": "p", "inputs": {"q": "text", "title": "text"}, "inputs_complete": true,
+            "inputs_by_method": {"get": ["q"], "POST": ["title"], "PUT": "not a list"},
+        }}});
+        let risks = RouteRisks::new(&manifest);
+        let unexpected = |input: &str| Some(Review::Unexpected { route: "/posts".into(), input: input.into() });
+        assert_eq!(risks.review_method("GET", "/posts", "title=x", b"", 4096, None), unexpected("title"));
+        assert_eq!(risks.review_method("HEAD", "/posts", "title=x", b"", 4096, None), unexpected("title"));
+        assert_eq!(risks.review_method("get", "/posts", "q=x", b"", 4096, None), None);
+        assert_eq!(risks.review_method("POST", "/posts", "", br#"{"q": 1}"#, 4096, None), unexpected("q"));
+        // A method without its own list, or no method, reads the whole list.
+        assert_eq!(risks.review_method("PATCH", "/posts", "q=1&title=2", b"", 4096, None), None);
+        assert_eq!(risks.review("/posts", "q=1&title=2", b"", 4096, None), None);
+        assert_eq!(risks.review_method("PUT", "/posts", "q=1", b"", 4096, None), None);
+        assert_eq!(risks.review_found_method("GET", "/posts", "title=x", b"", 4096, None), unexpected("title"));
+    }
+
     pub(crate) fn schema_outcome(risks: &RouteRisks, path: &str, query: &str, body: &[u8]) -> (String, String) {
+        method_outcome(risks, "", path, query, body)
+    }
+
+    fn method_outcome(risks: &RouteRisks, method: &str, path: &str, query: &str, body: &[u8]) -> (String, String) {
         let found = crate::payload::inspect_sql(query.as_bytes(), body, 65536, false).map(|(rule, _)| rule);
-        match risks.review(path, query, body, 65536, found.as_deref()) {
+        match risks.review_method(method, path, query, body, 65536, found.as_deref()) {
             Some(Review::Mismatch { input, .. }) => ("mismatch".into(), input),
             Some(Review::Unexpected { input, .. }) => ("unexpected".into(), input),
             Some(Review::Relax { .. }) => ("relax".into(), String::new()),
@@ -795,11 +957,11 @@ mod tests {
             assert_eq!(outcome, (case["expect"].as_str().unwrap().to_owned(), input), "{case}");
         }
         let mut manifest = cases["manifest"].clone();
-        manifest["strict_inputs"] = json!({"allow": cases["strict_cases"]["allow"]});
+        manifest["strict_inputs"] = json!({"allow": cases["strict_cases"]["allow"], "exempt": cases["strict_cases"]["exempt"]});
         let strict = RouteRisks::new(&manifest);
         for case in cases["strict_cases"]["cases"].as_array().unwrap() {
             let text = |key: &str| case[key].as_str().unwrap_or_default().to_owned();
-            let outcome = schema_outcome(&strict, &text("path"), &text("query"), text("body").as_bytes());
+            let outcome = method_outcome(&strict, &text("method"), &text("path"), &text("query"), text("body").as_bytes());
             assert_eq!(outcome, (text("expect"), text("input")), "{case}");
         }
         // A header's finding always stands.

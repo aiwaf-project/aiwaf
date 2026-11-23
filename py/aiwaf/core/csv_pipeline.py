@@ -246,9 +246,10 @@ class CSVPipeline:
         Strict inputs (AIWAF_STRICT_INPUTS) ride in that manifest, when the engine has them.
         """
         from .path_manifest import load_manifest
-        from .route_risks import SCHEMA_MODES, SCHEMA_SETTING, STRICT_WARNING, strict_inputs
+        from .route_risks import SCHEMA_MODES, SCHEMA_SETTING, STRICT_EXEMPT_WARNING, STRICT_WARNING, strict_inputs
 
-        strict = strict_inputs(wire_config.pop("strict_inputs", None), wire_config.pop("strict_inputs_allow", None))
+        strict = strict_inputs(wire_config.pop("strict_inputs", None), wire_config.pop("strict_inputs_allow", None),
+                               wire_config.pop("strict_inputs_exempt", None))
         mode = str(wire_config.pop("route_schema_mode", None) or os.getenv(SCHEMA_SETTING, "monitor")).strip().lower()
         if mode not in SCHEMA_MODES:
             raise ValueError("AIWAF_ROUTE_SCHEMA_MODE must be enforce, monitor, or off")
@@ -262,7 +263,10 @@ class CSVPipeline:
             return
         wire_config["route_schema_mode"] = mode
         wire_config["route_manifest"] = manifest
-        if strict and supports("strict_inputs"):
+        if strict and strict.get("exempt") and not supports("strict_exempt"):
+            # An older engine would check the exempt paths too: better none at all.
+            LOGGER.warning(STRICT_EXEMPT_WARNING)
+        elif strict and supports("strict_inputs"):
             wire_config["route_manifest"] = {**manifest, "strict_inputs": strict}
         elif strict:
             LOGGER.warning(STRICT_WARNING)

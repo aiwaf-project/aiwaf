@@ -183,3 +183,10 @@ test('a bad source file is reported, and the audit still runs', () => {
     warn.mockRestore();
   }
 });
+
+test('path parameters are never query or body inputs', () => {
+  expect(sources.pathParameters('/a/<int:id>/{item_id}/{x:int}/:name/:opt?/[page]/[...rest]')).toEqual(['id', 'item_id', 'x', 'name', 'opt', 'page', 'rest']);
+  const routes = { '/items/:id': { inputs: { id: 'text', q: 'text' }, inputs_complete: true } };
+  sources.finalize(routes);
+  expect(routes['/items/:id'].inputs).toEqual({ q: 'text' });
+});

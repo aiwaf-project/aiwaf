@@ -322,8 +322,9 @@ def test_shared_strict_cases(case):
     from aiwaf.core.sql_injection import SQLInjectionPolicy
 
     found = SQLInjectionPolicy("block").inspect(case["query"].encode(), case["body"].encode())
-    risks = RouteRisks(SCHEMA["manifest"], {"allow": SCHEMA["strict_cases"]["allow"]})
-    review = risks.review(case["path"], case["query"], case["body"].encode(), 65536, found.rule if found else None)
+    risks = RouteRisks(SCHEMA["manifest"], {"allow": SCHEMA["strict_cases"]["allow"], "exempt": SCHEMA["strict_cases"]["exempt"]})
+    review = risks.review(case["path"], case["query"], case["body"].encode(), 65536, found.rule if found else None,
+                          case.get("method", ""))
     outcome = review[0] if review else ("block" if found else "pass")
     assert outcome == case["expect"]
     if case.get("input"):
@@ -336,11 +337,11 @@ def test_strict_inputs_settings_and_modes(tmp_path, caplog, monkeypatch):
     monkeypatch.delenv("AIWAF_STRICT_INPUTS", raising=False)
     monkeypatch.delenv("AIWAF_STRICT_INPUTS_ALLOW", raising=False)
     assert strict_inputs() is None and strict_inputs("no") is None
-    assert strict_inputs(True, "a, b*,") == {"allow": ["a", "b*"]}
-    assert strict_inputs("on", ["x", " "]) == {"allow": ["x"]}
+    assert strict_inputs(True, "a, b*,") == {"allow": ["a", "b*"], "exempt": []}
+    assert strict_inputs("on", ["x", " "]) == {"allow": ["x"], "exempt": []}
     monkeypatch.setenv("AIWAF_STRICT_INPUTS", "1")
     monkeypatch.setenv("AIWAF_STRICT_INPUTS_ALLOW", "trace_*")
-    assert strict_inputs() == {"allow": ["trace_*"]}
+    assert strict_inputs() == {"allow": ["trace_*"], "exempt": []}
     path = write(tmp_path, SCHEMA["manifest"])
     with caplog.at_level(logging.WARNING, logger="aiwaf.route_schema"):
         monitor = observer_for("off", path, "/search", "GET")
@@ -442,3 +443,164 @@ def test_path_findings_are_reviewed_in_the_request_check(tmp_path):
     assert inspect_wsgi_request(request, SQLInjectionPolicy(), observer=observer) is None
     assert inspect_wsgi_request(request, SQLInjectionPolicy(), observer=observer_for("off", path, request.path, "GET")).rule == "sql_function"
     assert observer.review_path("/x", route_risks.Finding("payload_inspection_limit", 413), 1).status == 413
+
+
+def test_every_view_on_a_shared_path_is_linked():
+    from aiwaf.core.request_declarations import merge_entries
+
+    merged = merge_entries({"view": "app.list_posts", "methods": ["GET"]}, {"view": "app.create_post", "methods": ["POST"]})
+    assert merged["views"] == ["app.create_post", "app.list_posts"]
+    assert "views" not in merge_entries({"view": "app.a", "methods": ["GET"]}, {"view": "app.a", "methods": ["POST"]})
+    manifest = {"routes": {"/posts": merged, "/only": {**merged}}}
+    report = {"findings": [], "inputs": [
+        {"function": "list_posts", "file": "app.py", "inputs": {"q": "text"}, "complete": True},
+        {"function": "create_post", "file": "app.py", "inputs": {"title": "text"}, "complete": True},
+    ]}
+    apply_report(report, manifest)
+    assert manifest["routes"]["/posts"]["inputs"] == {"q": "text", "title": "text"}
+    assert manifest["routes"]["/posts"]["inputs_complete"] is True
+    # One view's code not found: the list is incomplete, and says which.
+    manifest = {"routes": {"/posts": {**merged}}}
+    apply_report({"findings": [], "inputs": report["inputs"][:1]}, manifest)
+    route = manifest["routes"]["/posts"]
+    assert route["inputs_complete"] is False
+    assert [reason["code"] for reason in route["inputs_incomplete"]] == ["unread_view"]
+    assert "app.create_post" in route["inputs_incomplete"][0]["detail"]
+
+
+def test_path_parameters_are_dropped_from_inputs():
+    from aiwaf.core.input_sources import finalize, path_parameters
+
+    assert path_parameters("/a/<int:id>/<slug>/{item_id}/{x:int}/:name/:opt?/[page]/[...rest]") == [
+        "id", "slug", "item_id", "x", "name", "opt", "page", "rest"]
+    routes = {"/posts/<int:post_id>": {"inputs": {"post_id": "text", "q": "text"}, "inputs_complete": True}}
+    finalize(routes)
+    assert routes["/posts/<int:post_id>"]["inputs"] == {"q": "text"}
+
+
+def test_each_method_gets_its_own_list_when_its_views_differ(tmp_path, caplog):
+    from aiwaf.core.input_sources import finalize
+    from aiwaf.core.request_declarations import merge_entries
+
+    route = merge_entries({"view": "app.list_posts", "methods": ["GET", "HEAD"]},
+                          {"view": "app.create_post", "methods": ["POST"],
+                           "declared_inputs": {"inputs": {"draft": "bool"}, "covers": [], "reasons": [], "standalone": False}})
+    assert route["view_methods"] == {"app.create_post": ["POST"], "app.list_posts": ["GET", "HEAD"]}
+    assert route["declared_methods"] == {"POST": ["draft"]}
+    manifest = {"routes": {"/posts": route}}
+    apply_report({"findings": [], "inputs": [
+        {"function": "list_posts", "file": "app.py", "inputs": {"q": "text"}, "complete": True},
+        {"function": "create_post", "file": "app.py", "inputs": {"title": "text"}, "complete": True},
+    ]}, manifest, {"declarations": {"/posts": {"inputs": {"trace": "text"}}}, "observations": {"/posts": {"q": "text"}}})
+    saved = manifest["routes"]["/posts"]
+    # A recorded name could be read by any method, so every method's list has it.
+    assert saved["inputs_by_method"] == {"GET": ["q", "trace"], "HEAD": ["q", "trace"],
+                                         "POST": ["draft", "q", "title", "trace"]}
+    assert "_input_methods" not in saved and "declared_methods" not in saved
+    # The engine checks each method's own list.
+    path = write(tmp_path, {**manifest})
+    with caplog.at_level(logging.WARNING, logger="aiwaf.route_schema"):
+        get = observer_for("off", path, "/posts", "GET", "enforce", strict=True)
+        assert get.review(b"title=x", b"", None, 65536).rule == "schema_unexpected_input"
+        assert get.review(b"q=x", b"", None, 65536) is None
+        post = observer_for("off", path, "/posts", "POST", "enforce", strict=True)
+        assert post.review(b"", b'{"title": "t"}', None, 65536) is None
+    # An older engine without review_method checks the whole list.
+    risks = RouteRisks(manifest, {"allow": []})
+    risks._checker = type("Old", (), {"review": lambda self, *args: ("old",) + args[:1]})()
+    assert risks.review("/posts", "title=x", b"", 65536, None, "GET") == ("old", "/posts")
+    # One method's code not found, or the list incomplete: no per-method lists.
+    finalize(routes := {"/x": {"methods": ["GET", "POST"], "inputs": {"a": "text"}, "inputs_complete": False,
+                               "inputs_incomplete": [{"code": "helper"}], "_input_methods": {"GET": ["a"]}}})
+    assert "inputs_by_method" not in routes["/x"]
+    finalize(routes := {"/y": {"methods": ["GET"], "inputs": {"a": "text"}, "inputs_complete": True, "_input_methods": {"GET": ["a"]}}})
+    assert "inputs_by_method" not in routes["/y"]
+    finalize(routes := {"/z": {"methods": ["GET", "POST"], "inputs": {"a": "text"}, "inputs_complete": True,
+                               "_input_methods": {"GET": ["a"], "POST": ["a"]}}})
+    assert "inputs_by_method" not in routes["/z"]
+
+
+def test_openapi_operations_say_which_method_reads_what():
+    from aiwaf.core.input_sources import finalize, openapi_inputs
+
+    spec = {"paths": {"/notes": {
+        "get": {"parameters": [{"name": "q", "in": "query", "schema": {"type": "string"}}]},
+        "post": {"requestBody": {"content": {"application/json": {"schema": {
+            "type": "object", "additionalProperties": False, "properties": {"text": {"type": "string"}}}}}}},
+    }}}
+    routes = {"/notes": {"methods": ["GET", "POST"]}}
+    finalize(routes, openapi=openapi_inputs(spec))
+    assert routes["/notes"]["inputs_by_method"] == {"GET": ["q"], "POST": ["text"]}
+
+
+def test_nested_keys_are_saved_and_checked(tmp_path):
+    from aiwaf.core.input_schema import source_inputs
+    from aiwaf.core.input_sources import finalize
+
+    entries = {entry["function"]: entry for entry in source_inputs(
+        "from flask import request\n"
+        "def profile():\n"
+        "    data = request.get_json()\n"
+        "    return data['user']['name'], data['user'].get('email'), data['title'], data['meta'][key]\n"
+        "def leaky():\n"
+        "    data = request.get_json()\n"
+        "    return data['user']['name'], save(data['user'])\n"
+    )}
+    assert entries["profile"]["nested"] == {"user": ["email", "name"]}
+    assert "nested" not in entries["leaky"]
+    # Every view reading user must read only its keys; a declaration's names have none known.
+    manifest = {"routes": {"/p": {"view": "app.profile", "methods": ["POST"]}, "/both": merge_both()}}
+    apply_report({"findings": [], "inputs": [
+        {**entries["profile"], "function": "profile", "file": "app.py", "complete": True, "reasons": []},
+        {"function": "a", "file": "app.py", "inputs": {"user": "text"}, "complete": True, "nested": {"user": ["name"]}},
+        {"function": "b", "file": "app.py", "inputs": {"user": "text"}, "complete": True},
+    ]}, manifest, {"declarations": {"/p": {"inputs": {"title": "text"}}}})
+    assert manifest["routes"]["/p"]["inputs_nested"] == {"user": ["email", "name"]}
+    assert "inputs_nested" not in manifest["routes"]["/both"]
+    routes = {"/d": {"inputs": {"user": "text"}, "inputs_complete": True, "_nested": {"user": {"name"}}}}
+    finalize(routes, declarations={"/d": {"inputs": {"user": "text"}}})
+    assert "inputs_nested" not in routes["/d"]
+    # The engine checks the keys inside, skipping exempt paths.
+    path = write(tmp_path, {"routes": {"/p": manifest["routes"]["/p"], "/legacy/p": manifest["routes"]["/p"]}})
+    enforce = observer_for("off", path, "/p", "POST", "enforce", strict=True, strict_exempt="/legacy/")
+    assert enforce.review(b"", b'{"user": {"name": "a", "role": "admin"}, "title": "t"}', None, 65536).rule == "schema_unexpected_input"
+    assert enforce.review(b"", b'{"user": {"name": "a"}, "title": "t"}', None, 65536) is None
+    exempt = observer_for("off", path, "/legacy/p", "POST", "enforce", strict=True, strict_exempt="/legacy/")
+    assert exempt.review(b"anything=1", b"", None, 65536) is None
+
+
+def merge_both():
+    from aiwaf.core.request_declarations import merge_entries
+
+    return merge_entries({"view": "app.a", "methods": ["GET"]}, {"view": "app.b", "methods": ["POST"]})
+
+
+def test_strict_exempt_setting(monkeypatch):
+    from aiwaf.core.route_risks import strict_inputs
+
+    monkeypatch.setenv("AIWAF_STRICT_INPUTS_EXEMPT", "/webhooks/,/legacy/*")
+    assert strict_inputs(True)["exempt"] == ["/webhooks/", "/legacy/*"]
+    assert strict_inputs(True, exempt=["/x/"])["exempt"] == ["/x/"]
+
+
+def test_an_engine_without_exempt_paths_checks_no_strict_inputs(tmp_path, caplog, monkeypatch):
+    from aiwaf.core import route_risks
+
+    real = route_risks.rust()
+
+    class Old:
+        def __init__(self, manifest):
+            self._checker = real.RouteRiskChecker(manifest)
+
+        def __getattr__(self, name):
+            if name == "strict_exempt":
+                raise AttributeError(name)
+            return getattr(self._checker, name)
+
+    monkeypatch.setattr(route_risks, "rust", lambda: type("R", (), {"RouteRiskChecker": Old})())
+    manifest = {"routes": {"/s": {"view": "s", "inputs": {"q": "text"}, "inputs_complete": True}}}
+    with caplog.at_level(logging.WARNING, logger="aiwaf.route_schema"):
+        risks = RouteRisks(manifest, {"allow": [], "exempt": ["/legacy/"]})
+    assert "AIWAF_STRICT_INPUTS_EXEMPT needs aiwaf-rust 0.2.17" in caplog.text
+    assert risks.review("/s", "q=1&extra=2", b"", 65536, None) is None
+    assert RouteRisks(manifest, {"allow": [], "exempt": []}).review("/s", "q=1&extra=2", b"", 65536, None)[0] == "unexpected"

@@ -53,9 +53,13 @@ function strictInputs(options = {}) {
   const raw = options.AIWAF_STRICT_INPUTS ?? process.env.AIWAF_STRICT_INPUTS ?? '';
   const on = raw === true || ['1', 'true', 'yes', 'on'].includes(String(raw).trim().toLowerCase());
   if (!on) return null;
-  const listed = options.AIWAF_STRICT_INPUTS_ALLOW ?? process.env.AIWAF_STRICT_INPUTS_ALLOW ?? [];
-  const allow = (Array.isArray(listed) ? listed : String(listed).split(',')).map(name => String(name).trim()).filter(Boolean);
-  return { allow };
+  const names = (value, setting) => {
+    const listed = value ?? process.env[setting] ?? [];
+    return (Array.isArray(listed) ? listed : String(listed).split(',')).map(name => String(name).trim()).filter(Boolean);
+  };
+  // AIWAF_STRICT_INPUTS_EXEMPT: path prefixes strict inputs skips, as /webhooks/ or /legacy/*.
+  return { allow: names(options.AIWAF_STRICT_INPUTS_ALLOW, 'AIWAF_STRICT_INPUTS_ALLOW'),
+    exempt: names(options.AIWAF_STRICT_INPUTS_EXEMPT, 'AIWAF_STRICT_INPUTS_EXEMPT') };
 }
 
 /** The manifest the engine gets: with strict_inputs added when strict inputs is on. */
@@ -71,9 +75,14 @@ const hasInputs = manifest => Object.values((manifest && manifest.routes) || {})
  * `found` (a rule, or null). Returns {action: 'mismatch', route, input, type},
  * {action: 'relax', route, rule}, or null to keep the general check's answer. See aiwaf-rust.
  */
-function reviewRequest(checker, path, query, body, maxBytes, found) {
+function reviewRequest(checker, path, query, body, maxBytes, found, method = '') {
   const text = typeof query === 'string' ? query : queryString(query).join('&');
-  return JSON.parse(checker.review(String(path || '/'), text, bodyBytes(body) || Buffer.alloc(0), maxBytes, found || ''));
+  const bytes = bodyBytes(body) || Buffer.alloc(0);
+  // With the method, strict inputs check that method's own list; older engines only have review.
+  if (method && typeof checker.review_method === 'function') {
+    return JSON.parse(checker.review_method(String(method), String(path || '/'), text, bytes, maxBytes, found || ''));
+  }
+  return JSON.parse(checker.review(String(path || '/'), text, bytes, maxBytes, found || ''));
 }
 
 /**
@@ -99,7 +108,14 @@ function createObserver(options = {}) {
     // Compiled on first use, after the middleware has loaded aiwaf-wasm.
     if (!checker) {
       checker = compileRisks(manifest);
-      if (strict && schema !== 'off' && checker.strict !== true) {
+      if (strict && strict.exempt.length && checker.strict_exempt !== true) {
+        // An older engine would check the exempt paths too: better none at all.
+        const { strict_inputs: _unchecked, ...plain } = manifest;
+        checker = compileRisks(plain);
+        try {
+          logger.warn?.('AIWAF: AIWAF_STRICT_INPUTS_EXEMPT needs aiwaf-wasm 0.2.13 or newer, so strict inputs aren\'t checked rather than checked on exempt paths. Run: npm install aiwaf-wasm@latest');
+        } catch (_) { /* Logging must not decide the outcome. */ }
+      } else if (strict && schema !== 'off' && checker.strict !== true) {
         try {
           logger.warn?.('AIWAF: strict inputs need aiwaf-wasm 0.2.12 or newer, so they aren\'t checked. Run: npm install aiwaf-wasm@latest');
         } catch (_) { /* Logging must not decide the outcome. */ }
@@ -155,7 +171,7 @@ function createObserver(options = {}) {
     observe.review = (req, finding, maxBytes, body = req.body) => decide(req, finding, () => {
       const [path, query] = target(req);
       const found = finding && finding.status === 403 ? finding.rule : null;
-      return reviewRequest(checker, path, query, body, maxBytes, found);
+      return reviewRequest(checker, path, query, body, maxBytes, found, String(req.method || ''));
     });
     /** A finding from the URL path, reviewed against the route's parameters. */
     observe.reviewPath = (req, finding, maxBytes) => (finding.status !== 403 ? finding : decide(req, finding, () => {
@@ -203,7 +219,8 @@ function routesFor(finding, routes) {
   const name = entry.split('.').pop();
   const named = paths.filter(path => {
     const view = String(routes[path]?.view || '').replace(/^bound /, '');
-    return view && view.split('.').pop() === name;
+    // The route's view is its last handler; the others it records by name, with their methods.
+    return (view && view.split('.').pop() === name) || Object.hasOwn(routes[path]?.handler_methods || {}, name);
   });
   return named.length === 1 ? named : [];
 }
@@ -221,6 +238,8 @@ function applyReport(report, manifest, sources = {}) {
       delete entry.inputs;
       delete entry.inputs_complete;
       delete entry.inputs_incomplete;
+      delete entry.inputs_by_method;
+      delete entry.inputs_nested;
     }
   }
   let linked = 0;
@@ -241,7 +260,24 @@ function applyReport(report, manifest, sources = {}) {
   }
   // What each route reads, with types. A route whose handlers weren't all found gets none.
   for (const entry of report.inputs || []) {
-    for (const path of routesFor(entry, routes)) mergeInto(routes, path, entry);
+    // The method a handler serves, from its label, as app.get /items; unknown for a named one.
+    const labelled = (/^(?:\S+\.)?(get|post|put|patch|delete|head|options) \//i.exec(String(entry.function || '')) || [])[1];
+    for (const path of routesFor(entry, routes)) {
+      mergeInto(routes, path, entry);
+      const route = routes[path];
+      // Or, for a handler passed by name, the methods the app routed it for.
+      const named = (route.handler_methods || {})[String(entry.function || '').split('.').pop()];
+      const methods = labelled ? [labelled.toUpperCase()] : (named || []);
+      if (methods.length) {
+        route._input_methods = route._input_methods || {};
+        for (const method of methods) {
+          const names = new Set([...(route._input_methods[method] || []), ...Object.keys(entry.inputs || {})]);
+          route._input_methods[method] = [...names].sort();
+        }
+      } else {
+        route._input_shared = [...new Set([...(route._input_shared || []), ...Object.keys(entry.inputs || {})])].sort();
+      }
+    }
   }
   const completeness = inputSources.finalize(routes, sources || {});
   const typed = Object.values(routes).filter(entry => entry && typeof entry === 'object' && entry.inputs).length;

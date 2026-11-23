@@ -962,6 +962,16 @@ def test_the_engine_blocks_unexpected_inputs_with_strict_inputs(tmp_path, monkey
 
     extra = b'{"body": "hi", "post_id": 7, "role": "admin"}'
     assert status({"strict_inputs": True}, extra) == (403, {"error": "schema_unexpected_input"})
+
+    def articles(body):
+        pipeline = CSVPipeline({"data_dir": str(tmp_path), "enabled": ["ip_keyword_block"], "learning": False,
+                                "manifest_path": str(manifest), "route_schema_mode": "enforce", "strict_inputs": True})
+        return pipeline.begin(ip="8.8.8.8", path="/articles", method="POST", headers={}, query=b"", body=body,
+                              exists=True, methods={"POST"})[1]
+
+    # Each method's own list: /articles' POST reads title, its GET q.
+    assert articles(b'{"title": "t"}') == 0
+    assert articles(b'{"title": "t", "q": "x"}') == 403
     assert status({"strict_inputs": True, "strict_inputs_allow": ["role"]}, extra)[0] == 0
     assert status({}, extra)[0] == 0
     # An engine without strict inputs warns and leaves them off.
@@ -969,3 +979,7 @@ def test_the_engine_blocks_unexpected_inputs_with_strict_inputs(tmp_path, monkey
     with caplog.at_level("WARNING"):
         assert status({"strict_inputs": True}, extra)[0] == 0
     assert "Strict inputs need aiwaf-rust 0.2.16" in caplog.text
+    monkeypatch.setattr(rust.NativeCSVPipeline, "supports", staticmethod(lambda name: name != "strict_exempt"), raising=False)
+    with caplog.at_level("WARNING"):
+        assert status({"strict_inputs": True, "strict_inputs_exempt": ["/legacy/"]}, extra)[0] == 0
+    assert "AIWAF_STRICT_INPUTS_EXEMPT needs aiwaf-rust 0.2.17" in caplog.text

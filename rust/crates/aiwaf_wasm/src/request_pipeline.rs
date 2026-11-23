@@ -24,10 +24,11 @@ pub const STAGES: [&str; 8] = [
 ];
 static NEXT_CONTEXT: AtomicU64 = AtomicU64::new(1);
 /// Optional request facts this engine accepts, for `NativeRequestPipeline::supports`.
-pub const FEATURES: [&str; 16] = [
+pub const FEATURES: [&str; 17] = [
     "rate_overrides",
     "route_schema",
     "strict_inputs",
+    "strict_exempt",
     "sql_monitor",
     "uuid_resolver",
     "host_store",
@@ -303,7 +304,7 @@ fn reviewed(
 ) -> (Verdict, Option<Value>) {
     use aiwaf_core::route_risks::Review;
     let Some(schema) = schema else { return (Verdict::Keep, None) };
-    let review = schema.review_found(path, query, &body_bytes(body), profile.max_bytes, found);
+    let review = schema.review_found_method(method, path, query, &body_bytes(body), profile.max_bytes, found);
     let event = review.as_ref().map(|review| review.event(&profile.route_schema_mode, method));
     let enforce = profile.route_schema_mode == "enforce";
     let verdict = match review {

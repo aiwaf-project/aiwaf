@@ -682,7 +682,8 @@ impl NativeCSVPipeline {
                         return (found.map(|(found, _)| found), None);
                     };
                     let query_text = String::from_utf8_lossy(&query);
-                    let review = schema.review_found(
+                    let review = schema.review_found_method(
+                        &f.method,
                         &f.path,
                         &query_text,
                         &body,
@@ -1181,6 +1182,7 @@ impl NativeCSVPipeline {
             "route_rule",
             "route_schema",
             "strict_inputs",
+            "strict_exempt",
             "rate_overrides",
             "sql_monitor",
             "uuid_fact",

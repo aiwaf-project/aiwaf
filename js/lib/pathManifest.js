@@ -381,16 +381,36 @@ function addRoute(routes, routeInfo) {
   const framework = require('./frameworkInputs');
   const known = routeInfo.declared || framework.fastifyInputs(routeInfo.schema) || framework.hapiInputs(routeInfo.validate)
     || framework.expressInputs(routeInfo.handlers);
-  if (known) entry.declared_inputs = known;
+  for (const [name, methods] of routeInfo.handlerMethods || []) {
+    entry.handler_methods = entry.handler_methods || {};
+    entry.handler_methods[name] = methods.length && entry.handler_methods[name] !== null
+      ? [...new Set([...(entry.handler_methods[name] || []), ...methods])].sort() : null;
+  }
+  if (known) {
+    entry.declared_inputs = known;
+    // Which methods the framework's names are for, so each method's list can be told apart.
+    const names = Object.keys(known.inputs || {}).sort();
+    entry.declared_methods = Object.fromEntries((entry.methods || []).map(method => [String(method).toUpperCase(), names]));
+  }
   if (routes[normalized]) {
     const mergedMethods = Array.from(new Set([...(routes[normalized].methods || []), ...(entry.methods || [])])).sort();
     const combined = framework.combine(routes[normalized].declared_inputs, entry.declared_inputs);
+    const handlerMethods = { ...(routes[normalized].handler_methods || {}) };
+    for (const [name, methods] of Object.entries(entry.handler_methods || {})) {
+      handlerMethods[name] = methods && handlerMethods[name] !== null ? [...new Set([...(handlerMethods[name] || []), ...methods])].sort() : null;
+    }
+    const declaredMethods = { ...(routes[normalized].declared_methods || {}) };
+    for (const [method, names] of Object.entries(entry.declared_methods || {})) {
+      declaredMethods[method] = [...new Set([...(declaredMethods[method] || []), ...names])].sort();
+    }
     routes[normalized] = {
       ...routes[normalized],
       ...entry,
       methods: mergedMethods
     };
     if (combined) routes[normalized].declared_inputs = combined;
+    if (Object.keys(declaredMethods).length) routes[normalized].declared_methods = declaredMethods;
+    if (Object.keys(handlerMethods).length) routes[normalized].handler_methods = handlerMethods;
   } else {
     routes[normalized] = entry;
   }
@@ -406,13 +426,60 @@ function routerOf(app) {
   }
 }
 
+/**
+ * Where a router layer is mounted, as in app.use('/account', router): '' at the root, or null
+ * when its pattern can't be read back as a path. Express 4 keeps the pattern on the layer;
+ * Express 5 only inside its matcher, read through the inspector.
+ */
+function mountPath(layer) {
+  if (layer.slash || (layer.regexp && layer.regexp.fast_slash)) return '';
+  let regexp = layer.regexp;
+  let keys = layer.keys || [];
+  if (!(regexp instanceof RegExp) && Array.isArray(layer.matchers) && layer.matchers[0]) {
+    const values = require('./frameworkInputs').closureValues(layer.matchers[0]);
+    regexp = (values.find(([, value]) => value instanceof RegExp) || [])[1];
+    keys = (values.find(([name]) => name === 'keys') || [])[1] || [];
+  }
+  if (!(regexp instanceof RegExp)) return null;
+  let source = regexp.source.replace(/^\^/, '');
+  // The end of a mount pattern: Express 4's \/?(?=\/|$), Express 5's (?:\/$)?(?=\/|$).
+  for (const tail of ['\\/?(?=\\/|$)', '(?:\\/$)?(?=\\/|$)', '(?=\\/|$)']) {
+    if (source.endsWith(tail)) {
+      source = source.slice(0, -tail.length);
+      break;
+    }
+  }
+  // Express 5 wraps the path in (?:...).
+  if (source.startsWith('(?:') && source.endsWith(')')) source = source.slice(3, -1);
+  let index = 0;
+  const name = () => {
+    const key = keys[index];
+    index += 1;
+    return `:${key && key.name !== undefined ? key.name : index - 1}`;
+  };
+  const path = source
+    .replace(/\(\?:\\\/\(\[\^\\?\/\]\+\?\)\)/g, () => `/${name()}`) // Express 4: (?:\/([^\/]+?))
+    .replace(/\(\?:\(\[\^\\?\/\]\+\?\)\)/g, () => name()) // Express 4: (?:([^\/]+?))
+    .replace(/\(\[\^\\?\/\]\+\??\)/g, () => name()) // Express 5: ([^\/]+)
+    .replace(/\\(.)/g, '$1');
+  return /[()[\]*+?|^$]/.test(path) ? null : path;
+}
+
 function extractExpressRoutes(app) {
   const routes = {};
-  const stack = routerOf(app)?.stack || [];
-  stack.forEach(layer => {
+  // Routes on the app, and on routers it mounts, under their mount paths.
+  const visit = (stack, prefix, depth) => (stack || []).forEach(layer => {
+    if (!layer.route && layer.handle && Array.isArray(layer.handle.stack) && depth < 8) {
+      const mounted = mountPath(layer);
+      if (mounted !== null) visit(layer.handle.stack, `${prefix}${mounted}`, depth + 1);
+      return;
+    }
+    add(layer, prefix);
+  });
+  const add = (layer, prefix) => {
     const route = layer.route;
     if (!route || !route.path) return;
-    const routePath = String(route.path);
+    const routePath = `${prefix}${String(route.path)}` || '/';
     // The last function is the handler; any before it are route middleware.
     const handler = (route.stack || []).filter(item => typeof item.handle === 'function').map(item => item.handle).pop();
     const methods = methodsFromExpressRoute(route);
@@ -421,9 +488,14 @@ function extractExpressRoutes(app) {
       methods,
       handler,
       handlers: (route.stack || []).map(item => item.handle),
+      // The method each named handler serves (Express records it per layer), so a handler passed
+      // by name, as app.get('/x', list), gets its own list; app.all's serve every method.
+      handlerMethods: (route.stack || []).filter(item => item.handle && item.handle.name).map(item => [item.handle.name,
+        item.method && item.method !== '_all' ? [String(item.method).toUpperCase()] : []]),
       name: routePath
     });
-  });
+  };
+  visit(routerOf(app)?.stack, '', 0);
   return routes;
 }
 
@@ -527,6 +599,12 @@ function auditIntoManifest(manifest, source) {
       if (entry && typeof entry === 'object') {
         delete entry.input_declaration;
         delete entry.declared_inputs;
+        delete entry.declared_methods;
+        delete entry._input_methods;
+        delete entry._input_shared;
+        delete entry._nested;
+        delete entry._flat;
+        delete entry.handler_methods;
       }
     }
   }
@@ -579,6 +657,7 @@ module.exports = {
   getEffectivePathRules,
   routeEntryFor,
   extractExpressRoutes,
+  mountPath,
   extractFastifyRoutes,
   extractHapiRoutes,
   extractKoaRoutes,

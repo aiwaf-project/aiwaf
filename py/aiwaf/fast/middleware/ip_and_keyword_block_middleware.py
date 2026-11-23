@@ -129,7 +129,8 @@ class IPAndKeywordBlockMiddleware(BaseHTTPMiddleware):
             request.url.path, request.method,
             cfg.get('AIWAF_ROUTE_SCHEMA_MODE') if has_config else None,
             cfg.get('AIWAF_STRICT_INPUTS') if has_config else None,
-            cfg.get('AIWAF_STRICT_INPUTS_ALLOW') if has_config else None)
+            cfg.get('AIWAF_STRICT_INPUTS_ALLOW') if has_config else None,
+            cfg.get('AIWAF_STRICT_INPUTS_EXEMPT') if has_config else None)
         finding = (await inspect_asgi_request(request, self.sql_policy, evaluator=evaluate_combined, observer=observer)
                    if prepared else await inspect_asgi_request(request, self.sql_policy, observer=observer))
         if finding:

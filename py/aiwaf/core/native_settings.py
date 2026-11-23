@@ -45,6 +45,7 @@ _DIRECT = {
     "AIWAF_ROUTE_SCHEMA_MODE": ("route_schema_mode", str),
     "AIWAF_STRICT_INPUTS": ("strict_inputs", bool),
     "AIWAF_STRICT_INPUTS_ALLOW": ("strict_inputs_allow", list),
+    "AIWAF_STRICT_INPUTS_EXEMPT": ("strict_inputs_exempt", list),
     "AIWAF_EXEMPT_KEYWORDS": ("exempt_keywords", list),
     "AIWAF_GEO_BLOCK_COUNTRIES": ("geo_block", list),
     "AIWAF_GEO_ALLOW_COUNTRIES": ("geo_allow", list),

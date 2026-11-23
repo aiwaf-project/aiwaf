@@ -242,6 +242,7 @@ public final class AiwafConfigFileCore {
                 "route_schema_mode", config.routeSchemaMode,
                 "strict_inputs", config.strictInputs,
                 "strict_inputs_allow", config.strictInputsAllow,
+                "strict_inputs_exempt", config.strictInputsExempt,
                 "allow_compressed_request_bodies", config.allowCompressedRequestBodies,
                 "max_parameter_count", config.maxParameterCount,
                 "max_parameter_bytes", config.maxParameterBytes,

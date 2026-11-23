@@ -46,9 +46,15 @@ public final class JavaInputSchemaCore {
     public record Reason(String code, String detail, long line) {}
 
     /** One handler's inputs, labelled Class.method as the audit labels its findings. */
-    public record Inputs(String function, String file, Map<String, String> inputs, boolean complete, List<Reason> reasons) {
+    /** nested: the keys inside object-valued inputs, from a body class's nested classes. */
+    public record Inputs(String function, String file, Map<String, String> inputs, boolean complete, List<Reason> reasons,
+                         Map<String, List<String>> nested) {
         public Inputs(String function, String file, Map<String, String> inputs, boolean complete) {
             this(function, file, inputs, complete, List.of());
+        }
+
+        public Inputs(String function, String file, Map<String, String> inputs, boolean complete, List<Reason> reasons) {
+            this(function, file, inputs, complete, reasons, Map.of());
         }
     }
 
@@ -208,6 +214,27 @@ public final class JavaInputSchemaCore {
             return fields;
         }
 
+        /**
+         * The keys inside each of a body class's fields whose type is another class of the scanned
+         * sources: what Jackson can fill in it, as {"author": ["name"]}.
+         */
+        Map<String, List<String>> nested(Tree type) {
+            ClassTree node = classes.get(simpleName(type));
+            Map<String, List<String>> nested = new java.util.TreeMap<>();
+            if (node == null || node.getKind() == Tree.Kind.ENUM || node.getKind() == Tree.Kind.INTERFACE) return nested;
+            for (Tree member : node.getMembers()) {
+                if (!(member instanceof VariableTree field) || field.getModifiers().getFlags().contains(javax.lang.model.element.Modifier.STATIC)) continue;
+                Map<String, AnnotationTree> marks = annotations(field.getModifiers().getAnnotations());
+                if (marks.containsKey("JsonIgnore") || scalar(field.getType()) != null || isEnum(field.getType())) continue;
+                Map<String, String> inner = fields(field.getType(), 1);
+                if (inner == null) continue;
+                String name = marks.containsKey("JsonProperty") && annotationName(marks.get("JsonProperty")) != null
+                        ? annotationName(marks.get("JsonProperty")) : field.getName().toString();
+                nested.put(name, List.copyOf(new java.util.TreeSet<>(inner.keySet())));
+            }
+            return nested;
+        }
+
         boolean isEnum(Tree type) {
             return enums.contains(simpleName(type));
         }
@@ -269,12 +296,14 @@ public final class JavaInputSchemaCore {
                         + " runs before every handler and may read anything", shared);
             }
             List<String> requests = new ArrayList<>();
+            Map<String, List<String>> nested = new java.util.TreeMap<>();
             for (VariableTree parameter : method.getParameters()) {
                 parameter(unit, parameter, dtos, inputs, gaps, requests);
+                if (annotations(parameter.getModifiers().getAnnotations()).containsKey("RequestBody")) nested.putAll(dtos.nested(parameter.getType()));
             }
             if (!requests.isEmpty()) reads(unit, type, method, requests, inputs, gaps, dtos, new java.util.HashSet<>());
             results.add(new Inputs(type.getSimpleName() + "." + method.getName(), file, inputs, gaps.reasons.isEmpty(),
-                    List.copyOf(gaps.reasons)));
+                    List.copyOf(gaps.reasons), Map.copyOf(nested)));
         }
     }
 

@@ -26,6 +26,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -502,6 +504,45 @@ public final class InputSourcesCore {
 
     /** Combine every source into each route's inputs, inputs_complete and inputs_incomplete. */
     @SuppressWarnings("unchecked")
+    private static final Pattern PATH_PARAMETER = Pattern.compile("<(?:[^:>]+:)?([^>]+)>|\\{([^}:]+)(?::[^}]*)?\\}|:([A-Za-z_]\\w*)\\??");
+
+    /** The parameter names in a route, as id in /a/{id}, /a/<int:id> or /a/:id. */
+    static List<String> pathParameters(String route) {
+        List<String> names = new ArrayList<>();
+        Matcher matcher = PATH_PARAMETER.matcher(route == null ? "" : route);
+        while (matcher.find()) {
+            for (int group = 1; group <= matcher.groupCount(); group++) {
+                if (matcher.group(group) != null) {
+                    names.add(matcher.group(group));
+                    break;
+                }
+            }
+        }
+        return names;
+    }
+
+    /**
+     * Each method's names, when the route's complete list is read by different methods' code: a
+     * method takes the names its own code reads, and every name no method's code claims. Null
+     * when every method reads them all.
+     */
+    static Map<String, Object> byMethod(Map<String, String> found, Object methods, Map<String, Set<String>> claims, Set<String> shared) {
+        Set<String> all = new TreeSet<>();
+        if (methods instanceof Collection<?> list) list.forEach(method -> all.add(String.valueOf(method).toUpperCase(Locale.ROOT)));
+        if (all.size() < 2 || claims.isEmpty()) return null;
+        Set<String> claimed = new TreeSet<>();
+        claims.values().forEach(claimed::addAll);
+        Map<String, Object> result = new TreeMap<>();
+        boolean narrower = false;
+        for (String method : all) {
+            List<String> names = found.keySet().stream()
+                    .filter(name -> claims.getOrDefault(method, Set.of()).contains(name) || shared.contains(name) || !claimed.contains(name)).toList();
+            narrower |= names.size() < found.size();
+            result.put(method, names);
+        }
+        return narrower ? result : null;
+    }
+
     public static Counts finalize(Map<String, Object> routes, Sources sources) {
         int complete = 0;
         int incomplete = 0;
@@ -509,6 +550,18 @@ public final class InputSourcesCore {
         for (Map.Entry<String, Object> route : routes.entrySet()) {
             if (!(route.getValue() instanceof Map<?, ?> raw)) continue;
             Map<String, Object> data = (Map<String, Object>) raw;
+            // Which method reads what: the code reading's and OpenAPI's, per method. Names from
+            // anywhere else are shared by every method.
+            Map<String, Set<String>> claims = new TreeMap<>();
+            if (data.remove("_input_methods") instanceof Map<?, ?> saved) {
+                saved.forEach((method, names) -> {
+                    if (names instanceof Collection<?> list) list.forEach(name -> claims.computeIfAbsent(String.valueOf(method), key -> new TreeSet<>()).add(String.valueOf(name)));
+                });
+            }
+            Set<String> shared = new TreeSet<>();
+            Map<String, Object> nested = data.remove("_nested") instanceof Map<?, ?> savedNested ? (Map<String, Object>) savedNested : Map.of();
+            Set<String> flat = new TreeSet<>();
+            if (data.remove("_flat") instanceof Collection<?> savedFlat) savedFlat.forEach(name -> flat.add(String.valueOf(name)));
             boolean read = data.containsKey("inputs_complete");
             Map<String, String> found = new TreeMap<>();
             if (data.get("inputs") instanceof Map<?, ?> saved) saved.forEach((name, kind) -> found.put(String.valueOf(name), String.valueOf(kind)));
@@ -521,7 +574,10 @@ public final class InputSourcesCore {
                 Collection<Object> covers = (Collection<Object>) framework.getOrDefault("covers", List.of());
                 reasons.removeIf(item -> covers.contains(item.get("code")));
                 reasons.addAll((Collection<Map<String, Object>>) framework.getOrDefault("reasons", List.of()));
-                ((Map<String, String>) framework.getOrDefault("inputs", Map.of())).forEach((name, kind) -> merge(found, name, kind));
+                ((Map<String, String>) framework.getOrDefault("inputs", Map.of())).forEach((name, kind) -> {
+                    merge(found, name, kind);
+                    shared.add(name);
+                });
                 read = read || Boolean.TRUE.equals(framework.get("standalone"));
             }
             String key = canonical(route.getKey());
@@ -529,6 +585,8 @@ public final class InputSourcesCore {
             for (Map<String, Object> declared : Arrays.asList(sources.annotations().get(route.getKey()), sources.declarations().get(key))) {
                 if (declared == null) continue;
                 found.putAll((Map<String, String>) declared.getOrDefault("inputs", Map.of()));
+                shared.addAll(((Map<String, String>) declared.getOrDefault("inputs", Map.of())).keySet());
+                flat.addAll(((Map<String, String>) declared.getOrDefault("inputs", Map.of())).keySet());
                 authoritative = !Boolean.FALSE.equals(declared.get("complete")) || authoritative;
                 read = true;
             }
@@ -537,8 +595,12 @@ public final class InputSourcesCore {
                 List<String> methods = data.get("methods") instanceof List<?> listed && !listed.isEmpty()
                         ? listed.stream().map(String::valueOf).toList() : List.copyOf(operations.keySet());
                 List<Map<String, Object>> matched = methods.stream().filter(operations::containsKey).map(operations::get).toList();
-                for (Map<String, Object> operation : matched) {
-                    ((Map<String, String>) operation.get("inputs")).forEach((name, kind) -> merge(found, name, kind));
+                for (String method : methods) {
+                    if (!operations.containsKey(method)) continue;
+                    ((Map<String, String>) operations.get(method).get("inputs")).forEach((name, kind) -> {
+                        merge(found, name, kind);
+                        claims.computeIfAbsent(method.toUpperCase(Locale.ROOT), item -> new TreeSet<>()).add(name);
+                    });
                 }
                 if (!matched.isEmpty() && matched.size() == methods.size() && matched.stream().allMatch(op -> Boolean.TRUE.equals(op.get("complete")))) {
                     authoritative = true;
@@ -555,11 +617,24 @@ public final class InputSourcesCore {
                     reasons.add(reason("observed", seen.getKey() + " was read while recording, but the analysis didn't find it"));
                 }
                 merge(found, seen.getKey(), seen.getValue());
+                shared.add(seen.getKey());
                 read = true;
             }
             if (!read) continue;
+            // A route's own parameters come from the path, not the query or body.
+            pathParameters(route.getKey()).forEach(found::remove);
             data.put("inputs", found);
             data.put("inputs_complete", reasons.isEmpty());
+            // Keys inside an input, from the body class's nested classes, when every handler reading it has them.
+            Map<String, Object> inner = new TreeMap<>();
+            nested.forEach((name, keys) -> {
+                if (found.containsKey(name) && !flat.contains(name)) inner.put(name, keys);
+            });
+            if (!inner.isEmpty() && reasons.isEmpty()) data.put("inputs_nested", inner);
+            else data.remove("inputs_nested");
+            Map<String, Object> byMethod = reasons.isEmpty() ? byMethod(found, data.get("methods"), claims, shared) : null;
+            if (byMethod != null) data.put("inputs_by_method", byMethod);
+            else data.remove("inputs_by_method");
             if (reasons.isEmpty()) {
                 data.remove("inputs_incomplete");
                 complete++;

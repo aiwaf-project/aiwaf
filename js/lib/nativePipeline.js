@@ -258,7 +258,7 @@ function synchronous(callback, req, fallback) {
 module.exports = async function createNativeMiddleware(options = {}) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) throw new TypeError('Native adapter options must be an object');
   if (options.profile !== undefined && (!options.profile || typeof options.profile !== 'object' || Array.isArray(options.profile))) throw new TypeError('Native profile must be an object');
-  const allowed = new Set(['profile', 'dataDir', 'logPath', 'logFsync', 'persistBlocks', 'model', 'countryLookup', 'authenticated', 'routeExists', 'onError', 'pathRules', 'manifestPath', 'injectionRiskMode', 'routeSchemaMode', 'strictInputs', 'strictInputsAllow', 'logger', 'uuidResolver', 'stores', 'storeCacheSeconds', 'storesFallback',
+  const allowed = new Set(['profile', 'dataDir', 'logPath', 'logFsync', 'persistBlocks', 'model', 'countryLookup', 'authenticated', 'routeExists', 'onError', 'pathRules', 'manifestPath', 'injectionRiskMode', 'routeSchemaMode', 'strictInputs', 'strictInputsAllow', 'strictInputsExempt', 'logger', 'uuidResolver', 'stores', 'storeCacheSeconds', 'storesFallback',
     'rateCounter', 'rateCounterFallback', 'rateFailureMode', 'trustedProxies', 'modelFile', 'modelLoader', 'regularLog', 'modelGate', 'exact', 'regularAnomaly', 'userAgentVerdict']);
   for (const key of Object.keys(options)) if (!allowed.has(key)) throw new Error(`Unknown native adapter option: ${key}`);
   if (options.uuidResolver != null && typeof options.uuidResolver !== 'function') throw new TypeError('uuidResolver must be a function');
@@ -397,12 +397,16 @@ module.exports = async function createNativeMiddleware(options = {}) {
       profile.route_schema_mode = schemaMode;
       profile.route_manifest = manifest;
       // Strict inputs ride in the manifest the engine gets: see AIWAF_STRICT_INPUTS.
-      const strict = routeRisks.strictInputs({ AIWAF_STRICT_INPUTS: options.strictInputs, AIWAF_STRICT_INPUTS_ALLOW: options.strictInputsAllow });
+      const strict = routeRisks.strictInputs({ AIWAF_STRICT_INPUTS: options.strictInputs, AIWAF_STRICT_INPUTS_ALLOW: options.strictInputsAllow,
+        AIWAF_STRICT_INPUTS_EXEMPT: options.strictInputsExempt });
       if (strict) {
         const probe = await createRequestPipeline({});
         const strictSupported = typeof probe.native.supports === 'function' && probe.native.supports('strict_inputs');
+        const exemptSupported = typeof probe.native.supports === 'function' && probe.native.supports('strict_exempt');
         probe.native.free();
-        if (strictSupported) profile.route_manifest = routeRisks.withStrict(manifest, strict);
+        if (strict.exempt.length && !exemptSupported) {
+          (options.logger || console).warn?.('AIWAF native: AIWAF_STRICT_INPUTS_EXEMPT needs aiwaf-wasm 0.2.13 or newer, so strict inputs aren\'t checked rather than checked on exempt paths. Run: npm install aiwaf-wasm@latest');
+        } else if (strictSupported) profile.route_manifest = routeRisks.withStrict(manifest, strict);
         else (options.logger || console).warn?.('AIWAF native: strict inputs need aiwaf-wasm 0.2.12 or newer, so they aren\'t checked. Run: npm install aiwaf-wasm@latest');
       }
     } else {
@@ -550,7 +554,8 @@ module.exports = async function createNativeMiddleware(options = {}) {
   const schemaObserver = profile.route_schema_mode
     ? routeRisks.createObserver({ AIWAF_PATH_MANIFEST: manifestPath, AIWAF_INJECTION_RISK_MODE: 'off',
       AIWAF_ROUTE_SCHEMA_MODE: profile.route_schema_mode, logger,
-      AIWAF_STRICT_INPUTS: options.strictInputs, AIWAF_STRICT_INPUTS_ALLOW: options.strictInputsAllow })
+      AIWAF_STRICT_INPUTS: options.strictInputs, AIWAF_STRICT_INPUTS_ALLOW: options.strictInputsAllow,
+      AIWAF_STRICT_INPUTS_EXEMPT: options.strictInputsExempt })
     : null;
   if (observeRisks || schemaObserver) await wasmChecks.load();
   function payload(req) {

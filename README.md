@@ -39,14 +39,14 @@ the supported Redis backends when sharing limits across workers.
 
 Each package is versioned and released independently.
 
-Python 1.3.1, Rust/Python 0.2.16, Node.js 1.3.1, WASM 0.2.12, and Java 1.4.0 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
+Python 1.3.2, Rust/Python 0.2.17, Node.js 1.3.2, WASM 0.2.13, and Java 1.4.0 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
 
 | Runtime | Package | Repository version | Primary use |
 | --- | --- | ---: | --- |
-| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.3.1` | Django, Flask, and FastAPI protection |
-| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.3.1` | Express and Node framework middleware |
-| Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.16` | Native Python acceleration and JSON model inference |
-| WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.12` | Rust detection and model primitives for JavaScript |
+| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.3.2` | Django, Flask, and FastAPI protection |
+| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.3.2` | Express and Node framework middleware |
+| Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.17` | Native Python acceleration and JSON model inference |
+| WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.13` | Rust detection and model primitives for JavaScript |
 | Java | `io.github.aiwaf-project:aiwaf-java` | `1.4.0` | Spring MVC and Jakarta Servlet protection |
 
 Supported framework integrations include Django, Flask, FastAPI, Express, Fastify, Hapi, Koa, NestJS, Next.js API routes, AdonisJS, Sails.js, Spring MVC, and Jakarta Servlet.
@@ -420,6 +420,7 @@ held in a constant, as in `request.GET[PAGE_PARAM]` or `getParameter(PAGE)`, is 
 | `model_fields` | A ModelForm, ModelSerializer or `@JsonAnySetter` class takes fields from elsewhere. |
 | `middleware` | Node.js route middleware that isn't a body parser may read the body. |
 | `observed` | A recording saw the code read a name the analysis didn't find. |
+| `unread_view` | Several handlers serve the path, and one's code wasn't found. |
 
 Then `init` fills in what reading the code can't see:
 
@@ -480,8 +481,10 @@ Then `init` fills in what reading the code can't see:
   servlet app. This is how handlers no reading or declaration covers get their lists. It records the names each handler reads, not what clients send, to
   `.aiwaf/observed_inputs.jsonl`, which the next `init` reads. Recorded names are added to the
   routes' inputs, and a route the analysis called complete that read something else is made
-  incomplete. Without `AIWAF_RECORD_INPUTS` the recorders do nothing. The Java recorder sees
-  `getParameter` reads only; Django's can't see `json.loads(request.body)`.
+  incomplete. Without `AIWAF_RECORD_INPUTS` the recorders do nothing. The Java recorder records
+  `getParameter` reads, and the application's own whole reads (`getParameterMap`, the body
+  stream) as reading everything; reads Spring itself makes for binding aren't counted. Django's
+  can't see `json.loads(request.body)`.
 
 Requests to those routes are then reviewed after the general check:
 
@@ -512,9 +515,26 @@ and Java.
 With `AIWAF_STRICT_INPUTS=1`, a route whose saved input list is complete accepts only the names
 on it: a query or body name the route never reads is `schema_unexpected_input`. It follows
 `AIWAF_ROUTE_SCHEMA_MODE`, so it's logged in `monitor` (`"action": "unexpected"` with the name,
-cut to 64 characters) and blocked in `enforce`. Routes whose list is incomplete, routes with no
-saved inputs, path parameters, headers, and bodies that aren't a form or JSON object are never
-checked. Top-level names only are compared.
+cut to 64 characters) and blocked in `enforce`. The query and a form, multipart or JSON object
+body are checked, a multipart file part by its field name. Routes whose list is incomplete,
+routes with no saved inputs, path parameters, headers and other bodies are never checked.
+
+Keys inside an object-valued input are checked too when `init` knows them all
+(`inputs_nested`): from code that reads only constant keys inside it, as
+`data["user"]["name"]` or `req.body.user.name`, in every handler that reads it, or from a Java
+body class's nested classes. A JSON `{"user": {"role": "admin"}}`, or a form's `user[role]`, is
+then `user.role`, unexpected. An input a handler passes on whole, or one that a framework schema
+or declaration names, has no such list and isn't checked inside.
+
+`AIWAF_STRICT_INPUTS_EXEMPT=/webhooks/,/legacy/*` lists path prefixes strict inputs skips, for
+routes that take whatever their senders add.
+
+When a path's methods are served by different handlers, as a GET view that reads `q` and a POST
+view that reads `title`, `init` saves each method's own list (`inputs_by_method`), and strict
+inputs check a request against its method's: `title` on the GET is unexpected. A method takes
+the names its own handler's code (or the framework's per-route schema, or its OpenAPI
+operation) reads, plus every name nothing ties to one method: declarations, recordings and the
+like. HEAD uses GET's list, and a method without its own list uses the whole path's.
 
 CSRF tokens (`csrfmiddlewaretoken`, `csrf_token`, `_csrf`, `_token`, `authenticity_token`) and
 tracking and cache-busting parameters (`utm_*`, `fbclid`, `gclid`, `msclkid`, `_`) are always
@@ -590,7 +610,7 @@ Java 1.4.0, after it is published to Maven Central:
 
 The Python package requires Python 3.10 or newer. Framework dependencies are optional, so install only the extra needed by the application.
 
-Python 1.3.1 requires `aiwaf-rust>=0.2.16`; the `rust` extra remains an installation
+Python 1.3.2 requires `aiwaf-rust>=0.2.17`; the `rust` extra remains an installation
 alias. Publish the matching Rust wheel with `NativeCSVPipeline` support before
 the Python release. The Rust release workflow builds Linux x86_64/aarch64,
 musl x86_64, macOS x86_64/arm64 and Windows x86_64 wheels and checks the native
@@ -1977,10 +1997,10 @@ Release versions and tags must match the relevant manifest.
 
 | Package | Manifest | Tag | Workflow |
 | --- | --- | --- | --- |
-| Python `aiwaf` | `pyproject.toml` | `python-v1.3.1` | `python-publish.yml` |
-| npm `aiwaf` | `js/package.json` | `js-v1.3.1` | `npm-publish.yml` |
-| PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.16` | `rust-publish.yml` |
-| npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.12` | `wasm-publish.yml` |
+| Python `aiwaf` | `pyproject.toml` | `python-v1.3.2` | `python-publish.yml` |
+| npm `aiwaf` | `js/package.json` | `js-v1.3.2` | `npm-publish.yml` |
+| PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.17` | `rust-publish.yml` |
+| npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.13` | `wasm-publish.yml` |
 | Maven `aiwaf-java` | `java/pom.xml` | `java-v1.4.0` | `java-publish.yml` |
 
 Python and Rust publish to PyPI with trusted publishing. The npm workflows use npm trusted publishing and stage packages for approval. Configure the trusted publisher with organization `aiwaf-project`, repository `aiwaf`, the exact workflow filename, and the environment used by that workflow.
@@ -1989,13 +2009,13 @@ Java publishing uses the protected `maven-publish` environment plus `GPG_PRIVATE
 
 Registry releases are immutable. Increment the relevant manifest version before publishing another release.
 
-This release is Python `aiwaf 1.3.1`, npm `aiwaf 1.3.1`, Java `aiwaf-java 1.4.0`,
-`aiwaf-rust 0.2.16` and `aiwaf-wasm 0.2.12`: complete route input lists from `init` (reasons,
-imports, framework schemas, declarations, OpenAPI and recording) and strict inputs. Python 1.3.0,
-npm 1.3.0 and `aiwaf-rust 0.2.15` are already published. Publish `aiwaf-rust 0.2.16` before
-Python 1.3.1, which requires `aiwaf-rust>=0.2.16`, and `aiwaf-wasm 0.2.12` before npm 1.3.1, then
-update `js/package-lock.json` to the published 0.2.12 (`^0.2.11` already allows it). Strict inputs
-need these engines; an older one logs a warning and leaves strict inputs off.
+This release is Python `aiwaf 1.3.2`, npm `aiwaf 1.3.2`, Java `aiwaf-java 1.4.0`,
+`aiwaf-rust 0.2.17` and `aiwaf-wasm 0.2.13`: `init` accuracy (measured against a benchmark),
+per-method input lists, and strict inputs for multipart forms, keys inside inputs and exempt
+paths. Python 1.3.1, npm 1.3.1, `aiwaf-rust 0.2.16` and `aiwaf-wasm 0.2.12` are published.
+Publish `aiwaf-rust 0.2.17` before Python 1.3.2, which requires `aiwaf-rust>=0.2.17`, and
+`aiwaf-wasm 0.2.13` before npm 1.3.2, then update `js/package-lock.json` to the published
+0.2.13 (`^0.2.11` already allows it). Java 1.4.0 isn't on Maven Central yet.
 
 ## Security and limitations
 

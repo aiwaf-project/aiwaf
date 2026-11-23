@@ -341,6 +341,12 @@ impl RouteRiskChecker {
         self.risks.strict()
     }
 
+    /// Whether this engine skips strict inputs' exempt paths; an older one would check them.
+    #[wasm_bindgen(getter)]
+    pub fn strict_exempt(&self) -> bool {
+        self.risks.strict_exempt()
+    }
+
     /// Reviews a request against its route's saved inputs, after the general check found
     /// `found` (or ""). Returns JSON: {"action":"mismatch","route","input","type"},
     /// {"action":"unexpected","route","input"},
@@ -356,6 +362,23 @@ impl RouteRiskChecker {
             Some(review @ Review::Unexpected { .. }) => {
                 let event = review.event("", "");
                 serde_json::json!({"action": "unexpected", "route": event["route"], "input": event["input"]}).to_string()
+            }
+            None => "null".into(),
+        }
+    }
+
+    /// As `review`, for a request with this method: strict inputs check the names that method
+    /// reads when the manifest saved them.
+    pub fn review_method(&self, method: &str, path: &str, query: &str, body: &[u8], max_bytes: usize, found: &str) -> String {
+        let found = (!found.is_empty()).then_some(found);
+        match self.risks.review_method(method, path, query, body, max_bytes, found) {
+            Some(review) => {
+                let mut event = review.event("", "");
+                let object = event.as_object_mut().unwrap();
+                for key in ["event", "mode", "method"] {
+                    object.remove(key);
+                }
+                event.to_string()
             }
             None => "null".into(),
         }

@@ -525,7 +525,7 @@ class IPAndKeywordBlockMiddleware(NativeDefault):
             getattr(settings, "AIWAF_INJECTION_RISK_MODE", None),
             getattr(settings, "AIWAF_PATH_MANIFEST", None), request.path, request.method,
             getattr(settings, "AIWAF_ROUTE_SCHEMA_MODE", None), getattr(settings, "AIWAF_STRICT_INPUTS", None),
-            getattr(settings, "AIWAF_STRICT_INPUTS_ALLOW", None)))
+            getattr(settings, "AIWAF_STRICT_INPUTS_ALLOW", None), getattr(settings, "AIWAF_STRICT_INPUTS_EXEMPT", None)))
         if finding:
             _log_block(request, finding.rule, status_code=finding.status)
             return JsonResponse({"error": finding.rule}, status=finding.status)

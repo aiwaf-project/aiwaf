@@ -97,7 +97,7 @@ def test_merge_into_combines_views_of_one_route():
     routes = {"/x": {}}
     merge_into(routes, "/x", {"inputs": {"a": "int", "b": "text"}, "complete": True})
     merge_into(routes, "/x", {"inputs": {"a": "text"}, "complete": False})
-    assert routes["/x"] == {"inputs": {"a": "text", "b": "text"}, "inputs_complete": False}
+    assert routes["/x"] == {"inputs": {"a": "text", "b": "text"}, "inputs_complete": False, "_flat": {"a", "b"}}
 
 
 def test_the_request_is_followed_into_module_helpers_and_class_methods():
@@ -224,3 +224,63 @@ def test_merge_into_keeps_each_functions_reasons():
     merge_into(routes, "/a", {"function": "two", "inputs": {}, "complete": False, "reasons": [reason, reason]})
     assert routes["/a"]["inputs_complete"] is False
     assert routes["/a"]["inputs_incomplete"] == [{"code": "helper", "detail": "x", "function": "two"}]
+
+
+def test_helpers_given_a_container_or_defaults_and_constant_key_loops():
+    from aiwaf.core.input_schema import project_inputs
+
+    found = {entry["function"]: entry for entry in project_inputs({
+        "app": (
+            "from flask import request\n"
+            "from helpers import parse_filters, dump\n"
+            "def search():\n"
+            "    return parse_filters(request.args), request.args.get('q')\n"
+            "def dumped():\n"
+            "    return dump(request.form)\n"
+            "def unknown_helper():\n"
+            "    return missing(request.args)\n"
+            "def settings():\n"
+            "    payload = request.get_json(silent=True) or {}\n"
+            "    return {key: payload.get(key) for key in ('theme', 'lang')}\n"
+            "def loops():\n"
+            "    for name in ['a', 'b']:\n"
+            "        request.form[name]\n"
+            "    return [request.args[k] for k in keys], [request.args.get(n) for n in ('x', other)]\n"
+            "def upload():\n"
+            "    return request.files['file'], request.files.get('other')\n"
+        ),
+        "helpers": (
+            "def parse_filters(args):\n"
+            "    return {'sort': args.get('sort'), 'order': args['order']}\n"
+            "def dump(form):\n"
+            "    return dict(form)\n"
+        ),
+    })}
+    assert found["search"]["inputs"] == {"sort": "text", "order": "text", "q": "text"} and found["search"]["complete"]
+    assert [reason["code"] for reason in found["dumped"]["reasons"]] == ["container_whole"]
+    assert found["dumped"]["reasons"][0]["file"] == "helpers.py"
+    assert [reason["code"] for reason in found["unknown_helper"]["reasons"]] == ["container_whole"]
+    assert found["settings"] == {**found["settings"], "inputs": {"theme": "text", "lang": "text"}, "complete": True}
+    assert found["loops"]["inputs"] == {"a": "text", "b": "text"}
+    assert sorted({reason["code"] for reason in found["loops"]["reasons"]}) == ["dynamic_key"]
+    assert found["upload"]["inputs"] == {"file": "text", "other": "text"} and found["upload"]["complete"]
+
+
+def test_views_that_read_nothing_and_dict_bodies():
+    found = {entry["function"]: entry for entry in source_inputs(
+        "from fastapi import Body\n"
+        "def detail(request, pk):\n"
+        "    return pk\n"
+        "@app.post('/events')\n"
+        "def events(body: dict = Body(...)):\n"
+        "    return body\n"
+        "@app.post('/typed')\n"
+        "def typed(body: Dict[str, Any]):\n"
+        "    return body\n"
+        "def helper(value):\n"
+        "    return value\n"
+    )}
+    assert found["detail"]["inputs"] == {} and found["detail"]["complete"]
+    assert [reason["code"] for reason in found["events"]["reasons"]] == ["container_whole"]
+    assert [reason["code"] for reason in found["typed"]["reasons"]] == ["container_whole"]
+    assert "helper" not in found

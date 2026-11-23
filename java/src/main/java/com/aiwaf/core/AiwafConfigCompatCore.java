@@ -165,6 +165,9 @@ public final class AiwafConfigCompatCore {
         if (list(security.get("strict_inputs_allow")) != null) {
             cfg.strictInputsAllow = new ArrayList<>(list(security.get("strict_inputs_allow")).stream().map(String::valueOf).toList());
         }
+        if (list(security.get("strict_inputs_exempt")) != null) {
+            cfg.strictInputsExempt = new ArrayList<>(list(security.get("strict_inputs_exempt")).stream().map(String::valueOf).toList());
+        }
         cfg.allowCompressedRequestBodies = bool(security.get("allow_compressed_request_bodies"), cfg.allowCompressedRequestBodies);
         cfg.maxParameterCount = intval(security.get("max_parameter_count"), cfg.maxParameterCount);
         cfg.maxParameterBytes = intval(security.get("max_parameter_bytes"), cfg.maxParameterBytes);
@@ -243,6 +246,8 @@ public final class AiwafConfigCompatCore {
         get(env, "AIWAF_ROUTE_SCHEMA_MODE").ifPresent(v -> cfg.routeSchemaMode = v.toLowerCase(Locale.ROOT));
         get(env, "AIWAF_STRICT_INPUTS").ifPresent(v -> cfg.strictInputs = parseBool(v, cfg.strictInputs));
         get(env, "AIWAF_STRICT_INPUTS_ALLOW").ifPresent(v -> cfg.strictInputsAllow = new ArrayList<>(
+                java.util.Arrays.stream(v.split(",")).map(String::trim).filter(name -> !name.isEmpty()).toList()));
+        get(env, "AIWAF_STRICT_INPUTS_EXEMPT").ifPresent(v -> cfg.strictInputsExempt = new ArrayList<>(
                 java.util.Arrays.stream(v.split(",")).map(String::trim).filter(name -> !name.isEmpty()).toList()));
         get(env, "AIWAF_STORAGE_FILE_PATH").ifPresent(v -> cfg.storageFilePath = v);
         get(env, "AIWAF_REDIS_URL").ifPresent(v -> cfg.storageRedisUrl = v);

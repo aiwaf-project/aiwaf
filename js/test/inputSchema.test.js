@@ -57,7 +57,7 @@ test('a route served by several handlers takes all their inputs', () => {
   const routes = { '/x': {} };
   mergeInto(routes, '/x', { inputs: { a: 'int', b: 'text' }, complete: true });
   mergeInto(routes, '/x', { inputs: { a: 'text' }, complete: false });
-  expect(routes['/x']).toEqual({ inputs: { a: 'text', b: 'text' }, inputs_complete: false });
+  expect(routes['/x']).toEqual({ inputs: { a: 'text', b: 'text' }, inputs_complete: false, _flat: ['a', 'b'] });
 });
 
 test('the request is followed into functions in the same file, and constant keys are known', () => {
@@ -217,5 +217,56 @@ test('route middleware of the project\'s own is read like the handler', () => {
   expect(found['/save']).toEqual([{ title: 'text', n: 'int', trace: 'text' }, true]);
   expect(found['/leaky']).toEqual([{ x: 'text' }, false]);
   expect(found['/other']).toEqual([{ x: 'text' }, false]);
+});
+
+
+test('raw parsers, helpers given a container, route options and handlers that read nothing', () => {
+  const found = inputs([
+    "function readAddress(body) { return { street: body.street, city: body.city }; }",
+    "function dump(b) { return JSON.stringify(b); }",
+    "app.post('/orders', (req, res) => { const a = readAddress(req.body); res.json({ ...a, qty: req.body.qty }); });",
+    "app.post('/dump', (req, res) => res.json(dump(req.body)));",
+    "app.post('/raw', express.raw({ type: '*/*' }), (req, res) => res.json(req.body.length));",
+    "app.post('/text', bodyParser.text(), (req, res) => res.json(req.body));",
+    "app.get('/items', { schema: { querystring: {} } }, async request => request.query.q);",
+    "app.get('/hooked', { preHandler: check }, async request => request.query.q);",
+    "app.get('/spread', { ...options }, async request => request.query.q);",
+    "app.get('/health', async () => ({ ok: true }));",
+    "app.get(path, () => 1);"
+  ].join('\n'));
+  expect(found['/orders']).toEqual([{ street: 'text', city: 'text', qty: 'text' }, true]);
+  expect(found['/dump'][1]).toBe(false);
+  expect(found['/raw']).toEqual([{}, false]); // req.body.length is the raw bytes', not a field.
+  expect(found['/text'][1]).toBe(false);
+  expect(found['/items']).toEqual([{ q: 'text' }, true]);
+  expect(found['/hooked']).toEqual([{ q: 'text' }, false]);
+  expect(found['/spread']).toEqual([{ q: 'text' }, false]);
+  expect(found['/health']).toEqual([{}, true]);
+});
+
+test('keys read inside an input are saved when every read of it reads constant keys', () => {
+  const parser2 = require('@babel/parser');
+  const src = [
+    "app.post('/p', (req, res) => res.json([req.body.user.name, req.body.user.email, req.body.title, req.query.q]));",
+    "app.post('/q', (req, res) => { save(req.body.user); return req.body.user.name; });",
+    "app.post('/v', body('user'), (req, res) => req.body.user.name);",
+    "function readUser(body) { return body.user.id; }",
+    "app.post('/h', (req, res) => readUser(req.body));",
+    "app.post('/m', check, (req, res) => req.body.user.name);",
+    "function check(req, res, next) { req.body.user.role; next(); }"
+  ].join('\n');
+  const label = (node, parent) => (parent && parent.arguments ? String(parent.arguments[0].value) : node.id.name);
+  const found = Object.fromEntries(fileInputs(parser2.parse(src), 'app.js', src, label).map(entry => [entry.function, entry]));
+  expect(found['/p'].nested).toEqual({ user: ['email', 'name'] });
+  expect(found['/q'].nested).toBeUndefined();
+  expect(found['/v'].nested).toBeUndefined();
+  expect(found['/h'].nested).toEqual({ user: ['id'] });
+  expect(found['/m'].nested).toBeUndefined();
+  const routes = { '/x': { view: 'x' } };
+  mergeInto(routes, '/x', { function: 'a', inputs: { user: 'text' }, complete: true, nested: { user: ['name'] } });
+  mergeInto(routes, '/x', { function: 'b', inputs: { user: 'text' }, complete: true, nested: { user: ['email'] } });
+  expect(routes['/x']._nested).toEqual({ user: ['email', 'name'] });
+  mergeInto(routes, '/x', { function: 'c', inputs: { user: 'text' }, complete: true });
+  expect(routes['/x']._flat).toEqual(['user']);
 });
 

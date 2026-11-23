@@ -220,6 +220,8 @@ public final class AiwafConfig {
      */
     public boolean strictInputs = false;
     public List<String> strictInputsAllow = new ArrayList<>();
+    /** Path prefixes strict inputs skips, as /webhooks/ or /legacy/*. */
+    public List<String> strictInputsExempt = new ArrayList<>();
     public boolean allowCompressedRequestBodies = false;
     public int maxRuntimeStateEntries = 10_000;
     public int maxParameterCount = 200;

@@ -494,3 +494,37 @@ describe('validation middleware with its schema in its closure', () => {
     jest.dontMock('inspector');
   });
 });
+
+describe('routes on mounted routers', () => {
+  const mountedApp = express => {
+    const app = express();
+    const account = express.Router();
+    account.post('/settings', (req, res) => res.json(req.body.theme));
+    const users = express.Router({ mergeParams: true });
+    const nested = express.Router();
+    nested.get('/deep', (_req, res) => res.end());
+    users.get('/x', (_req, res) => res.end());
+    users.use('/nested', nested);
+    app.use('/account', account);
+    app.use('/users/:id', users);
+    app.use(account);
+    app.use(/^\/re(gex)?/, express.Router().get('/z', (_req, res) => res.end()));
+    app.get('/top', (_req, res) => res.end());
+    return app;
+  };
+
+  it('finds them under their mount paths in Express 4 and 5', () => {
+    const expected = ['/account/settings', '/settings', '/top', '/users/:id/nested/deep', '/users/:id/x'];
+    expect(Object.keys(extractExpressRoutes(mountedApp(require('express')))).sort()).toEqual(expected);
+    expect(Object.keys(extractExpressRoutes(mountedApp(require('@nestjs/platform-express/node_modules/express')))).sort()).toEqual(expected);
+  });
+
+  it('reads Express 4 patterns with unnamed and unloosened groups', () => {
+    const { mountPath } = require('../lib/pathManifest');
+    expect(mountPath({ regexp: /^\/a\/(?:([^\/]+?))\/?(?=\/|$)/i, keys: [] })).toBe('/a/:0');
+    expect(mountPath({ regexp: /^\/a(?=\/|$)/i, keys: [{ name: 'x' }] })).toBe('/a');
+    expect(mountPath({ regexp: { fast_slash: true } })).toBe('');
+    expect(mountPath({})).toBeNull();
+    expect(mountPath({ matchers: [() => null] })).toBeNull();
+  });
+});
