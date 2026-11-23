@@ -93,6 +93,48 @@ class RouteSchemaCoreTest {
         assertTrue(RouteSchemaCore.fits("text", MAPPER.readTree("{\"a\":1}")));
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void sharedStrictCases() throws Exception {
+        JsonNode cases = fixture();
+        Map<String, Object> manifest = new LinkedHashMap<>(MAPPER.convertValue(cases.get("manifest"), Map.class));
+        manifest.put("strict_inputs", Map.of("allow", MAPPER.convertValue(cases.get("strict_cases").get("allow"), List.class)));
+        RouteSchemaCore.Schemas schemas = new RouteSchemaCore.Schemas(manifest);
+        assertTrue(schemas.strict());
+        assertFalse(new RouteSchemaCore.Schemas(MAPPER.convertValue(cases.get("manifest"), Map.class)).strict());
+        for (JsonNode item : cases.get("strict_cases").get("cases")) {
+            Map<String, String> query = query(item.get("query").asText());
+            String body = item.get("body").asText();
+            String found = SqlInjectionCore.inspectQueryAndBody(query, body, 65536);
+            RouteSchemaCore.Review review = schemas.review(item.get("path").asText(), query, body, 65536, found);
+            String outcome = review != null ? review.action() : found != null ? "block" : "pass";
+            assertEquals(item.get("expect").asText(), outcome, item.toString());
+            if (item.has("input")) assertEquals(item.get("input").asText(), review.input(), item.toString());
+        }
+        Map<String, Object> plainAllow = new LinkedHashMap<>(manifest);
+        plainAllow.put("strict_inputs", Map.of("allow", List.of(5)));
+        String long_ = "x".repeat(100);
+        RouteSchemaCore.Review cut = new RouteSchemaCore.Schemas(plainAllow).review("/search", Map.of(long_, "1"), "", 65536, null);
+        assertEquals(64, cut.input().length());
+    }
+
+    @Test
+    void strictInputsLogOrBlockInTheEngine() throws Exception {
+        AiwafConfig strict = config("enforce");
+        strict.strictInputs = true;
+        String extra = "{\"body\": \"hi\", \"post_id\": 7, \"role\": \"admin\"}";
+        assertEquals("schema_unexpected_input", new AiwafEngine(strict).evaluate(post("/comments", extra)).reason());
+        strict.strictInputsAllow = List.of("role");
+        assertTrue(new AiwafEngine(strict).evaluate(post("/comments", extra)).allowed());
+        assertTrue(new AiwafEngine(config("enforce")).evaluate(post("/comments", extra)).allowed());
+        AiwafConfig monitor = config("monitor");
+        monitor.strictInputs = true;
+        monitor.strictInputsAllow = null;
+        logged.clear();
+        assertTrue(new AiwafEngine(monitor).evaluate(post("/comments", extra)).allowed());
+        assertTrue(logged.stream().anyMatch(line -> line.contains("\"action\":\"unexpected\"") && line.contains("\"input\":\"role\"")), logged.toString());
+    }
+
     private AiwafConfig config(String mode) throws Exception {
         Path file = directory.resolve("paths.json");
         Files.writeString(file, MAPPER.writeValueAsString(fixture().get("manifest")));

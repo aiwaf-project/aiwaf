@@ -45,7 +45,22 @@ public final class RouteSchemaCore {
             "(?i)^(?:urn:uuid:)?\\{?[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}\\}?$");
     private static final Set<String> BOOLS = Set.of("true", "false", "1", "0", "on", "off", "yes", "no", "t", "f", "y", "n");
 
-    /** action is "mismatch" (with input and type) or "relax" (with rule). */
+    /**
+     * Names strict inputs always allows: CSRF tokens, read by middleware rather than the handler,
+     * and tracking and cache-busting parameters. A trailing * matches any rest. As aiwaf-rust.
+     */
+    public static final List<String> STRICT_ALLOWED = List.of(
+            "csrfmiddlewaretoken", "csrf_token", "_csrf", "_token", "authenticity_token", "utm_*", "fbclid", "gclid", "msclkid", "_");
+    private static final int MAX_LOGGED_NAME = 64;
+
+    static boolean allowed(List<String> patterns, String name) {
+        for (String pattern : patterns) {
+            if (pattern.endsWith("*") ? name.startsWith(pattern.substring(0, pattern.length() - 1)) : pattern.equals(name)) return true;
+        }
+        return false;
+    }
+
+    /** action is "mismatch" (with input and type), "unexpected" (with input) or "relax" (with rule). */
     public record Review(String action, String route, String input, String type, String rule) {}
 
     private record Route(String path, RouteRiskCore.CompiledRoute compiled, Map<String, String> inputs, boolean complete,
@@ -106,8 +121,16 @@ public final class RouteSchemaCore {
     /** Saved inputs for one manifest, compiled for lookup by request path. */
     public static final class Schemas {
         private final List<Route> routes = new ArrayList<>();
+        /** Strict inputs' allowed names, when the manifest's strict_inputs turns it on. */
+        private List<String> strict;
 
         public Schemas(Map<String, Object> manifest) {
+            if (manifest != null && manifest.get("strict_inputs") instanceof Map<?, ?> settings) {
+                strict = new ArrayList<>(STRICT_ALLOWED);
+                if (settings.get("allow") instanceof List<?> names) {
+                    for (Object name : names) if (name instanceof String text) strict.add(text);
+                }
+            }
             if (manifest != null && manifest.get("routes") instanceof Map<?, ?> all) {
                 for (Map.Entry<?, ?> route : all.entrySet()) {
                     if (!(route.getValue() instanceof Map<?, ?> entry)) continue;
@@ -141,6 +164,10 @@ public final class RouteSchemaCore {
             // Exact routes win over routes with parameters, as in RouteRiskCore.
             routes.sort(Comparator.<Route>comparingInt(route -> route.compiled().names().size())
                     .thenComparingInt(route -> -route.path().length()));
+        }
+
+        public boolean strict() {
+            return strict != null;
         }
 
         public boolean hasInputs() {
@@ -191,6 +218,17 @@ public final class RouteSchemaCore {
                 String kind = route.inputs().get(field.name());
                 if (kind != null && !kind.equals("text") && !fits(kind, field.value())) {
                     return new Review("mismatch", route.path(), field.name(), kind, null);
+                }
+            }
+            // Strict inputs: on a route whose list is complete, a name it never reads. Only the
+            // query and a form or JSON object body are named; another body's names aren't known.
+            if (strict != null && route.complete()) {
+                for (Field field : all) {
+                    if (!route.inputs().containsKey(field.name()) && !allowed(strict, field.name())) {
+                        String name = field.name().codePoints().limit(MAX_LOGGED_NAME)
+                                .collect(StringBuilder::new, StringBuilder::appendCodePoint, StringBuilder::append).toString();
+                        return new Review("unexpected", route.path(), name, null, null);
+                    }
                 }
             }
             if (found == null || !RELAXED_RULES.contains(found) || !route.complete() || route.unnamedRisk() || bodyFields == null) return null;
@@ -280,7 +318,8 @@ public final class RouteSchemaCore {
     /**
      * The general check's finding (or null) after this request's route schema reviews it, and
      * logs what the review found. Monitor, the default, only logs; enforce returns
-     * schema_type_mismatch for a mismatch and null for a cleared finding. A failing review keeps it.
+     * schema_type_mismatch for a mismatch, schema_unexpected_input for an unexpected input (with
+     * config.strictInputs) and null for a cleared finding. A failing review keeps it.
      */
     public static String apply(AiwafRequest request, AiwafConfig config, String finding) {
         return apply(request, config, finding == null ? null : new SqlInjectionCore.Found(finding, "payload"));
@@ -295,7 +334,14 @@ public final class RouteSchemaCore {
             if (!config.pathManifestEnabled || !(mode.equals("enforce") || mode.equals("monitor"))) return finding;
             String location = config.pathManifestPath == null || config.pathManifestPath.isBlank()
                     ? PathManifestCore.DEFAULT_MANIFEST_PATH : config.pathManifestPath;
-            Schemas schemas = CACHE.computeIfAbsent(location, key -> new Schemas(PathManifestCore.loadManifest(Path.of(key))));
+            List<String> allow = config.strictInputs ? List.copyOf(config.strictInputsAllow == null ? List.of() : config.strictInputsAllow) : null;
+            Schemas schemas = CACHE.computeIfAbsent(location + "\u0000" + allow, key -> {
+                Map<String, Object> manifest = PathManifestCore.loadManifest(Path.of(location));
+                if (allow == null || manifest == null) return new Schemas(manifest);
+                Map<String, Object> strict = new LinkedHashMap<>(manifest);
+                strict.put("strict_inputs", Map.of("allow", allow));
+                return new Schemas(strict);
+            });
             if (!schemas.hasInputs()) return finding;
             String body = config.requestBodyInspectionEnabled ? request.bodyPreview() : null;
             String rule = "payload_inspection_limit".equals(finding) ? null : finding;
@@ -312,12 +358,15 @@ public final class RouteSchemaCore {
             if (review.action().equals("mismatch")) {
                 line.put("input", review.input());
                 line.put("type", review.type());
+            } else if (review.action().equals("unexpected")) {
+                line.put("input", review.input());
             } else {
                 line.put("rule", review.rule());
             }
             LOGGER.warning(JSON.writeValueAsString(line));
             if (!mode.equals("enforce")) return finding;
-            return review.action().equals("mismatch") ? "schema_type_mismatch" : null;
+            if (review.action().equals("mismatch")) return "schema_type_mismatch";
+            return review.action().equals("unexpected") ? "schema_unexpected_input" : null;
         } catch (Exception ex) {
             return finding;
         }

@@ -9,6 +9,7 @@ from typing import Any
 
 from aiwaf.core.api_detection import detect_api_endpoint
 from aiwaf.core.auth_detection import detect_auth_endpoint
+from aiwaf.core.input_sources import declared_on, fastapi_inputs
 from aiwaf.core.route_risks import audit_into_manifest
 from aiwaf.core.path_manifest import build_manifest, build_route_entry, is_internal_aiwaf_path, write_manifest
 from aiwaf.core.source_methods import (
@@ -175,6 +176,12 @@ def extract_fastapi_routes(app) -> dict[str, dict[str, Any]]:
         if tags:
             entry["tags"] = tags
         entry['request_constraints'] = fastapi_declarations(route, methods)
+        framework_inputs = fastapi_inputs(route)
+        if framework_inputs is not None:
+            entry["declared_inputs"] = framework_inputs
+        declaration = declared_on(raw_endpoint)
+        if declaration is not None:
+            entry["input_declaration"] = declaration
         routes[path] = merge_entries(routes.get(path), entry)
     from starlette.routing import Mount
     mounted = [route.path.rstrip('/') + '/' for route in getattr(app, 'routes', []) if isinstance(route, Mount)]

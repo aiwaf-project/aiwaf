@@ -10,7 +10,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const parser = require('@babel/parser');
-const { fileInputs } = require('./inputSchema');
+const { fileInputs, moduleScope } = require('./inputSchema');
 
 const SCHEMA_VERSION = '1.0';
 const SKIPPED_DIRECTORIES = new Set(['.git', '.next', '.nuxt', 'build', 'coverage', 'dist', 'node_modules', 'out', 'vendor']);
@@ -1649,10 +1649,17 @@ function analyzePath(target = '.', options = {}) {
     || a.function.localeCompare(b.function));
   // What each handler reads, with types, labelled as its findings are so both link to the same routes.
   const inputs = [];
+  // Every file's scope first, so handlers can follow schemas and helpers into the files they import.
+  const scopes = new Map();
+  for (const item of parsed) {
+    const scope = moduleScope(item.ast, item.text, item.display, spec => project.resolver.resolve(item.full, spec));
+    scope.project = scopes;
+    scopes.set(item.full, scope);
+  }
   for (const item of parsed) {
     const analyzer = project.get(item.full);
     const label = (node, parent) => analyzer.routeLabels.get(node) || functionName(node, parent);
-    for (const entry of fileInputs(item.ast, item.display, item.text, label)) inputs.push(entry);
+    for (const entry of fileInputs(item.ast, item.display, item.text, label, scopes.get(item.full))) inputs.push(entry);
   }
   const report = { schema_version: SCHEMA_VERSION, language: 'javascript', files_scanned: filesScanned, findings, errors, inputs };
   if (suppressed) report.suppressed = suppressed;

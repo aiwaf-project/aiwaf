@@ -212,6 +212,14 @@ public final class AiwafConfig {
      * both, "off" skips them.
      */
     public String routeSchemaMode = "monitor";
+    /**
+     * Strict inputs (off by default): on a route whose saved input list is complete, a query or
+     * body name the route never reads is unexpected, logged in routeSchemaMode monitor and blocked
+     * (schema_unexpected_input) in enforce. CSRF tokens, utm_*, fbclid, gclid, msclkid and _ are
+     * always allowed; strictInputsAllow adds names (a trailing * matches any rest).
+     */
+    public boolean strictInputs = false;
+    public List<String> strictInputsAllow = new ArrayList<>();
     public boolean allowCompressedRequestBodies = false;
     public int maxRuntimeStateEntries = 10_000;
     public int maxParameterCount = 200;

@@ -271,7 +271,9 @@ def test_audit_into_manifest_saves_findings_and_survives_failures(tmp_path, capl
     assert audit_into_manifest(manifest, None) is None
     assert describe_audit(manifest) == "Injection checks: not run"
     assert audit_into_manifest(manifest, str(tmp_path)) == {"routes": 1, "linked": 1, "unlinked": 0, "inputs": 1}
-    assert describe_audit(manifest) == "Injection checks: 1 routes from 1 files; inputs and types for 1 routes"
+    assert describe_audit(manifest) == "Injection checks: 1 routes from 1 files; inputs and types for 1 routes, complete for 1"
+    manifest["injection_audit"]["incomplete_input_reasons"] = {"helper": 2, "dynamic_key": 1}
+    assert describe_audit(manifest).endswith("complete for 1 (incomplete because of helper 2, dynamic_key 1)")
     manifest["injection_audit"]["unlinked_findings"] = 2
     assert "2 findings couldn't be tied" in describe_audit(manifest)
     with caplog.at_level(logging.WARNING, logger="aiwaf.injection_risk"):
@@ -313,6 +315,64 @@ def test_shared_schema_cases(case):
     assert outcome == case["expect"]
     if outcome == "mismatch":
         assert review[2] == case["input"]
+
+
+@pytest.mark.parametrize("case", SCHEMA["strict_cases"]["cases"], ids=lambda case: f"{case['path']} {case['expect']}")
+def test_shared_strict_cases(case):
+    from aiwaf.core.sql_injection import SQLInjectionPolicy
+
+    found = SQLInjectionPolicy("block").inspect(case["query"].encode(), case["body"].encode())
+    risks = RouteRisks(SCHEMA["manifest"], {"allow": SCHEMA["strict_cases"]["allow"]})
+    review = risks.review(case["path"], case["query"], case["body"].encode(), 65536, found.rule if found else None)
+    outcome = review[0] if review else ("block" if found else "pass")
+    assert outcome == case["expect"]
+    if case.get("input"):
+        assert review[2] == case["input"]
+
+
+def test_strict_inputs_settings_and_modes(tmp_path, caplog, monkeypatch):
+    from aiwaf.core.route_risks import strict_inputs
+
+    monkeypatch.delenv("AIWAF_STRICT_INPUTS", raising=False)
+    monkeypatch.delenv("AIWAF_STRICT_INPUTS_ALLOW", raising=False)
+    assert strict_inputs() is None and strict_inputs("no") is None
+    assert strict_inputs(True, "a, b*,") == {"allow": ["a", "b*"]}
+    assert strict_inputs("on", ["x", " "]) == {"allow": ["x"]}
+    monkeypatch.setenv("AIWAF_STRICT_INPUTS", "1")
+    monkeypatch.setenv("AIWAF_STRICT_INPUTS_ALLOW", "trace_*")
+    assert strict_inputs() == {"allow": ["trace_*"]}
+    path = write(tmp_path, SCHEMA["manifest"])
+    with caplog.at_level(logging.WARNING, logger="aiwaf.route_schema"):
+        monitor = observer_for("off", path, "/search", "GET")
+        assert monitor.review(b"q=a&debug=1", b"", None, 65536) is None
+        enforce = observer_for("off", path, "/search", "GET", "enforce")
+        assert enforce.review(b"q=a&debug=1", b"", None, 65536).rule == "schema_unexpected_input"
+        assert enforce.review(b"q=a&trace_id=1", b"", None, 65536) is None
+        off = observer_for("off", path, "/search", "GET", "enforce", strict="off")
+        assert off.review(b"q=a&debug=1", b"", None, 65536) is None
+    events = [json.loads(record.getMessage()) for record in caplog.records]
+    assert events[0] == {"event": "aiwaf.route_schema", "mode": "monitor", "method": "GET", "route": "/search",
+                         "action": "unexpected", "input": "debug"}
+
+
+def test_strict_inputs_warn_when_the_engine_is_too_old(tmp_path, caplog, monkeypatch):
+    from aiwaf.core import route_risks
+
+    real = route_risks.rust()
+
+    class Old:
+        def __init__(self, manifest):
+            self._checker = real.RouteRiskChecker(manifest)
+
+        def __getattr__(self, name):
+            if name == "strict":
+                raise AttributeError(name)
+            return getattr(self._checker, name)
+
+    monkeypatch.setattr(route_risks, "rust", lambda: type("R", (), {"RouteRiskChecker": Old})())
+    with caplog.at_level(logging.WARNING, logger="aiwaf.route_schema"):
+        RouteRisks(SCHEMA["manifest"], {"allow": []})
+    assert "Strict inputs need aiwaf-rust 0.2.16" in caplog.text
 
 
 def test_schema_review_modes_log_names_and_never_values(tmp_path, caplog):

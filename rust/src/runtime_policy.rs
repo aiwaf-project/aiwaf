@@ -398,9 +398,16 @@ impl RouteRiskChecker {
         self.risks.is_empty()
     }
 
+    /// Whether the manifest turned strict inputs on (its `strict_inputs` key). An engine
+    /// without this getter is too old to check them.
+    #[getter]
+    fn strict(&self) -> bool {
+        self.risks.strict()
+    }
+
     /// Reviews a request against its route's saved inputs, after the general check found
-    /// `found` (or nothing). Returns ("mismatch", route, input, type), ("relax", route, rule, ""),
-    /// or None to keep the general check's answer.
+    /// `found` (or nothing). Returns ("mismatch", route, input, type), ("unexpected", route,
+    /// input, ""), ("relax", route, rule, ""), or None to keep the general check's answer.
     #[pyo3(signature = (path, query, body, max_bytes, found=None))]
     fn review(
         &self,
@@ -414,6 +421,7 @@ impl RouteRiskChecker {
         use aiwaf_core::route_risks::Review;
         py.detach(|| match self.risks.review(path, query, &body, max_bytes, found.as_deref())? {
             Review::Mismatch { route, input, kind } => Some(("mismatch".into(), route, input, kind)),
+            Review::Unexpected { route, input } => Some(("unexpected".into(), route, input, String::new())),
             Review::Relax { route, rule } => Some(("relax".into(), route, rule, String::new())),
         })
     }
@@ -424,6 +432,7 @@ impl RouteRiskChecker {
         use aiwaf_core::route_risks::Review;
         py.detach(|| match self.risks.review_path(path, max_bytes, found)? {
             Review::Mismatch { route, input, kind } => Some(("mismatch".into(), route, input, kind)),
+            Review::Unexpected { route, input } => Some(("unexpected".into(), route, input, String::new())),
             Review::Relax { route, rule } => Some(("relax".into(), route, rule, String::new())),
         })
     }

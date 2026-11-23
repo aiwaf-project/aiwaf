@@ -70,6 +70,10 @@ def merge_entries(previous, current):
     if previous is None:
         return current
     result = {**current, 'methods': sorted(set(previous['methods']) | set(current['methods']))}
+    if previous.get('declared_inputs') or current.get('declared_inputs'):
+        from aiwaf.core.input_sources import combine
+
+        result['declared_inputs'] = combine(previous.get('declared_inputs'), current.get('declared_inputs'))
     grouped = {}
     for entry in (previous, current):
         known = {row['method']: row for row in entry.get('request_constraints', [])}

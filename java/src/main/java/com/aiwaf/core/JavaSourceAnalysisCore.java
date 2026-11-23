@@ -226,6 +226,9 @@ public final class JavaSourceAnalysisCore {
                 item.put("file", entry.file());
                 item.put("inputs", entry.inputs());
                 item.put("complete", entry.complete());
+                if (!entry.reasons().isEmpty()) {
+                    item.put("reasons", entry.reasons().stream().map(JavaInputSchemaCore::asMap).toList());
+                }
                 handlers.add(item);
             }
             out.put("inputs", handlers);
@@ -313,7 +316,8 @@ public final class JavaSourceAnalysisCore {
             // What each handler reads, with types, labelled as its findings are.
             List<CompilationUnitTree> readable = trees.stream()
                     .filter(unit -> !failed.contains(Path.of(unit.getSourceFile().toUri()).toString().replace('\\', '/'))).toList();
-            inputs.addAll(JavaInputSchemaCore.inputs(readable, unit -> Path.of(unit.getSourceFile().toUri()).toString().replace('\\', '/')));
+            inputs.addAll(JavaInputSchemaCore.inputs(readable, unit -> Path.of(unit.getSourceFile().toUri()).toString().replace('\\', '/'),
+                    positions));
             // Again when input was found stored in a request or session attribute, for code read first.
             for (int pass = 0; pass < 3; pass++) {
                 int before = project.attributes.size();

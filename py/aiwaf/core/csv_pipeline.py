@@ -243,10 +243,12 @@ class CSVPipeline:
         """Give the engine the manifest's saved inputs, as the regular chain reviews requests with.
 
         AIWAF_ROUTE_SCHEMA_MODE is monitor by default. An engine too old to review leaves it off.
+        Strict inputs (AIWAF_STRICT_INPUTS) ride in that manifest, when the engine has them.
         """
         from .path_manifest import load_manifest
-        from .route_risks import SCHEMA_MODES, SCHEMA_SETTING
+        from .route_risks import SCHEMA_MODES, SCHEMA_SETTING, STRICT_WARNING, strict_inputs
 
+        strict = strict_inputs(wire_config.pop("strict_inputs", None), wire_config.pop("strict_inputs_allow", None))
         mode = str(wire_config.pop("route_schema_mode", None) or os.getenv(SCHEMA_SETTING, "monitor")).strip().lower()
         if mode not in SCHEMA_MODES:
             raise ValueError("AIWAF_ROUTE_SCHEMA_MODE must be enforce, monitor, or off")
@@ -260,6 +262,10 @@ class CSVPipeline:
             return
         wire_config["route_schema_mode"] = mode
         wire_config["route_manifest"] = manifest
+        if strict and supports("strict_inputs"):
+            wire_config["route_manifest"] = {**manifest, "strict_inputs": strict}
+        elif strict:
+            LOGGER.warning(STRICT_WARNING)
 
     def _check_engine_supports(self, factory):
         """Refuse to start when the configuration needs a fact this aiwaf-rust build lacks."""

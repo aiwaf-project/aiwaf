@@ -11,3 +11,6 @@ class AiwafConfig(AppConfig):
             apply_legacy_settings()
         except Exception:
             pass
+        # AIWAF_RECORD_INPUTS: record what each view reads, for init, with no MIDDLEWARE line.
+        from aiwaf.core.input_recorder import add_django_recorder
+        add_django_recorder()

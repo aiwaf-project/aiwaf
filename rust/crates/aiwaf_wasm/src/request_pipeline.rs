@@ -24,9 +24,10 @@ pub const STAGES: [&str; 8] = [
 ];
 static NEXT_CONTEXT: AtomicU64 = AtomicU64::new(1);
 /// Optional request facts this engine accepts, for `NativeRequestPipeline::supports`.
-pub const FEATURES: [&str; 15] = [
+pub const FEATURES: [&str; 16] = [
     "rate_overrides",
     "route_schema",
+    "strict_inputs",
     "sql_monitor",
     "uuid_resolver",
     "host_store",
@@ -287,6 +288,7 @@ enum Verdict {
     Keep,
     Clear,
     Mismatch,
+    Unexpected,
 }
 
 /// Reviews a payload finding, by where it came from, against the route's saved inputs.
@@ -306,6 +308,7 @@ fn reviewed(
     let enforce = profile.route_schema_mode == "enforce";
     let verdict = match review {
         Some(Review::Mismatch { .. }) if enforce => Verdict::Mismatch,
+        Some(Review::Unexpected { .. }) if enforce => Verdict::Unexpected,
         Some(Review::Relax { .. }) if enforce => Verdict::Clear,
         _ => Verdict::Keep,
     };
@@ -806,6 +809,7 @@ impl Engine {
                     Verdict::Keep => found.map(|(s, k, _)| (s, k)),
                     Verdict::Clear => None,
                     Verdict::Mismatch => Some((403, "schema_type_mismatch".into())),
+                    Verdict::Unexpected => Some((403, "schema_unexpected_input".into())),
                 };
                 match finding {
                     Some((_, rule)) if p.sql_mode == "monitor" => monitor = Some(rule),
@@ -1022,6 +1026,7 @@ impl Engine {
                     Verdict::Keep => {}
                     Verdict::Clear => finding = None,
                     Verdict::Mismatch => finding = Some((403, "schema_type_mismatch")),
+                    Verdict::Unexpected => finding = Some((403, "schema_unexpected_input")),
                 }
             }
             if self.profile.sql_mode == "monitor" {

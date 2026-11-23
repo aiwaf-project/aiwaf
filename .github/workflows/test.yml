@@ -75,7 +75,7 @@ jobs:
       - name: Install Python packages with aiwaf-rust from source
         uses: ./.github/actions/setup-python-from-source
         with:
-          packages: -e ".[django,flask,fastapi]" pytest pytest-cov coverage httpx redis djangorestframework python-multipart flask-socketio
+          packages: -e ".[django,flask,fastapi]" pytest pytest-cov coverage httpx redis djangorestframework python-multipart flask-socketio webargs flask-smorest
 
       - name: Install JavaScript dependencies
         run: npm ci --prefix js

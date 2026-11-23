@@ -15,6 +15,7 @@ import com.sun.source.tree.ParameterizedTypeTree;
 import com.sun.source.tree.ArrayTypeTree;
 import com.sun.source.tree.Tree;
 import com.sun.source.tree.VariableTree;
+import com.sun.source.util.SourcePositions;
 import com.sun.source.util.TreePath;
 import com.sun.source.util.TreePathScanner;
 import com.sun.source.util.TreeScanner;
@@ -32,13 +33,53 @@ import java.util.Set;
  * or text) and {@code inputs_complete}: true only when every read was understood. Requests are
  * then reviewed against them: see {@link RouteSchemaCore}.
  *
- * <p>Anything not understood makes the list incomplete rather than guessed: the request passed to
- * another method, the parameter map or raw body read, a {@code Map} or unknown body type, a
- * class with {@code @JsonAnySetter}, or {@code @InitBinder} and {@code @ModelAttribute} methods.
+ * <p>Anything not understood makes the list incomplete rather than guessed, and says why: the
+ * request passed to a method that isn't followed ({@code helper}), the parameter map read or a
+ * {@code Map} bound ({@code container_whole}), a key that isn't a constant ({@code dynamic_key}),
+ * the raw body, query string or a multipart part read ({@code raw_body}), a body type that isn't in
+ * the sources ({@code external_class}), a class with {@code @JsonAnySetter} ({@code model_fields}),
+ * or {@code @InitBinder} and {@code @ModelAttribute} methods ({@code class_view}). Body classes
+ * come from every scanned file, and the request is followed into static methods of other classes.
  */
 public final class JavaInputSchemaCore {
+    /** Why a handler's list is incomplete: a code from the shared list, a detail, and its line (0 when unknown). */
+    public record Reason(String code, String detail, long line) {}
+
     /** One handler's inputs, labelled Class.method as the audit labels its findings. */
-    public record Inputs(String function, String file, Map<String, String> inputs, boolean complete) {}
+    public record Inputs(String function, String file, Map<String, String> inputs, boolean complete, List<Reason> reasons) {
+        public Inputs(String function, String file, Map<String, String> inputs, boolean complete) {
+            this(function, file, inputs, complete, List.of());
+        }
+    }
+
+    /** A reason as the manifest and reports save it: code, detail and, when known, line. */
+    public static Map<String, Object> asMap(Reason reason) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("code", reason.code());
+        out.put("detail", reason.detail());
+        if (reason.line() > 0) out.put("line", reason.line());
+        return out;
+    }
+
+    /** The reasons one handler's list is incomplete, with lines from the unit they're in. */
+    private static final class Gaps {
+        final List<Reason> reasons = new ArrayList<>();
+        final SourcePositions positions;
+
+        Gaps(SourcePositions positions) {
+            this.positions = positions;
+        }
+
+        void add(CompilationUnitTree unit, String code, String detail, Tree at) {
+            long line = 0;
+            if (positions != null && unit != null && at != null) {
+                long start = positions.getStartPosition(unit, at);
+                if (start >= 0) line = unit.getLineMap().getLineNumber(start);
+            }
+            Reason reason = new Reason(code, detail, line);
+            if (!reasons.contains(reason)) reasons.add(reason);
+        }
+    }
 
     private static final Set<String> MAPPINGS = Set.of("DeleteMapping", "GetMapping", "PatchMapping", "PostMapping", "PutMapping", "RequestMapping");
     private static final Set<String> SERVLET_METHODS = Set.of("doGet", "doPost", "doPut", "doDelete", "doPatch", "service");
@@ -121,6 +162,7 @@ public final class JavaInputSchemaCore {
     /** Classes and records in the project whose fields a body or form binds to. */
     private static final class Dtos {
         final Map<String, ClassTree> classes = new HashMap<>();
+        final Map<ClassTree, CompilationUnitTree> units = new HashMap<>();
         final Set<String> enums = new java.util.HashSet<>();
 
         Dtos(List<CompilationUnitTree> units) {
@@ -129,6 +171,7 @@ public final class JavaInputSchemaCore {
                     @Override
                     public Void visitClass(ClassTree node, Void unused) {
                         classes.putIfAbsent(node.getSimpleName().toString(), node);
+                        Dtos.this.units.putIfAbsent(node, unit);
                         if (node.getKind() == Tree.Kind.ENUM) enums.add(node.getSimpleName().toString());
                         return super.visitClass(node, unused);
                     }
@@ -168,10 +211,28 @@ public final class JavaInputSchemaCore {
         boolean isEnum(Tree type) {
             return enums.contains(simpleName(type));
         }
+
+        /** Why a class's fields can't be read: (code, detail). */
+        String[] why(Tree type) {
+            String name = simpleName(type);
+            ClassTree node = classes.get(name);
+            if (node == null) return new String[] {"external_class", name + " isn't in the scanned sources"};
+            if (node.getKind() == Tree.Kind.INTERFACE || node.getKind() == Tree.Kind.ENUM) {
+                return new String[] {"external_class", name + " is an interface or enum"};
+            }
+            if (node.getExtendsClause() != null && fields(node.getExtendsClause(), 1) == null) return why(node.getExtendsClause());
+            return new String[] {"model_fields", name + " takes any property (@JsonAnySetter)"};
+        }
     }
 
     /** Each handler's inputs in the parsed units, with each unit's display name. */
     public static List<Inputs> inputs(List<CompilationUnitTree> units, java.util.function.Function<CompilationUnitTree, String> display) {
+        return inputs(units, display, null);
+    }
+
+    /** Each handler's inputs; with positions, each reason carries its line. */
+    public static List<Inputs> inputs(List<CompilationUnitTree> units, java.util.function.Function<CompilationUnitTree, String> display,
+                                      SourcePositions positions) {
         Dtos dtos = new Dtos(units);
         List<Inputs> results = new ArrayList<>();
         for (CompilationUnitTree unit : units) {
@@ -179,7 +240,7 @@ public final class JavaInputSchemaCore {
             new TreeScanner<Void, Void>() {
                 @Override
                 public Void visitClass(ClassTree type, Void unused) {
-                    handlers(unit, type, file, dtos, results);
+                    handlers(unit, type, file, dtos, results, positions);
                     return super.visitClass(type, unused);
                 }
             }.scan(unit, null);
@@ -187,11 +248,13 @@ public final class JavaInputSchemaCore {
         return results;
     }
 
-    private static void handlers(CompilationUnitTree unit, ClassTree type, String file, Dtos dtos, List<Inputs> results) {
+    private static void handlers(CompilationUnitTree unit, ClassTree type, String file, Dtos dtos, List<Inputs> results,
+                                 SourcePositions positions) {
         // Methods every handler of the class runs first, which may read anything.
-        boolean shared = type.getMembers().stream().anyMatch(member -> member instanceof MethodTree method
+        MethodTree shared = type.getMembers().stream().filter(member -> member instanceof MethodTree method
                 && (annotations(method.getModifiers().getAnnotations()).containsKey("InitBinder")
-                    || annotations(method.getModifiers().getAnnotations()).containsKey("ModelAttribute")));
+                    || annotations(method.getModifiers().getAnnotations()).containsKey("ModelAttribute")))
+                .map(MethodTree.class::cast).findFirst().orElse(null);
         for (Tree member : type.getMembers()) {
             if (!(member instanceof MethodTree method) || method.getBody() == null) continue;
             Map<String, AnnotationTree> marks = annotations(method.getModifiers().getAnnotations());
@@ -200,17 +263,23 @@ public final class JavaInputSchemaCore {
                     && method.getParameters().stream().anyMatch(parameter -> REQUEST_TYPES.contains(simpleName(parameter.getType())));
             if (!mapped && !servlet) continue;
             Map<String, String> inputs = new LinkedHashMap<>();
-            boolean[] complete = {!shared};
+            Gaps gaps = new Gaps(positions);
+            if (shared != null) {
+                gaps.add(unit, "class_view", type.getSimpleName() + "." + shared.getName()
+                        + " runs before every handler and may read anything", shared);
+            }
             List<String> requests = new ArrayList<>();
             for (VariableTree parameter : method.getParameters()) {
-                parameter(parameter, dtos, inputs, complete, requests);
+                parameter(unit, parameter, dtos, inputs, gaps, requests);
             }
-            if (!requests.isEmpty()) reads(unit, type, method, requests, inputs, complete, new java.util.HashSet<>());
-            results.add(new Inputs(type.getSimpleName() + "." + method.getName(), file, inputs, complete[0]));
+            if (!requests.isEmpty()) reads(unit, type, method, requests, inputs, gaps, dtos, new java.util.HashSet<>());
+            results.add(new Inputs(type.getSimpleName() + "." + method.getName(), file, inputs, gaps.reasons.isEmpty(),
+                    List.copyOf(gaps.reasons)));
         }
     }
 
-    private static void parameter(VariableTree parameter, Dtos dtos, Map<String, String> inputs, boolean[] complete, List<String> requests) {
+    private static void parameter(CompilationUnitTree unit, VariableTree parameter, Dtos dtos, Map<String, String> inputs, Gaps gaps,
+                                  List<String> requests) {
         Map<String, AnnotationTree> marks = annotations(parameter.getModifiers().getAnnotations());
         String type = simpleName(parameter.getType());
         String name = parameter.getName().toString();
@@ -225,15 +294,24 @@ public final class JavaInputSchemaCore {
             merge(inputs, "sort", "text");
             return;
         }
-        if (Set.of("WebRequest", "NativeWebRequest", "MultipartFile", "MultipartHttpServletRequest", "HttpEntity", "RequestEntity",
-                "InputStream", "Reader").contains(type) || marks.containsKey("RequestPart")) {
-            complete[0] = false;
+        if (Set.of("WebRequest", "NativeWebRequest").contains(type)) {
+            gaps.add(unit, "helper", "parameter " + name + " is the whole request (" + type + ")", parameter);
+            return;
+        }
+        if (Set.of("MultipartFile", "MultipartHttpServletRequest", "HttpEntity", "RequestEntity", "InputStream", "Reader").contains(type)
+                || marks.containsKey("RequestPart")) {
+            gaps.add(unit, "raw_body", "parameter " + name + " reads the raw body or a multipart part (" + type + ")", parameter);
             return;
         }
         String kind = scalar(parameter.getType());
         if (marks.containsKey("RequestParam") || (kind != null && !marks.containsKey("RequestBody") && !marks.containsKey("ModelAttribute"))) {
             if (kind == null && !dtos.isEnum(parameter.getType())) {
-                complete[0] = false;  // A map of every parameter, or a type that isn't known.
+                // A map of every parameter, or a type that isn't known.
+                if (Set.of("Map", "MultiValueMap", "HashMap", "LinkedHashMap").contains(type)) {
+                    gaps.add(unit, "container_whole", "parameter " + name + " binds every parameter (" + type + ")", parameter);
+                } else {
+                    gaps.add(unit, "external_class", "parameter " + name + " has a type that isn't known (" + type + ")", parameter);
+                }
                 return;
             }
             String named = marks.containsKey("RequestParam") ? annotationName(marks.get("RequestParam")) : null;
@@ -243,7 +321,12 @@ public final class JavaInputSchemaCore {
         // A @RequestBody, or a @ModelAttribute or other object bound from the form and query.
         Map<String, String> fields = dtos.fields(parameter.getType(), 0);
         if (fields == null) {
-            complete[0] = false;
+            if (Set.of("Map", "MultiValueMap", "HashMap", "LinkedHashMap", "JsonNode", "ObjectNode", "Object", "String").contains(type)) {
+                gaps.add(unit, "container_whole", "parameter " + name + " takes the whole body (" + type + ")", parameter);
+            } else {
+                String[] why = dtos.why(parameter.getType());
+                gaps.add(unit, why[0], why[1], parameter);
+            }
             return;
         }
         fields.forEach((field, fieldKind) -> merge(inputs, field, fieldKind));
@@ -262,16 +345,29 @@ public final class JavaInputSchemaCore {
         return out;
     }
 
-    /** A method of the class a call names, as helper(request) or this.helper(request), with as many parameters. */
-    private static MethodTree method(ClassTree type, MethodInvocationTree call) {
+    /**
+     * The method a call names, as helper(request) or this.helper(request) in the class, or
+     * Helpers.helper(request), a static method of another scanned class, with as many parameters.
+     */
+    private static Object[] method(ClassTree type, CompilationUnitTree unit, MethodInvocationTree call, Dtos dtos) {
         ExpressionTree select = call.getMethodSelect();
-        String name = select instanceof IdentifierTree identifier ? identifier.getName().toString()
-                : select instanceof MemberSelectTree member && member.getExpression().toString().equals("this") ? member.getIdentifier().toString() : null;
+        ClassTree owner = type;
+        String name = null;
+        if (select instanceof IdentifierTree identifier) name = identifier.getName().toString();
+        else if (select instanceof MemberSelectTree member) {
+            String target = member.getExpression().toString();
+            if (target.equals("this")) name = member.getIdentifier().toString();
+            else if (dtos.classes.containsKey(target.substring(target.lastIndexOf('.') + 1))) {
+                owner = dtos.classes.get(target.substring(target.lastIndexOf('.') + 1));
+                name = member.getIdentifier().toString();
+            }
+        }
         if (name == null) return null;
-        for (Tree member : type.getMembers()) {
+        for (Tree member : owner.getMembers()) {
             if (member instanceof MethodTree candidate && candidate.getName().contentEquals(name) && candidate.getBody() != null
-                    && candidate.getParameters().size() == call.getArguments().size()) {
-                return candidate;
+                    && candidate.getParameters().size() == call.getArguments().size()
+                    && (owner == type || candidate.getModifiers().getFlags().contains(javax.lang.model.element.Modifier.STATIC))) {
+                return new Object[] {owner, owner == type ? unit : dtos.units.get(owner), candidate};
             }
         }
         return null;
@@ -282,7 +378,7 @@ public final class JavaInputSchemaCore {
      * request into the class's own methods, as in return render(request).
      */
     private static void reads(CompilationUnitTree unit, ClassTree type, MethodTree method, List<String> requests, Map<String, String> inputs,
-                              boolean[] complete, Set<MethodTree> active) {
+                              Gaps gaps, Dtos dtos, Set<MethodTree> active) {
         Map<String, String> constants = constants(type);
         active.add(method);
         new TreePathScanner<Void, Void>() {
@@ -291,16 +387,19 @@ public final class JavaInputSchemaCore {
                 if (!requests.contains(node.getName().toString())) return null;
                 Tree parent = getCurrentPath().getParentPath().getLeaf();
                 if (parent instanceof MethodInvocationTree call && call.getArguments().contains(node)) {
-                    MethodTree target = method(type, call);
-                    if (target != null && !active.contains(target) && active.size() < 4) {
+                    Object[] found = method(type, unit, call, dtos);
+                    MethodTree target = found == null ? null : (MethodTree) found[2];
+                    if (target != null && found[1] != null && !active.contains(target) && active.size() < 4) {
                         String name = target.getParameters().get(call.getArguments().indexOf(node)).getName().toString();
-                        reads(unit, type, target, List.of(name), inputs, complete, active);
+                        reads((CompilationUnitTree) found[1], (ClassTree) found[0], target, List.of(name), inputs, gaps, dtos, active);
                         active.remove(target);
                         return null;
                     }
+                    gaps.add(unit, "helper", "the request is passed to " + call.getMethodSelect() + ", which isn't followed", call);
+                    return null;
                 }
                 if (!(parent instanceof MemberSelectTree select) || select.getExpression() != node) {
-                    complete[0] = false;  // The request goes somewhere that may read it.
+                    gaps.add(unit, "helper", "the request is stored or returned where it may be read", node);
                     return null;
                 }
                 String called = select.getIdentifier().toString();
@@ -317,10 +416,13 @@ public final class JavaInputSchemaCore {
                                 && parse.getArguments().get(0) == invocation ? PARSERS.get(parse.getMethodSelect().toString()) : null;
                         merge(inputs, text, kind == null ? "text" : kind);
                     } else {
-                        complete[0] = false;
+                        gaps.add(unit, "dynamic_key", "request." + called + " is called with a key that isn't a constant", call);
                     }
                 } else if (RAW_READS.contains(called)) {
-                    complete[0] = false;
+                    String code = Set.of("getParameterMap", "getParameterNames").contains(called) ? "container_whole"
+                            : called.equals("getAttribute") ? "helper" : "raw_body";
+                    gaps.add(unit, code, "request." + called + "() reads " + (code.equals("helper")
+                            ? "attributes that may hold input" : code.equals("raw_body") ? "the raw body or URL" : "every parameter"), call);
                 }
                 return null;
             }

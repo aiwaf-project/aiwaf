@@ -7,6 +7,7 @@ const { loadManifest, writeManifest } = require('./pathManifest');
 const { bodyBytes } = require('./sqlInjection');
 const wasmChecks = require('./wasmChecks');
 const { mergeInto } = require('./inputSchema');
+const inputSources = require('./inputSources');
 
 // The operations a saved finding can name. The rules for each run in aiwaf-wasm.
 const SINKS = [
@@ -41,6 +42,25 @@ function inspectRisks(checker, path, query, body) {
   return JSON.parse(checker.inspect(String(path || '/'), text, bodyBytes(body) || Buffer.alloc(0)));
 }
 
+/**
+ * Strict inputs (AIWAF_STRICT_INPUTS, off by default): on a route whose saved input list is
+ * complete, a query or body name the route never reads is an unexpected input, logged in the
+ * route schema's monitor mode and blocked in enforce mode. AIWAF_STRICT_INPUTS_ALLOW adds names
+ * to always allow (a trailing * matches any rest) to the engine's own: CSRF tokens, utm_*,
+ * fbclid, gclid, msclkid and _. Returns { allow } when on, or null.
+ */
+function strictInputs(options = {}) {
+  const raw = options.AIWAF_STRICT_INPUTS ?? process.env.AIWAF_STRICT_INPUTS ?? '';
+  const on = raw === true || ['1', 'true', 'yes', 'on'].includes(String(raw).trim().toLowerCase());
+  if (!on) return null;
+  const listed = options.AIWAF_STRICT_INPUTS_ALLOW ?? process.env.AIWAF_STRICT_INPUTS_ALLOW ?? [];
+  const allow = (Array.isArray(listed) ? listed : String(listed).split(',')).map(name => String(name).trim()).filter(Boolean);
+  return { allow };
+}
+
+/** The manifest the engine gets: with strict_inputs added when strict inputs is on. */
+const withStrict = (manifest, strict) => (strict && manifest && typeof manifest === 'object' ? { ...manifest, strict_inputs: strict } : manifest);
+
 const hasRisks = manifest => Object.values((manifest && manifest.routes) || {})
   .some(entry => entry && Array.isArray(entry.injection_risks) && entry.injection_risks.length);
 const hasInputs = manifest => Object.values((manifest && manifest.routes) || {})
@@ -65,7 +85,8 @@ function createObserver(options = {}) {
   if (!['block', 'log', 'off'].includes(mode)) throw new Error('AIWAF_INJECTION_RISK_MODE must be block, log, or off');
   let schema = String(options.AIWAF_ROUTE_SCHEMA_MODE ?? process.env.AIWAF_ROUTE_SCHEMA_MODE ?? 'monitor').trim().toLowerCase();
   if (!['enforce', 'monitor', 'off'].includes(schema)) throw new Error('AIWAF_ROUTE_SCHEMA_MODE must be enforce, monitor, or off');
-  const manifest = loadManifest(options.AIWAF_PATH_MANIFEST || undefined);
+  const strict = schema === 'off' ? null : strictInputs(options);
+  const manifest = withStrict(loadManifest(options.AIWAF_PATH_MANIFEST || undefined), strict);
   if (!hasInputs(manifest)) schema = 'off';
   if ((mode === 'off' || !hasRisks(manifest)) && schema === 'off') return null;
   let checker = null;
@@ -76,7 +97,14 @@ function createObserver(options = {}) {
     const url = String(req.path || req.url || '/');
     const raw = String(req.originalUrl || req.url || '').split('?').slice(1).join('?');
     // Compiled on first use, after the middleware has loaded aiwaf-wasm.
-    checker = checker || compileRisks(manifest);
+    if (!checker) {
+      checker = compileRisks(manifest);
+      if (strict && schema !== 'off' && checker.strict !== true) {
+        try {
+          logger.warn?.('AIWAF: strict inputs need aiwaf-wasm 0.2.12 or newer, so they aren\'t checked. Run: npm install aiwaf-wasm@latest');
+        } catch (_) { /* Logging must not decide the outcome. */ }
+      }
+    }
     return [url.split('?')[0], raw || req.query];
   };
   const observe = req => {
@@ -116,11 +144,13 @@ function createObserver(options = {}) {
       }
       if (!result) return finding;
       const { action, route } = result;
-      const event = { event: 'aiwaf.route_schema', mode: schema, method: String(req.method || ''), route, action,
-        ...(action === 'mismatch' ? { input: result.input, type: result.type } : { rule: result.rule }) };
+      const detail = action === 'mismatch' ? { input: result.input, type: result.type }
+        : action === 'unexpected' ? { input: result.input } : { rule: result.rule };
+      const event = { event: 'aiwaf.route_schema', mode: schema, method: String(req.method || ''), route, action, ...detail };
       try { logger.warn?.(event); } catch (_) { /* Logging must not decide the outcome. */ }
       if (schema !== 'enforce') return finding;
-      return action === 'mismatch' ? { rule: 'schema_type_mismatch', status: 403, mode: 'block' } : null;
+      if (action === 'mismatch') return { rule: 'schema_type_mismatch', status: 403, mode: 'block' };
+      return action === 'unexpected' ? { rule: 'schema_unexpected_input', status: 403, mode: 'block' } : null;
     };
     observe.review = (req, finding, maxBytes, body = req.body) => decide(req, finding, () => {
       const [path, query] = target(req);
@@ -178,8 +208,11 @@ function routesFor(finding, routes) {
   return named.length === 1 ? named : [];
 }
 
-/** Replaces saved risks in a manifest with this report's findings, and counts the results. */
-function applyReport(report, manifest) {
+/**
+ * Replaces saved risks in a manifest with this report's findings, and counts the results. sources,
+ * from inputSources.sourcesFromEnvironment, adds declared, OpenAPI and recorded inputs.
+ */
+function applyReport(report, manifest, sources = {}) {
   const routes = manifest && manifest.routes;
   if (!routes || typeof routes !== 'object' || Array.isArray(routes)) throw new Error('The manifest has no routes');
   for (const entry of Object.values(routes)) {
@@ -187,6 +220,7 @@ function applyReport(report, manifest) {
       delete entry.injection_risks;
       delete entry.inputs;
       delete entry.inputs_complete;
+      delete entry.inputs_incomplete;
     }
   }
   let linked = 0;
@@ -209,14 +243,19 @@ function applyReport(report, manifest) {
   for (const entry of report.inputs || []) {
     for (const path of routesFor(entry, routes)) mergeInto(routes, path, entry);
   }
+  const completeness = inputSources.finalize(routes, sources || {});
   const typed = Object.values(routes).filter(entry => entry && typeof entry === 'object' && entry.inputs).length;
   manifest.injection_audit = {
     generated_at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     files_scanned: Number(report.files_scanned || 0),
     linked_findings: linked,
     unlinked_findings: unlinked,
-    routes_with_inputs: typed
+    routes_with_inputs: typed,
+    routes_with_complete_inputs: completeness.complete
   };
+  if (Object.keys(completeness.reasons).length) {
+    manifest.injection_audit.incomplete_input_reasons = Object.fromEntries(Object.entries(completeness.reasons).sort());
+  }
   return { routes: collected.size, linked, unlinked, inputs: typed };
 }
 
@@ -245,5 +284,7 @@ module.exports = {
   inspectRisks,
   reviewRequest,
   ruleFor,
-  updateManifest
+  strictInputs,
+  updateManifest,
+  withStrict
 };

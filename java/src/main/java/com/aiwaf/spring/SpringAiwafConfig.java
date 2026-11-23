@@ -86,6 +86,8 @@ public final class SpringAiwafConfig {
         config.pathManifestPath = text(environment, "aiwaf.path-manifest.path", config.pathManifestPath);
         config.injectionRiskMode = text(environment, "aiwaf.injection-risk-mode", config.injectionRiskMode);
         config.routeSchemaMode = text(environment, "aiwaf.route-schema-mode", config.routeSchemaMode);
+        config.strictInputs = bool(environment, "aiwaf.strict-inputs", config.strictInputs);
+        config.strictInputsAllow.addAll(csv(environment.getProperty("aiwaf.strict-inputs-allow")));
         config.storageBackend = text(environment, "aiwaf.storage.backend", config.storageBackend);
         config.storageFilePath = text(environment, "aiwaf.storage.file-path", config.storageFilePath);
         config.storageRedisUrl = text(environment, "aiwaf.storage.redis-url", config.storageRedisUrl);

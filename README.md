@@ -39,14 +39,14 @@ the supported Redis backends when sharing limits across workers.
 
 Each package is versioned and released independently.
 
-Python 1.3.0, Rust/Python 0.2.15, Node.js 1.3.0, WASM 0.2.11, and Java 1.4.0 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
+Python 1.3.1, Rust/Python 0.2.16, Node.js 1.3.1, WASM 0.2.12, and Java 1.4.0 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
 
 | Runtime | Package | Repository version | Primary use |
 | --- | --- | ---: | --- |
-| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.3.0` | Django, Flask, and FastAPI protection |
-| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.3.0` | Express and Node framework middleware |
-| Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.15` | Native Python acceleration and JSON model inference |
-| WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.11` | Rust detection and model primitives for JavaScript |
+| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.3.1` | Django, Flask, and FastAPI protection |
+| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.3.1` | Express and Node framework middleware |
+| Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.16` | Native Python acceleration and JSON model inference |
+| WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.12` | Rust detection and model primitives for JavaScript |
 | Java | `io.github.aiwaf-project:aiwaf-java` | `1.4.0` | Spring MVC and Jakarta Servlet protection |
 
 Supported framework integrations include Django, Flask, FastAPI, Express, Fastify, Hapi, Koa, NestJS, Next.js API routes, AdonisJS, Sails.js, Spring MVC, and Jakarta Servlet.
@@ -395,17 +395,93 @@ from your code: `int`, `float`, `bool`, `uuid` or `text`.
 
 Types come from what the code says:
 - Python: `int(request.GET["page"])`, `type=int`, FastAPI type hints and Pydantic models, Django
-  forms and DRF serializers in the same module.
+  forms and DRF serializers.
 - Node.js: `parseInt(req.query.page)`, `Number(...)`, destructuring, and zod object schemas.
-- Java: `@RequestParam int page`, `@RequestBody` and `@ModelAttribute` classes and records in the
-  project, `Pageable`, and `Integer.parseInt(request.getParameter("n"))`.
+- Java: `@RequestParam int page`, `@RequestBody` and `@ModelAttribute` classes and records,
+  `Pageable`, and `Integer.parseInt(request.getParameter("n"))`.
 
-The request is followed into functions in the same file (Python and Node.js) or methods of the
-same class (Java), as in `return render(request)`, and a key held in a constant, as in
-`request.GET[PAGE_PARAM]` or `getParameter(PAGE)`, is known. `inputs_complete` is true only when every read was
-understood. Passing the request to a helper,
-using `request.POST` or `req.body` whole, a key that isn't a constant, an unknown body class or
-route middleware that isn't a body parser all make it false.
+Forms, serializers, models, zod schemas, helper functions and string constants are followed
+into the project's other files through imports: `from .forms import ContactForm`, `import {
+Body } from './schemas'`, `require('./helpers')`, or a static `Paging.page(request)` in Java. A key
+held in a constant, as in `request.GET[PAGE_PARAM]` or `getParameter(PAGE)`, is known.
+
+`inputs_complete` is true only when every read was understood. When it isn't, the route's
+`inputs_incomplete` says why, with the file and line, and `init`'s summary counts the reasons:
+
+| Code | Meaning |
+| --- | --- |
+| `helper` | The request is passed to code that isn't followed. |
+| `container_whole` | `request.POST`, `req.body` or the parameter map is used whole. |
+| `dynamic_key` | An input is read with a key that isn't a constant. |
+| `raw_body` | The raw body, query string or a multipart part is read. |
+| `class_view` | A class view inherits handlers that aren't read, or `@InitBinder` runs first. |
+| `dependency` | A FastAPI dependency takes the request itself. |
+| `external_class` | A form, schema or body class isn't in the scanned sources. |
+| `model_fields` | A ModelForm, ModelSerializer or `@JsonAnySetter` class takes fields from elsewhere. |
+| `middleware` | Node.js route middleware that isn't a body parser may read the body. |
+| `observed` | A recording saw the code read a name the analysis didn't find. |
+
+Then `init` fills in what reading the code can't see:
+
+- The framework. `init` runs with your app loaded, so it asks the framework: Django generic
+  views (forms, `ModelForm` fields, pagination, `next`), DRF views (serializer fields,
+  pagination, search, ordering and filterset parameters, `format`), FastAPI's resolved
+  parameters and dependencies, and in Java each Spring handler method and its body classes by
+  reflection, including classes from libraries. Python also reads the fields of any form,
+  serializer, Pydantic model, marshmallow schema, WTForms form or dataclass the code reading
+  couldn't, from the modules the app already imported. Flask and Django views read the fields of their
+  webargs `@use_args`/`@use_kwargs` and flask-smorest `@blp.arguments` schemas (marshmallow),
+  both from the live app and from source; a view only receives those fields, plus anything it
+  reads from `request` itself. When both the query and the body arguments reject unknown names
+  (`unknown=RAISE`), requests with any other name fail before the view runs, so the route is
+  complete. In Node.js, when you generate the
+  manifest from the live app (`generateFrameworkManifest(framework, app)`), it reads Fastify
+  route schemas (`querystring` and `body`, including TypeBox; register the aiwaf plugin before
+  your routes so it sees them), Hapi `validate.query` and `validate.payload` (Joi), and each
+  NestJS handler's `@Query()` and `@Body()` parameters, with their pipes and the fields of
+  their DTO classes from class-validator or `@nestjs/swagger` metadata, at the paths Nest
+  registers (global prefix and its exclusions, `RouterModule` paths, URI versioning). On Express
+  routes it reads validation middleware: celebrate schemas and express-validator chains
+  (`query()`, `body()`, `check()`, `checkSchema()`). Validators only check the names they list,
+  so the handler's code still says what it reads; when every middleware before the handler is a
+  validator, its fields replace the `middleware` reason. A validation middleware of the app's
+  own that keeps its zod or Joi schema in its closure, as `validate(schema, 'query')` does, is
+  read too, through Node's inspector while the manifest is built (never per request). Route
+  middleware the project defines itself, as `app.post('/x', checkBody, handler)`, is read from
+  source like the handler, so a schema it parses with (even one defined at the top of the
+  module) and anything it reads count for the route. zod schemas (zod 3 and 4) are read
+  wherever these accept one: Fastify route schemas (as fastify-type-provider-zod uses them) and
+  nestjs-zod DTOs.
+
+  Reading the source does the same for validator calls written on the route
+  (`app.post('/x', body('name'), ...)`, `checkSchema({...})`, `celebrate({...})`, also through a
+  namespace import such as `ev.body('name')`, an object on `this`, or a function's result). A route behind
+  `checkExact(...)`, or a celebrate schema closing both query and body, rejects requests with
+  any other name before the handler runs, so it's complete with the names its validators list
+  plus what the handler reads.
+- Declarations, for code that can't be read. In Python, `@aiwaf.inputs(q=str, page=int)`; in
+  Node.js, `aiwaf.inputs({ q: 'text', page: 'int' })(handler)`; in Java,
+  `@AiwafInputs({"q", "page:int"})`, on a handler or its class. Or in `.aiwaf/inputs.json`, for
+  any language: `{"/search": {"inputs": {"q": "text", "page": "int"}}}`. A declaration makes the
+  route's list complete: what it lists, plus anything the code is seen reading. Pass
+  `complete=False` (`{ complete: false }`, `complete = false`) to only add names. In Node.js,
+  `aiwaf.inputs()` also takes the schema the handler validates with, a zod or Joi schema or a
+  DTO class: `aiwaf.inputs(SearchQuery)(handler)`. A schema that allows names it doesn't list
+  only adds them.
+- An OpenAPI spec, with `AIWAF_OPENAPI_SPEC=openapi.json`. An operation whose body schema
+  names every property, and whose route's methods it all lists, is a declaration too.
+- Recordings, from tests or staging. Set `AIWAF_RECORD_INPUTS=1` (or a file path). Flask's and
+  FastAPI's `AIWAF(app)`, the Node.js middleware, Spring Boot (`aiwaf.record-inputs`) and
+  Django (the `AIWAF_RECORD_INPUTS` setting or variable, with aiwaf in `INSTALLED_APPS`, which
+  adds `DjangoInputRecorder` last to `MIDDLEWARE`) then record on their own, after AIWAF's own
+  checks so its reads aren't counted. Elsewhere use
+  `record_flask_inputs(app)`, `app.add_middleware(AsgiInputRecorder)`,
+  `app.use(aiwaf.recordInputs())` before Express routes, or `AiwafInputRecorderFilter` in a
+  servlet app. This is how handlers no reading or declaration covers get their lists. It records the names each handler reads, not what clients send, to
+  `.aiwaf/observed_inputs.jsonl`, which the next `init` reads. Recorded names are added to the
+  routes' inputs, and a route the analysis called complete that read something else is made
+  incomplete. Without `AIWAF_RECORD_INPUTS` the recorders do nothing. The Java recorder sees
+  `getParameter` reads only; Django's can't see `json.loads(request.body)`.
 
 Requests to those routes are then reviewed after the general check:
 
@@ -430,6 +506,28 @@ request values) and changes nothing. Set it to `enforce` to act on it, or `off`.
 engine too: Python's reads `route_schema_mode` (or `AIWAF_ROUTE_SCHEMA_MODE`), and Node.js's
 takes `routeSchemaMode`, including its `inspectPayload()`. The cases in `tests/fixtures/route_schema_cases.json` run against aiwaf-rust, aiwaf-wasm
 and Java.
+
+### Strict inputs
+
+With `AIWAF_STRICT_INPUTS=1`, a route whose saved input list is complete accepts only the names
+on it: a query or body name the route never reads is `schema_unexpected_input`. It follows
+`AIWAF_ROUTE_SCHEMA_MODE`, so it's logged in `monitor` (`"action": "unexpected"` with the name,
+cut to 64 characters) and blocked in `enforce`. Routes whose list is incomplete, routes with no
+saved inputs, path parameters, headers, and bodies that aren't a form or JSON object are never
+checked. Top-level names only are compared.
+
+CSRF tokens (`csrfmiddlewaretoken`, `csrf_token`, `_csrf`, `_token`, `authenticity_token`) and
+tracking and cache-busting parameters (`utm_*`, `fbclid`, `gclid`, `msclkid`, `_`) are always
+allowed. Add more with `AIWAF_STRICT_INPUTS_ALLOW=trace_id,ref_*`; a trailing `*` matches any rest.
+
+Turn it on in `monitor` first and read the log: a name that turns up there for a real client is
+either one the analysis missed (record it, or declare it) or one to allow. The setting is
+`AIWAF_STRICT_INPUTS`/`AIWAF_STRICT_INPUTS_ALLOW` in Django settings, Flask config and FastAPI
+config; `strictInputs`/`strictInputsAllow` for the Node.js native pipeline; and
+`security.strict_inputs`, `aiwaf.strict-inputs` or `AiwafConfig.strictInputs` in Java. It needs
+`aiwaf-rust` 0.2.16 or `aiwaf-wasm` 0.2.12; with an older engine it logs a warning and stays
+off. The cases under `strict_cases` in `tests/fixtures/route_schema_cases.json` run against all
+three.
 
 ## Repository layout
 
@@ -492,7 +590,7 @@ Java 1.4.0, after it is published to Maven Central:
 
 The Python package requires Python 3.10 or newer. Framework dependencies are optional, so install only the extra needed by the application.
 
-Python 1.3.0 requires `aiwaf-rust>=0.2.15`; the `rust` extra remains an installation
+Python 1.3.1 requires `aiwaf-rust>=0.2.16`; the `rust` extra remains an installation
 alias. Publish the matching Rust wheel with `NativeCSVPipeline` support before
 the Python release. The Rust release workflow builds Linux x86_64/aarch64,
 musl x86_64, macOS x86_64/arm64 and Windows x86_64 wheels and checks the native
@@ -1879,10 +1977,10 @@ Release versions and tags must match the relevant manifest.
 
 | Package | Manifest | Tag | Workflow |
 | --- | --- | --- | --- |
-| Python `aiwaf` | `pyproject.toml` | `python-v1.3.0` | `python-publish.yml` |
-| npm `aiwaf` | `js/package.json` | `js-v1.3.0` | `npm-publish.yml` |
-| PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.15` | `rust-publish.yml` |
-| npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.11` | `wasm-publish.yml` |
+| Python `aiwaf` | `pyproject.toml` | `python-v1.3.1` | `python-publish.yml` |
+| npm `aiwaf` | `js/package.json` | `js-v1.3.1` | `npm-publish.yml` |
+| PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.16` | `rust-publish.yml` |
+| npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.12` | `wasm-publish.yml` |
 | Maven `aiwaf-java` | `java/pom.xml` | `java-v1.4.0` | `java-publish.yml` |
 
 Python and Rust publish to PyPI with trusted publishing. The npm workflows use npm trusted publishing and stage packages for approval. Configure the trusted publisher with organization `aiwaf-project`, repository `aiwaf`, the exact workflow filename, and the environment used by that workflow.
@@ -1891,13 +1989,13 @@ Java publishing uses the protected `maven-publish` environment plus `GPG_PRIVATE
 
 Registry releases are immutable. Increment the relevant manifest version before publishing another release.
 
-This release is Python `aiwaf 1.3.0`, npm `aiwaf 1.3.0`, Java `aiwaf-java 1.4.0`,
-`aiwaf-rust 0.2.15` and `aiwaf-wasm 0.2.11`: remote code execution checks, route schemas from
-`init`, multipart and compressed bodies, and WebSocket messages; Java 1.4.0 also brings
-`AIWAF_PROFILE` and the route checks for the new operations. Python 1.2.6, npm 1.2.5, Java 1.3.8,
-`aiwaf-rust 0.2.14` and `aiwaf-wasm 0.2.11` are already published; the engines carry the new
-checks. `aiwaf-rust 0.2.15` moves to PyO3 0.29: publish it before Python 1.3.0, which requires
-`aiwaf-rust>=0.2.15`. npm `aiwaf` requires `aiwaf-wasm ^0.2.11`.
+This release is Python `aiwaf 1.3.1`, npm `aiwaf 1.3.1`, Java `aiwaf-java 1.4.0`,
+`aiwaf-rust 0.2.16` and `aiwaf-wasm 0.2.12`: complete route input lists from `init` (reasons,
+imports, framework schemas, declarations, OpenAPI and recording) and strict inputs. Python 1.3.0,
+npm 1.3.0 and `aiwaf-rust 0.2.15` are already published. Publish `aiwaf-rust 0.2.16` before
+Python 1.3.1, which requires `aiwaf-rust>=0.2.16`, and `aiwaf-wasm 0.2.12` before npm 1.3.1, then
+update `js/package-lock.json` to the published 0.2.12 (`^0.2.11` already allows it). Strict inputs
+need these engines; an older one logs a warning and leaves strict inputs off.
 
 ## Security and limitations
 

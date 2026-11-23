@@ -10,6 +10,7 @@ from typing import Any
 
 from aiwaf.core.api_detection import detect_api_endpoint
 from aiwaf.core.auth_detection import detect_auth_endpoint
+from aiwaf.core.input_sources import declared_on, flask_inputs
 from aiwaf.core.route_risks import audit_into_manifest
 from aiwaf.core.path_manifest import build_manifest, build_route_entry, is_internal_aiwaf_path, write_manifest
 from aiwaf.core.source_methods import (
@@ -165,6 +166,12 @@ def extract_flask_routes(app) -> dict[str, dict[str, Any]]:
         if metadata["blueprint"]:
             entry["blueprint"] = metadata["blueprint"]
         entry['request_constraints'] = flask_declarations(app, methods)
+        declaration = declared_on(raw_view_func)
+        if declaration is not None:
+            entry["input_declaration"] = declaration
+        framework = flask_inputs(raw_view_func, methods)
+        if framework is not None:
+            entry["declared_inputs"] = framework
         routes[path] = merge_entries(routes.get(path), entry)
     return mask_shadowed_declarations(routes)
 

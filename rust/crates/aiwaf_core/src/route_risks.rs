@@ -228,6 +228,23 @@ pub enum Review {
     /// The general check's finding comes only from inputs the route's schema clears: typed
     /// inputs of their type, text that reaches no operation, and inputs the route never reads.
     Relax { route: String, rule: String },
+    /// Strict inputs: a query or body name a route with a complete input list never reads.
+    Unexpected { route: String, input: String },
+}
+
+/// Names strict inputs always allows: CSRF tokens, read by middleware rather than the handler,
+/// and tracking and cache-busting parameters that links and clients add. A trailing * matches
+/// any rest.
+pub const STRICT_ALLOWED: &[&str] = &[
+    "csrfmiddlewaretoken", "csrf_token", "_csrf", "_token", "authenticity_token", "utm_*", "fbclid", "gclid", "msclkid", "_",
+];
+const MAX_LOGGED_NAME: usize = 64;
+
+fn allowed(patterns: &[String], name: &str) -> bool {
+    patterns.iter().any(|pattern| match pattern.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => pattern == name,
+    })
 }
 
 impl Review {
@@ -241,6 +258,11 @@ impl Review {
             Review::Relax { route, rule } => serde_json::json!({
                 "event": "aiwaf.route_schema", "mode": mode, "method": method, "route": route,
                 "action": "relax", "rule": rule,
+            }),
+            // The name comes from the request, so it's cut short; serde escapes it.
+            Review::Unexpected { route, input } => serde_json::json!({
+                "event": "aiwaf.route_schema", "mode": mode, "method": method, "route": route,
+                "action": "unexpected", "input": input.chars().take(MAX_LOGGED_NAME).collect::<String>(),
             }),
         }
     }
@@ -353,6 +375,8 @@ pub const RELAXED_RULES: &[&str] = &["sql_function", "sql_comment", "sql_breakou
 /// Saved risks for one manifest, compiled for lookup by request path.
 pub struct RouteRisks {
     routes: Vec<RiskRoute>,
+    /// Strict inputs' allowed names, when the manifest's `strict_inputs` turns it on.
+    strict: Option<Vec<String>>,
 }
 
 fn text_field(value: &Value, key: &str) -> String {
@@ -403,11 +427,25 @@ impl RouteRisks {
         routes.sort_by(|a, b| {
             a.compiled.names.len().cmp(&b.compiled.names.len()).then(b.path.len().cmp(&a.path.len()))
         });
-        Self { routes }
+        // Hosts turn strict inputs on by adding {"strict_inputs": {"allow": [...]}}, the names
+        // to allow besides STRICT_ALLOWED, to the manifest they pass.
+        let strict = manifest.get("strict_inputs").filter(|value| value.is_object()).map(|value| {
+            let mut allow: Vec<String> = STRICT_ALLOWED.iter().map(|name| (*name).to_owned()).collect();
+            allow.extend(
+                value.get("allow").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned),
+            );
+            allow
+        });
+        Self { routes, strict }
     }
 
     pub fn is_empty(&self) -> bool {
         self.routes.is_empty()
+    }
+
+    /// Whether strict inputs is on.
+    pub fn strict(&self) -> bool {
+        self.strict.is_some()
     }
 
     fn route(&self, path: &str) -> Option<&RiskRoute> {
@@ -490,6 +528,13 @@ impl RouteRisks {
                     let input = inputs.get_key_value(*name).map(|(key, _)| key.clone()).unwrap_or_default();
                     return Some(Review::Mismatch { route: route.path.clone(), input, kind: kind.clone() });
                 }
+            }
+        }
+        // Strict inputs: on a route whose list is complete, a name it never reads. Only the query
+        // and a form or JSON object body are named; another body's names aren't known.
+        if let Some(allow) = self.strict.as_ref().filter(|_| route.complete) {
+            if let Some((name, _)) = all.iter().find(|(name, _)| !inputs.contains_key(*name) && !allowed(allow, name)) {
+                return Some(Review::Unexpected { route: route.path.clone(), input: (*name).clone() });
             }
         }
         let found = found?;
@@ -684,10 +729,43 @@ mod tests {
     }
 
     /// What a request comes to: the general check, then the route's schema review.
+    #[test]
+    fn strict_inputs_flags_names_a_complete_route_never_reads() {
+        let routes = json!({
+            "/search": {"view": "s", "inputs": {"q": "text", "page": "int"}, "inputs_complete": true},
+            "/open": {"view": "o", "inputs": {"q": "text"}, "inputs_complete": false},
+        });
+        let off = RouteRisks::new(&json!({"routes": routes}));
+        assert!(!off.strict());
+        assert_eq!(off.review("/search", "q=a&debug=1", b"", 4096, None), None);
+        let on = RouteRisks::new(&json!({"routes": routes, "strict_inputs": {"allow": ["trace_*", 5]}}));
+        assert!(on.strict());
+        assert_eq!(
+            on.review("/search", "q=a&debug=1", b"", 4096, None),
+            Some(Review::Unexpected { route: "/search".into(), input: "debug".into() })
+        );
+        assert_eq!(
+            on.review("/search", "q=a", br#"{"page": 2, "role": "admin"}"#, 4096, None),
+            Some(Review::Unexpected { route: "/search".into(), input: "role".into() })
+        );
+        // A wrong type is reported first.
+        assert!(matches!(on.review("/search", "page=x&debug=1", b"", 4096, None), Some(Review::Mismatch { .. })));
+        for query in ["q=a&utm_source=x&_=1&csrf_token=t&trace_id=9&gclid=1", "page=2"] {
+            assert_eq!(on.review("/search", query, b"", 4096, None), None, "{query}");
+        }
+        assert_eq!(on.review("/open", "debug=1", b"", 4096, None), None);
+        assert_eq!(on.review("/search", "q=a", b"\x00binary", 4096, None), None);
+        let event = Review::Unexpected { route: "/search".into(), input: "x".repeat(100) }.event("enforce", "GET");
+        assert_eq!(event["action"], "unexpected");
+        assert_eq!(event["input"].as_str().unwrap().len(), MAX_LOGGED_NAME);
+        assert!(!RouteRisks::new(&json!({"routes": routes, "strict_inputs": true})).strict());
+    }
+
     pub(crate) fn schema_outcome(risks: &RouteRisks, path: &str, query: &str, body: &[u8]) -> (String, String) {
         let found = crate::payload::inspect_sql(query.as_bytes(), body, 65536, false).map(|(rule, _)| rule);
         match risks.review(path, query, body, 65536, found.as_deref()) {
             Some(Review::Mismatch { input, .. }) => ("mismatch".into(), input),
+            Some(Review::Unexpected { input, .. }) => ("unexpected".into(), input),
             Some(Review::Relax { .. }) => ("relax".into(), String::new()),
             None if found.is_some() => ("block".into(), String::new()),
             None => ("pass".into(), String::new()),
@@ -708,12 +786,21 @@ mod tests {
             let found = crate::payload::inspect_sql_path(path, 65536).map(|(rule, _)| rule);
             let outcome = match risks.review_found(path, "", b"", 65536, found.as_deref().map(|rule| (rule, Source::Path))) {
                 Some(Review::Mismatch { input, .. }) => ("mismatch".to_owned(), input),
+                Some(Review::Unexpected { input, .. }) => ("unexpected".to_owned(), input),
                 Some(Review::Relax { .. }) => ("relax".to_owned(), String::new()),
                 None if found.is_some() => ("block".to_owned(), String::new()),
                 None => ("pass".to_owned(), String::new()),
             };
             let input = case["input"].as_str().unwrap_or_default().to_owned();
             assert_eq!(outcome, (case["expect"].as_str().unwrap().to_owned(), input), "{case}");
+        }
+        let mut manifest = cases["manifest"].clone();
+        manifest["strict_inputs"] = json!({"allow": cases["strict_cases"]["allow"]});
+        let strict = RouteRisks::new(&manifest);
+        for case in cases["strict_cases"]["cases"].as_array().unwrap() {
+            let text = |key: &str| case[key].as_str().unwrap_or_default().to_owned();
+            let outcome = schema_outcome(&strict, &text("path"), &text("query"), text("body").as_bytes());
+            assert_eq!(outcome, (text("expect"), text("input")), "{case}");
         }
         // A header's finding always stands.
         assert_eq!(risks.review_found("/comments", "", b"", 65536, Some(("sql_function", Source::Headers))), None);

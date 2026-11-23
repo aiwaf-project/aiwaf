@@ -363,6 +363,12 @@ public final class RouteRiskCore {
     /** Replaces saved risks in a manifest with this report's findings, and counts the results. */
     @SuppressWarnings("unchecked")
     public static Counts applyReport(JavaSourceAnalysisCore.Report report, Map<String, Object> manifest) {
+        return applyReport(report, manifest, InputSourcesCore.Sources.none());
+    }
+
+    /** As applyReport, adding the framework's, declared, OpenAPI and recorded inputs from sources. */
+    @SuppressWarnings("unchecked")
+    public static Counts applyReport(JavaSourceAnalysisCore.Report report, Map<String, Object> manifest, InputSourcesCore.Sources sources) {
         if (!(manifest.get("routes") instanceof Map<?, ?> rawRoutes)) {
             throw new IllegalArgumentException("The manifest has no routes");
         }
@@ -406,9 +412,19 @@ public final class RouteRiskCore {
                     entry.inputs().forEach((name, kind) -> inputs.merge(name, kind, (old, now) -> old.equals(now) ? old : "text"));
                     target.put("inputs", inputs);
                     target.put("inputs_complete", !Boolean.FALSE.equals(target.get("inputs_complete")) && entry.complete());
+                    List<Map<String, Object>> reasons = target.get("inputs_incomplete") instanceof List<?> saved
+                            ? new ArrayList<>((List<Map<String, Object>>) saved) : new ArrayList<>();
+                    for (JavaInputSchemaCore.Reason reason : entry.reasons()) {
+                        Map<String, Object> item = JavaInputSchemaCore.asMap(reason);
+                        item.put("function", entry.function());
+                        if (reasons.size() < 20 && !reasons.contains(item)) reasons.add(item);
+                    }
+                    if (reasons.isEmpty()) target.remove("inputs_incomplete");
+                    else target.put("inputs_incomplete", reasons);
                 }
             }
         }
+        InputSourcesCore.Counts completeness = InputSourcesCore.finalize(routes, sources == null ? InputSourcesCore.Sources.none() : sources);
         int typed = (int) routes.values().stream().filter(data -> data instanceof Map<?, ?> map && map.containsKey("inputs")).count();
         Map<String, Object> audit = new LinkedHashMap<>();
         audit.put("generated_at", Instant.now().truncatedTo(ChronoUnit.SECONDS).toString());
@@ -416,19 +432,26 @@ public final class RouteRiskCore {
         audit.put("linked_findings", linked);
         audit.put("unlinked_findings", unlinked);
         audit.put("routes_with_inputs", typed);
+        audit.put("routes_with_complete_inputs", completeness.complete());
+        if (!completeness.reasons().isEmpty()) audit.put("incomplete_input_reasons", completeness.reasons());
         manifest.put("injection_audit", audit);
         return new Counts(collected.size(), linked, unlinked, typed);
     }
 
     /** Saves a report's findings into an existing manifest file. */
-    @SuppressWarnings("unchecked")
     public static Counts updateManifest(JavaSourceAnalysisCore.Report report, Path manifestPath) {
+        return updateManifest(report, manifestPath, InputSourcesCore.Sources.none());
+    }
+
+    /** As updateManifest, adding the framework's, declared, OpenAPI and recorded inputs from sources. */
+    @SuppressWarnings("unchecked")
+    public static Counts updateManifest(JavaSourceAnalysisCore.Report report, Path manifestPath, InputSourcesCore.Sources sources) {
         Map<String, Object> loaded = PathManifestCore.loadManifest(manifestPath);
         if (loaded.isEmpty()) {
             throw new IllegalArgumentException("Manifest not found or unreadable: " + manifestPath + ". Generate it first with init.");
         }
         Map<String, Object> manifest = JSON.convertValue(loaded, LinkedHashMap.class);
-        Counts counts = applyReport(report, manifest);
+        Counts counts = applyReport(report, manifest, sources);
         PathManifestCore.writeManifest(manifest, manifestPath);
         return counts;
     }

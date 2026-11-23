@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set
 
-from .input_schema import module_inputs
+from .input_schema import Project as _InputProject, module_inputs
 
 SCHEMA_VERSION = "1.0"
 _SKIPPED_DIRECTORIES = {
@@ -1444,6 +1444,10 @@ def analyze_path(path: str = ".", *, include_tests: bool = False) -> dict:
     extras: Dict[tuple, str] = {}
     project["\0shared"] = {"summaries": {}, "recordings": []}  # type: ignore[assignment]
     base = root if root.is_dir() else root.parent
+    # The same modules again for the input inventory, so forms, models and helpers imported
+    # from one module into another are read.
+    input_project = _InputProject()
+    input_modules: Dict[str, object] = {}
     for file in _python_files(root, include_tests):
         display = file.as_posix()
         try:
@@ -1457,6 +1461,7 @@ def analyze_path(path: str = ".", *, include_tests: bool = False) -> dict:
             text = file.read_text(encoding="utf-8")
             tree = ast.parse(text, filename=display)
             analyzer = _ModuleAnalyzer(tree, display, module_name, project, extras)
+            input_modules[display] = input_project.add(tree, display, module_name, file.name == "__init__.py")
             analyzer.lines = text.splitlines()
             analyzers.append(analyzer)
             # Known by every dotted suffix too (src/app/queries.py as app.queries or queries),
@@ -1492,7 +1497,7 @@ def analyze_path(path: str = ".", *, include_tests: bool = False) -> dict:
         findings.extend(analyzer.findings.values())
         if analyzer.filename not in failed:
             try:
-                inputs.extend(module_inputs(analyzer.tree, analyzer.filename))
+                inputs.extend(module_inputs(analyzer.tree, analyzer.filename, input_modules.get(analyzer.filename)))
             except RecursionError:
                 pass  # The file's routes get no saved inputs, so their checks stay as they are.
     kept, suppressed = _without_ignored(findings, {analyzer.filename: analyzer.lines for analyzer in analyzers})

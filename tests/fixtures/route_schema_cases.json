@@ -308,5 +308,71 @@
       "path": "/elsewhere/char(65)",
       "expect": "block"
     }
-  ]
+  ],
+  "strict_cases": {
+    "_comment": "The same manifest with {\"strict_inputs\": {\"allow\": allow}} added: names a complete route never reads are unexpected.",
+    "allow": [
+      "trace_*"
+    ],
+    "cases": [
+      {
+        "path": "/search",
+        "query": "q=books&debug=1",
+        "body": "",
+        "expect": "unexpected",
+        "input": "debug"
+      },
+      {
+        "path": "/search",
+        "query": "q=books&utm_source=mail&_=17&gclid=x",
+        "body": "",
+        "expect": "pass"
+      },
+      {
+        "path": "/search",
+        "query": "page=two&debug=1",
+        "body": "",
+        "expect": "mismatch",
+        "input": "page"
+      },
+      {
+        "path": "/comments",
+        "query": "",
+        "body": "{\"body\": \"hi\", \"post_id\": 7, \"role\": \"admin\"}",
+        "expect": "unexpected",
+        "input": "role"
+      },
+      {
+        "path": "/comments",
+        "query": "",
+        "body": "body=hi&post_id=7&trace_id=4&csrfmiddlewaretoken=t",
+        "expect": "pass"
+      },
+      {
+        "path": "/notes",
+        "query": "anything=1",
+        "body": "",
+        "expect": "pass"
+      },
+      {
+        "path": "/health",
+        "query": "debug=1",
+        "body": "",
+        "expect": "pass"
+      },
+      {
+        "path": "/posts/hello",
+        "query": "page=2&sort=new",
+        "body": "",
+        "expect": "unexpected",
+        "input": "sort"
+      },
+      {
+        "path": "/comments",
+        "query": "",
+        "body": "--boundary\r\nContent-Disposition: form-data; name=\"role\"\r\n\r\nadmin\r\n--boundary--",
+        "expect": "pass"
+      }
+    ]
+  }
 }

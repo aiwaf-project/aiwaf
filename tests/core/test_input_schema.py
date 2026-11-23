@@ -125,3 +125,102 @@ def test_keys_held_in_module_constants_are_known():
                    "def known(request):\n    return request.POST[PAGE]\n")
     assert found["view"] == ({"page": "int"}, False)
     assert found["known"] == ({"page": "text"}, True)
+
+
+def reasons(code):
+    return {entry["function"]: [reason["code"] for reason in entry.get("reasons", [])] for entry in source_inputs(code)}
+
+
+def test_each_gap_says_why():
+    found = reasons(
+        "from fastapi import Depends\n"
+        "from django.views.generic import FormView\n"
+        "def helper_gets_request(request):\n    helper(request)\n"
+        "def stored(request):\n    keep = [request]\n"
+        "def dynamic(request, key):\n    return request.GET[key], request.POST.get(key)\n"
+        "def raw(request):\n    return request.get_full_path()\n"
+        "def whole(request):\n    return dict(request.GET), request.GET.urlencode(), request.GET\n"
+        "def called(request):\n    return request.get_json\n"
+        "def model(request):\n    return SignupForm(request.POST)\n"
+        "@app.get('/d')\ndef dep(user=Depends(current), item: Item = None):\n    return user\n"
+        "class Edit(FormView):\n    def post(self, request):\n        return self.request.POST['x']\n")
+    assert found["helper_gets_request"] == ["helper"]
+    assert found["stored"] == ["helper"]
+    assert found["dynamic"] == ["dynamic_key", "dynamic_key"]
+    assert found["raw"] == ["raw_body"]
+    assert found["whole"] == ["container_whole", "container_whole", "container_whole"]
+    assert found["called"] == ["container_whole"]
+    assert found["model"] == ["external_class"]
+    assert found["dep"] == ["dependency", "external_class"]
+    assert found["Edit.post"] == ["class_view"]
+    entry = next(item for item in source_inputs("def v(request):\n    x = 1\n    return helper(request)\n") if item["function"] == "v")
+    assert entry["reasons"] == [{"code": "helper", "detail": "the request is passed to helper, which isn't followed",
+                                 "line": 3, "file": "<source>"}]
+
+
+def test_forms_models_helpers_and_constants_are_followed_across_modules():
+    from aiwaf.core.input_schema import project_inputs
+
+    found = {entry["function"]: entry for entry in project_inputs({
+        "shop.__init__": "from .forms import ReExported\n",
+        "shop.forms": (
+            "from django import forms\n"
+            "from shop.base import Base\n"
+            "class ReExported(forms.Form):\n    code = forms.UUIDField()\n"
+            "class Address(Base):\n    street = forms.CharField()\n"
+            "class Profile(forms.ModelForm):\n    class Meta:\n        model = User\n        fields = ['name']\n"
+            "class Broken(Missing):\n    pass\n"
+            "PAGE = 'page'\n"),
+        "shop.base": "from django import forms\nclass Base(forms.Form):\n    number = forms.IntegerField()\n",
+        "shop.helpers": "def paginate(request):\n    return int(request.GET['page'])\n",
+        "shop.views": (
+            "import shop.helpers\n"
+            "import shop.forms as shop_forms\n"
+            "from . import forms\n"
+            "from .forms import Address, Profile, Broken, PAGE\n"
+            "from shop import ReExported\n"
+            "from ..elsewhere import Thing\n"
+            "def address(request):\n    return Address(request.POST), request.GET.get(PAGE)\n"
+            "def dotted(request):\n    return forms.Address(data=request.POST), shop_forms.ReExported(request.POST)\n"
+            "def reexported(request):\n    return ReExported(request.POST)\n"
+            "def helper(request):\n    return shop.helpers.paginate(request)\n"
+            "def profile(request):\n    return Profile(request.POST)\n"
+            "def broken(request):\n    return Broken(request.POST), Thing(request.POST)\n"),
+    })}
+    assert found["address"]["inputs"] == {"number": "int", "street": "text", "page": "text"}
+    assert found["address"]["complete"] is True
+    assert found["dotted"]["inputs"] == {"number": "int", "street": "text", "code": "uuid"}
+    assert found["reexported"]["inputs"] == {"code": "uuid"}
+    assert found["helper"]["inputs"] == {"page": "int"} and found["helper"]["complete"] is True
+    profile = found["profile"]["reasons"][0]
+    assert profile["code"] == "model_fields" and profile["name"] == "Profile" and profile["module"] == "shop.views"
+    assert [reason["code"] for reason in found["broken"]["reasons"]] == ["external_class", "external_class"]
+
+
+def test_ambiguous_and_missing_modules_are_not_guessed():
+    from aiwaf.core.input_schema import Project
+
+    project = Project()
+    import ast as _ast
+
+    one = project.add(_ast.parse("class A:\n    pass\n"), "a/forms.py", "a.forms")
+    project.add(_ast.parse("class A:\n    pass\n"), "b/forms.py", "b.forms")
+    assert project.get("forms") is None and project.get("a.forms") is one and project.get("") is None
+    views = project.add(_ast.parse("import forms\nfrom forms import A\nimport a.forms\n"), "v.py", "v")
+    assert views.lookup("class", "A") is None
+    assert views.lookup("class", "a.forms.A")[1].name == "A"
+    assert views.lookup("class", "a.missing.A") is None
+    assert views.lookup("function", "") is None
+    assert views.fields("Nope") == (None, ("external_class", "Nope"))
+    looping = project.add(_ast.parse("class L(L):\n    pass\n"), "l.py", "l")
+    assert looping.fields("L")[0] is None
+
+
+def test_merge_into_keeps_each_functions_reasons():
+    routes = {"/a": {}}
+    merge_into(routes, "/a", {"function": "one", "inputs": {"q": "text"}, "complete": True})
+    assert "inputs_incomplete" not in routes["/a"]
+    reason = {"code": "helper", "detail": "x"}
+    merge_into(routes, "/a", {"function": "two", "inputs": {}, "complete": False, "reasons": [reason, reason]})
+    assert routes["/a"]["inputs_complete"] is False
+    assert routes["/a"]["inputs_incomplete"] == [{"code": "helper", "detail": "x", "function": "two"}]

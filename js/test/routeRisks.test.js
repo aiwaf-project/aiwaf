@@ -4,7 +4,8 @@ const path = require('path');
 const { analyzeSource, runAuditCommand } = require('../lib/injectionAnalysis');
 const { loadManifest, compileManifestToPathRules } = require('../lib/pathManifest');
 const {
-  applyReport, compileRisks, createObserver, formatCounts, inputFromSource, inspectRisks, reviewRequest, ruleFor, updateManifest
+  applyReport, compileRisks, createObserver, formatCounts, inputFromSource, inspectRisks, reviewRequest, ruleFor, strictInputs,
+  updateManifest, withStrict
 } = require('../lib/routeRisks');
 
 const CASES = JSON.parse(fs.readFileSync(path.join(__dirname, '../../tests/fixtures/route_risk_cases.json'), 'utf8'));
@@ -380,6 +381,55 @@ describe('route schemas saved by init', () => {
     expect(createObserver({ AIWAF_PATH_MANIFEST: save(SCHEMA.manifest), AIWAF_ROUTE_SCHEMA_MODE: 'off' })?.review).toBeUndefined();
     expect(createObserver({ AIWAF_PATH_MANIFEST: save(manifestWith([])), AIWAF_INJECTION_RISK_MODE: 'off' })).toBeNull();
     expect(() => createObserver({ AIWAF_ROUTE_SCHEMA_MODE: 'strict' })).toThrow('AIWAF_ROUTE_SCHEMA_MODE');
+  });
+
+  const strictManifest = () => ({ ...SCHEMA.manifest, strict_inputs: { allow: SCHEMA.strict_cases.allow } });
+  test.each(SCHEMA.strict_cases.cases.map(item => [item.path, item.expect, item]))('shared strict case %s %s', (_path, _expect, item) => {
+    const general = JSON.parse(wasm().sql_inspect(Buffer.from(item.query), Buffer.from(item.body), 65536));
+    const review = reviewRequest(compileRisks(strictManifest()), item.path, item.query, Buffer.from(item.body), 65536, general && general.rule);
+    const outcome = review ? review.action : (general ? 'block' : 'pass');
+    expect(outcome).toBe(item.expect);
+    if (item.input) expect(review.input).toBe(item.input);
+  });
+
+  test('strict inputs log or block names a complete route never reads', () => {
+    expect(strictInputs({})).toBeNull();
+    expect(strictInputs({ AIWAF_STRICT_INPUTS: 'no' })).toBeNull();
+    expect(strictInputs({ AIWAF_STRICT_INPUTS: true, AIWAF_STRICT_INPUTS_ALLOW: 'a, b*,' })).toEqual({ allow: ['a', 'b*'] });
+    expect(strictInputs({ AIWAF_STRICT_INPUTS: 'on', AIWAF_STRICT_INPUTS_ALLOW: ['x'] })).toEqual({ allow: ['x'] });
+    expect(withStrict(null, { allow: [] })).toBeNull();
+    expect(withStrict({ routes: {} }, null)).toEqual({ routes: {} });
+    const warn = jest.fn();
+    const req = query => ({ method: 'GET', url: `/search?${query}`, originalUrl: `/search?${query}`, path: '/search', query: {} });
+    const options = { AIWAF_PATH_MANIFEST: save(SCHEMA.manifest), AIWAF_INJECTION_RISK_MODE: 'off', AIWAF_STRICT_INPUTS: '1', logger: { warn } };
+    const monitor = createObserver(options);
+    expect(monitor.review(req('q=a&debug=1'), null, 65536)).toBeNull();
+    expect(warn).toHaveBeenCalledWith({ event: 'aiwaf.route_schema', mode: 'monitor', method: 'GET', route: '/search', action: 'unexpected', input: 'debug' });
+    const enforce = createObserver({ ...options, AIWAF_ROUTE_SCHEMA_MODE: 'enforce' });
+    expect(enforce.review(req('q=a&debug=1'), null, 65536)).toEqual({ rule: 'schema_unexpected_input', status: 403, mode: 'block' });
+    expect(enforce.review(req('q=a&utm_source=x'), null, 65536)).toBeNull();
+    // Off unless turned on.
+    const plain = createObserver({ ...options, AIWAF_STRICT_INPUTS: undefined, AIWAF_ROUTE_SCHEMA_MODE: 'enforce' });
+    expect(plain.review(req('q=a&debug=1'), null, 65536)).toBeNull();
+  });
+
+  test('strict inputs warn when the engine is too old', () => {
+    const wasmChecks = require('../lib/wasmChecks');
+    const real = wasmChecks.get();
+    const warn = jest.fn();
+    const spy = jest.spyOn(wasmChecks, 'get').mockReturnValue({ ...real, RouteRiskChecker: class { review() { return 'null'; } } });
+    try {
+      const observer = createObserver({ AIWAF_PATH_MANIFEST: save(SCHEMA.manifest), AIWAF_INJECTION_RISK_MODE: 'off', AIWAF_STRICT_INPUTS: true, logger: { warn } });
+      observer.review({ path: '/search', url: '/search?x=1' }, null, 65536);
+      observer.review({ path: '/search', url: '/search?x=1' }, null, 65536);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain('strict inputs need aiwaf-wasm 0.2.12');
+      const throwing = jest.fn(() => { throw new Error('log'); });
+      const quiet = createObserver({ AIWAF_PATH_MANIFEST: save(SCHEMA.manifest), AIWAF_INJECTION_RISK_MODE: 'off', AIWAF_STRICT_INPUTS: true, logger: { warn: throwing } });
+      expect(quiet.review({ path: '/search', url: '/search?x=1' }, null, 65536)).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('init saves each route\'s inputs from the handlers that serve it', () => {

@@ -286,6 +286,9 @@ module.exports = function aiwaf(rawOpts = {}) {
   opts.AIWAF_DISABLE_MIDDLEWARES = normalizedMiddlewareList(opts.AIWAF_DISABLE_MIDDLEWARES) || [];
   const pathRules = getEffectivePathRules(opts.AIWAF_PATH_RULES, { manifestPath: opts.AIWAF_PATH_MANIFEST });
   const observeRisks = routeRisks.createObserver(opts);
+  // AIWAF_RECORD_INPUTS (an option or the environment) records what each route's handler reads,
+  // for init; without it this does nothing.
+  const recordReads = require('./inputRecorder').recordInputs({ path: opts.AIWAF_RECORD_INPUTS });
   // The SQL check and route checks run in aiwaf-wasm. Requests wait for it, and fail if it's missing.
   const checksReady = wasmChecks.load();
   checksReady.catch(() => {});
@@ -354,7 +357,9 @@ module.exports = function aiwaf(rawOpts = {}) {
     }
     return finding;
   };
-  const handle = async (req, res, next) => {
+  const handle = async (req, res, handOn) => {
+    // Recording starts as the request is handed on, so AIWAF's own reads aren't the handler's.
+    const next = (...args) => recordReads(req, res, () => handOn(...args));
     const ip = getRequestIp(req, opts.AIWAF_TRUSTED_PROXIES);
     // Geo checks and logging must judge the same address as this middleware.
     req.aiwafClientIp = ip;

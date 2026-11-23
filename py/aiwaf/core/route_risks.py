@@ -17,6 +17,7 @@ from typing import Any, Mapping, Optional
 
 from .path_manifest import DEFAULT_MANIFEST_PATH, load_manifest, now_utc_iso, write_manifest
 from .input_schema import merge_into
+from . import input_sources
 from .sql_injection import Finding, _as_bytes, rust
 
 LOGGER = logging.getLogger("aiwaf.injection_risk")
@@ -26,6 +27,24 @@ MODE_SETTING = "AIWAF_INJECTION_RISK_MODE"
 # of another type and lets through findings the schema clears; monitor only logs both.
 SCHEMA_SETTING = "AIWAF_ROUTE_SCHEMA_MODE"
 SCHEMA_MODES = ("enforce", "monitor", "off")
+# Strict inputs, off by default: on a route whose saved input list is complete, a query or body
+# name the route never reads is unexpected, logged in monitor mode and blocked in enforce mode.
+# AIWAF_STRICT_INPUTS_ALLOW adds names to always allow (a trailing * matches any rest) to the
+# engine's own: CSRF tokens, utm_*, fbclid, gclid, msclkid and _.
+STRICT_SETTING = "AIWAF_STRICT_INPUTS"
+STRICT_ALLOW_SETTING = "AIWAF_STRICT_INPUTS_ALLOW"
+STRICT_WARNING = ("Strict inputs need aiwaf-rust 0.2.16 or newer, so they aren't checked. "
+                  "Run: pip install -U aiwaf-rust")
+
+
+def strict_inputs(value: Any = None, allow: Any = None) -> Optional[dict]:
+    """{"allow": [...]} when strict inputs is on (the setting, or AIWAF_STRICT_INPUTS), else None."""
+    raw = value if value is not None else os.getenv(STRICT_SETTING, "")
+    if not (raw is True or str(raw).strip().lower() in {"1", "true", "yes", "on"}):
+        return None
+    listed = allow if allow is not None else os.getenv(STRICT_ALLOW_SETTING, "")
+    names = listed if isinstance(listed, (list, tuple, set)) else str(listed).split(",")
+    return {"allow": [str(name).strip() for name in names if str(name).strip()]}
 
 # The operations a saved finding can name. The rules for each run in aiwaf-rust.
 SINKS = (
@@ -44,8 +63,12 @@ def rule_for(sink: str, value: str) -> Optional[str]:
 class RouteRisks:
     """Saved risks for one manifest, compiled in aiwaf-rust for lookup by request path."""
 
-    def __init__(self, manifest: Optional[Mapping[str, Any]]):
-        self._checker = rust().RouteRiskChecker(json.dumps(manifest if isinstance(manifest, Mapping) else None))
+    def __init__(self, manifest: Optional[Mapping[str, Any]], strict: Optional[dict] = None):
+        # Strict inputs ride in the manifest the engine gets.
+        given = {**manifest, "strict_inputs": strict} if strict and isinstance(manifest, Mapping) else manifest
+        self._checker = rust().RouteRiskChecker(json.dumps(given if isinstance(given, Mapping) else None))
+        if strict and not getattr(self._checker, "strict", False):
+            SCHEMA_LOGGER.warning(STRICT_WARNING)
         routes = manifest.get("routes") if isinstance(manifest, Mapping) else None
         self.has_inputs = isinstance(routes, Mapping) and any(
             isinstance(entry, Mapping) and isinstance(entry.get("inputs"), Mapping) for entry in routes.values())
@@ -61,7 +84,8 @@ class RouteRisks:
         return [dict(zip(("route", "sink", "input", "rule", "confidence"), event)) for event in events]
 
     def review(self, path: str, query: Any, body: Any, max_bytes: int, found: Optional[str]) -> Optional[tuple]:
-        """("mismatch", route, input, type), ("relax", route, rule, ""), or None. See aiwaf-rust."""
+        """("mismatch", route, input, type), ("unexpected", route, input, ""), ("relax", route, rule,
+        ""), or None. See aiwaf-rust."""
         if isinstance(query, (bytes, bytearray)):
             query = bytes(query).decode("utf-8", errors="replace")
         return self._checker.review(str(path or "/"), str(query or ""), _as_bytes(body), int(max_bytes), found)
@@ -81,7 +105,8 @@ def clear_cache() -> None:
 MODES = ("block", "log", "off")
 
 
-def observer_for(mode: Any, manifest_path: Any, path: str, method: str = "", schema_mode: Any = None):
+def observer_for(mode: Any, manifest_path: Any, path: str, method: str = "", schema_mode: Any = None,
+                 strict: Any = None, strict_allow: Any = None):
     """Return a callable taking (query, body), or None when there's nothing to check.
 
     The callable returns a blocking Finding in block mode, and None otherwise. Its ``review``
@@ -97,9 +122,11 @@ def observer_for(mode: Any, manifest_path: Any, path: str, method: str = "", sch
     if selected == "off" and schema == "off":
         return None
     location = str(manifest_path or DEFAULT_MANIFEST_PATH)
-    risks = _cache.get(location)
+    strictness = strict_inputs(strict, strict_allow) if schema != "off" else None
+    key = (location, json.dumps(strictness, sort_keys=True))
+    risks = _cache.get(key)
     if risks is None:
-        risks = _cache[location] = RouteRisks(load_manifest(location))
+        risks = _cache[key] = RouteRisks(load_manifest(location), strictness)
     if risks.empty or (selected == "off" and not risks.has_inputs):
         return None
     if not risks.has_inputs:
@@ -137,11 +164,18 @@ def observer_for(mode: Any, manifest_path: Any, path: str, method: str = "", sch
             return finding
         action, route, name, kind = result
         event = {"event": "aiwaf.route_schema", "mode": schema, "method": str(method), "route": route, "action": action}
-        event.update({"input": name, "type": kind} if action == "mismatch" else {"rule": name})
+        if action == "mismatch":
+            event.update({"input": name, "type": kind})
+        elif action == "unexpected":
+            event["input"] = name
+        else:
+            event["rule"] = name
         SCHEMA_LOGGER.warning("%s", json.dumps(event, sort_keys=True))
         if schema != "enforce":
             return finding
-        return Finding("schema_type_mismatch") if action == "mismatch" else None
+        if action == "mismatch":
+            return Finding("schema_type_mismatch")
+        return Finding("schema_unexpected_input") if action == "unexpected" else None
 
     if schema != "off":
         observe.review = review
@@ -183,14 +217,18 @@ def _routes_for(finding: Mapping[str, Any], routes: Mapping[str, Any]) -> list[s
     ]
 
 
-def apply_report(report: Mapping[str, Any], manifest: dict) -> dict[str, int]:
-    """Replace saved risks in a manifest with this report's findings, and count the results."""
+def apply_report(report: Mapping[str, Any], manifest: dict, sources: Optional[Mapping[str, Any]] = None) -> dict[str, int]:
+    """Replace saved risks in a manifest with this report's findings, and count the results.
+
+    sources, from input_sources.sources_from_environment, adds declared, OpenAPI and recorded
+    inputs to what the report's code reading found.
+    """
     routes = manifest.get("routes")
     if not isinstance(routes, dict):
         raise ValueError("The manifest has no routes")
     for data in routes.values():
         if isinstance(data, dict):
-            for key in ("injection_risks", "inputs", "inputs_complete"):
+            for key in ("injection_risks", "inputs", "inputs_complete", "inputs_incomplete"):
                 data.pop(key, None)
     linked, unlinked = 0, 0
     collected: dict[str, dict[tuple, dict[str, str]]] = {}
@@ -208,6 +246,7 @@ def apply_report(report: Mapping[str, Any], manifest: dict) -> dict[str, int]:
     for entry in report.get("inputs", ()):
         for path in _routes_for(entry, routes):
             merge_into(routes, path, entry)
+    completeness = input_sources.finalize(routes, **dict(sources or {}))
     for data in routes.values():
         if isinstance(data, dict) and "inputs" in data:
             typed += 1
@@ -218,6 +257,9 @@ def apply_report(report: Mapping[str, Any], manifest: dict) -> dict[str, int]:
         "unlinked_findings": unlinked,
     }
     manifest["injection_audit"]["routes_with_inputs"] = typed
+    manifest["injection_audit"]["routes_with_complete_inputs"] = completeness["complete"]
+    if completeness["reasons"]:
+        manifest["injection_audit"]["incomplete_input_reasons"] = dict(sorted(completeness["reasons"].items()))
     return {"routes": len(collected), "linked": linked, "unlinked": unlinked, "inputs": typed}
 
 
@@ -227,15 +269,27 @@ def audit_into_manifest(manifest: dict, source: Optional[str]) -> Optional[dict[
     Returns the counts, or None when source is None or the scan fails. A failed scan leaves the
     manifest without saved risks, so routes keep their normal checks.
     """
-    if source is None:
-        return None
     try:
-        from .injection_analysis import analyze_path
+        if source is None:
+            return None
+        try:
+            from .injection_analysis import analyze_path
 
-        return apply_report(analyze_path(str(source)), manifest)
-    except Exception as error:  # noqa: BLE001 - a scan problem must not stop init
-        LOGGER.warning("Injection audit skipped: %s", error)
-        return None
+            try:
+                sources = input_sources.sources_from_environment()
+            except (OSError, ValueError) as error:
+                LOGGER.warning("Declared, OpenAPI or recorded inputs skipped: %s", error)
+                sources = {}
+            return apply_report(analyze_path(str(source)), manifest, sources)
+        except Exception as error:  # noqa: BLE001 - a scan problem must not stop init
+            LOGGER.warning("Injection audit skipped: %s", error)
+            return None
+    finally:
+        # What the framework declared is only for combining with the audit; never saved alone.
+        for data in (manifest.get("routes") or {}).values():
+            if isinstance(data, dict):
+                data.pop("declared_inputs", None)
+                data.pop("input_declaration", None)
 
 
 def describe_audit(manifest: Mapping[str, Any]) -> str:
@@ -247,6 +301,11 @@ def describe_audit(manifest: Mapping[str, Any]) -> str:
     text = f"Injection checks: {routes} routes from {audit.get('files_scanned', 0)} files"
     if audit.get("routes_with_inputs"):
         text += f"; inputs and types for {audit['routes_with_inputs']} routes"
+        text += f", complete for {audit.get('routes_with_complete_inputs', 0)}"
+        reasons = audit.get("incomplete_input_reasons") or {}
+        if reasons:
+            top = sorted(reasons.items(), key=lambda item: (-item[1], item[0]))[:4]
+            text += " (incomplete because of " + ", ".join(f"{code} {count}" for code, count in top) + ")"
     if audit.get("unlinked_findings"):
         text += f" ({audit['unlinked_findings']} findings couldn't be tied to a route)"
     return text

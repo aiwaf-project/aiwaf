@@ -186,6 +186,7 @@ class AIWAF:
 
         self.native = self._native_default(app, enabled, use_database)
         if self.native is not None:
+            self._record_inputs(app)
             app.extensions = getattr(app, "extensions", {})
             app.extensions["aiwaf"] = self
             return self
@@ -202,6 +203,16 @@ class AIWAF:
             instance = middleware_cls(app)
             self.middleware_instances[name] = instance
 
+        self._record_inputs(app)
         app.extensions = getattr(app, "extensions", {})
         app.extensions["aiwaf"] = self
         return self
+
+    @staticmethod
+    def _record_inputs(app):
+        """AIWAF_RECORD_INPUTS (a setting or the environment) records what each view reads, for
+        init. Its hook goes after AIWAF's own, so AIWAF's reads aren't the view's."""
+        from aiwaf.core.input_recorder import record_flask_inputs
+
+        recording = app.config.get("AIWAF_RECORD_INPUTS")
+        record_flask_inputs(app, str(recording) if recording is not None else None)

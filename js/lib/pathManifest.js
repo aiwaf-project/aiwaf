@@ -376,31 +376,51 @@ function routeEntryFor({ routePath, methods = [], handler, name = '', view = '' 
 function addRoute(routes, routeInfo) {
   if (!routeInfo || !routeInfo.routePath) return;
   const [normalized, entry] = routeEntryFor(routeInfo);
+  const declared = require('./inputSources').declaredOn(routeInfo.handlers || [], routeInfo.handler);
+  if (declared) entry.input_declaration = declared;
+  const framework = require('./frameworkInputs');
+  const known = routeInfo.declared || framework.fastifyInputs(routeInfo.schema) || framework.hapiInputs(routeInfo.validate)
+    || framework.expressInputs(routeInfo.handlers);
+  if (known) entry.declared_inputs = known;
   if (routes[normalized]) {
     const mergedMethods = Array.from(new Set([...(routes[normalized].methods || []), ...(entry.methods || [])])).sort();
+    const combined = framework.combine(routes[normalized].declared_inputs, entry.declared_inputs);
     routes[normalized] = {
       ...routes[normalized],
       ...entry,
       methods: mergedMethods
     };
+    if (combined) routes[normalized].declared_inputs = combined;
   } else {
     routes[normalized] = entry;
   }
 }
 
+// Express 4 keeps its router at app._router (its app.router getter throws), Express 5 at app.router.
+function routerOf(app) {
+  if (app?._router) return app._router;
+  try {
+    return app?.router;
+  } catch (_error) {
+    return null;
+  }
+}
+
 function extractExpressRoutes(app) {
   const routes = {};
-  const stack = app?._router?.stack || [];
+  const stack = routerOf(app)?.stack || [];
   stack.forEach(layer => {
     const route = layer.route;
     if (!route || !route.path) return;
     const routePath = String(route.path);
-    const handler = route.stack?.find(item => typeof item.handle === 'function')?.handle;
+    // The last function is the handler; any before it are route middleware.
+    const handler = (route.stack || []).filter(item => typeof item.handle === 'function').map(item => item.handle).pop();
     const methods = methodsFromExpressRoute(route);
     addRoute(routes, {
       routePath,
       methods,
       handler,
+      handlers: (route.stack || []).map(item => item.handle),
       name: routePath
     });
   });
@@ -411,10 +431,10 @@ function normalizeRouteList(routesInput = []) {
   return (Array.isArray(routesInput) ? routesInput : [])
     .map(route => ({
       routePath: route.path || route.url || route.routePath || route.pattern,
-      methods: Array.isArray(route.methods)
-        ? route.methods
-        : (route.method ? [route.method] : []),
+      methods: [].concat(route.methods || route.method || []).map(method => String(method).toUpperCase()),
       handler: route.handler || route.handle || route.endpoint,
+      schema: route.schema,
+      validate: route.validate,
       name: route.name || route.id || route.path || route.url || '',
       view: route.view || ''
     }))
@@ -445,6 +465,7 @@ function extractHapiRoutes(server, routesInput = null) {
     path: route.path,
     method: route.method,
     handler: route.settings?.handler || route.handler,
+    validate: route.settings?.validate,
     name: route.settings?.id || route.path
   }))).forEach(route => addRoute(routes, route));
   return routes;
@@ -468,6 +489,13 @@ function extractNestRoutes(app, routesInput = null) {
     normalizeRouteList(routesInput).forEach(route => addRoute(routes, route));
     return routes;
   }
+  // The controllers' own metadata: real handlers, and the @Query()/@Body() DTOs they take.
+  const nest = require('./frameworkInputs').nestRoutes(app);
+  if (nest.length) {
+    const routes = {};
+    nest.forEach(route => addRoute(routes, route));
+    return routes;
+  }
   try {
     const httpServer = typeof app?.getHttpServer === 'function' ? app.getHttpServer() : app;
     const expressApp = httpServer?._events?.request || httpServer?.app || app;
@@ -480,13 +508,27 @@ function extractNestRoutes(app, routesInput = null) {
 // Saves the source's injection findings into a manifest that's about to be written. A failed scan
 // leaves the manifest without saved risks, so routes keep their normal checks.
 function auditIntoManifest(manifest, source) {
-  if (!source) return null;
   try {
+    if (!source) return null;
     const { analyzePath } = require('./injectionAnalysis');
-    return require('./routeRisks').applyReport(analyzePath(source), manifest);
+    let sources = {};
+    try {
+      sources = require('./inputSources').sourcesFromEnvironment();
+    } catch (error) {
+      console.warn(`Declared, OpenAPI or recorded inputs skipped: ${error.message || error}`);
+    }
+    return require('./routeRisks').applyReport(analyzePath(source), manifest, sources);
   } catch (error) {
     console.warn(`Injection audit skipped: ${error.message || error}`);
     return null;
+  } finally {
+    // A declaration is only for combining with the audit; never saved alone.
+    for (const entry of Object.values((manifest && manifest.routes) || {})) {
+      if (entry && typeof entry === 'object') {
+        delete entry.input_declaration;
+        delete entry.declared_inputs;
+      }
+    }
   }
 }
 

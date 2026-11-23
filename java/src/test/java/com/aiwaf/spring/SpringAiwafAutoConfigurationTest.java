@@ -21,6 +21,15 @@ class SpringAiwafAutoConfigurationTest {
             .withConfiguration(AutoConfigurations.of(SpringAiwafAutoConfiguration.class));
 
     @Test
+    void registers_the_input_recorder_only_when_recording() {
+        contextRunner.run(context -> org.junit.jupiter.api.Assertions.assertFalse(context.containsBean("aiwafInputRecorderFilter")));
+        contextRunner.withPropertyValues("aiwaf.record-inputs=target/observed.jsonl")
+                .run(context -> org.junit.jupiter.api.Assertions.assertTrue(context.containsBean("aiwafInputRecorderFilter")));
+        contextRunner.withPropertyValues("aiwaf.record-inputs=off")
+                .run(context -> org.junit.jupiter.api.Assertions.assertFalse(context.containsBean("aiwafInputRecorderFilter")));
+    }
+
+    @Test
     void maps_spring_properties_to_core_configuration() {
         MockEnvironment environment = new MockEnvironment()
                 .withProperty("aiwaf.rate-limit.max", "73")

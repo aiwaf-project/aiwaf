@@ -123,6 +123,14 @@ class AIWAF:
             self.config.get("route_plan_version", self.config.get("ROUTE_PLAN_VERSION", 0)),
         )
         
+        # AIWAF_RECORD_INPUTS (a setting or the environment) records what each endpoint reads, for
+        # init. Added first, so it sits closest to the endpoints.
+        from aiwaf.core.input_recorder import AsgiInputRecorder, destination
+
+        recording = self.config.get("AIWAF_RECORD_INPUTS")
+        if destination(str(recording) if recording is not None else None) is not None:
+            self.app.add_middleware(AsgiInputRecorder, path=str(recording) if recording is not None else None)
+
         # Add middleware in reverse order (FastAPI adds them in reverse)
         self._add_middleware()
         

@@ -133,7 +133,8 @@ class IPAndKeywordBlockMiddleware:
                         exempt=self.exempt_keywords, prefixes=self.safe_prefixes, malicious=self.malicious_keywords)
             observer = observer_for(app.config.get('AIWAF_INJECTION_RISK_MODE'),
                                     app.config.get('AIWAF_PATH_MANIFEST'), request.path, request.method,
-                                    app.config.get('AIWAF_ROUTE_SCHEMA_MODE'))
+                                    app.config.get('AIWAF_ROUTE_SCHEMA_MODE'), app.config.get('AIWAF_STRICT_INPUTS'),
+                                    app.config.get('AIWAF_STRICT_INPUTS_ALLOW'))
             finding = (inspect_wsgi_request(request, self.sql_policy, evaluator=prepared[0], observer=observer)
                        if prepared else inspect_wsgi_request(request, self.sql_policy, observer=observer))
             if finding:

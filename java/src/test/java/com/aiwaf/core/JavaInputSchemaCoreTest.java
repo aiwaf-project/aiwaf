@@ -130,4 +130,56 @@ class JavaInputSchemaCoreTest {
         assertFalse(((Map<?, ?>) routes.get("/other")).containsKey("inputs"));
         assertTrue(JavaSourceAnalysisCore.analyze(directory, false).toMap().containsKey("inputs"));
     }
+
+    @Test
+    void eachGapSaysWhyWithItsLine() throws Exception {
+        Map<String, JavaInputSchemaCore.Inputs> found = inputs(HEADER + """
+                class Paging {
+                    static int page(HttpServletRequest request) { return Integer.parseInt(request.getParameter("page")); }
+                }
+                @RestController
+                class App {
+                    @GetMapping("/helper")
+                    String helper(HttpServletRequest request) { return Paging.page(request) + other(request); }
+                    @GetMapping("/whole")
+                    String whole(HttpServletRequest request, @RequestParam Map<String, String> all) { return request.getParameterMap().toString(); }
+                    @GetMapping("/dynamic")
+                    String dynamic(HttpServletRequest request, String key) { return request.getParameter(key); }
+                    @PostMapping("/raw")
+                    String raw(HttpServletRequest request, org.springframework.web.multipart.MultipartFile file) throws Exception {
+                        return request.getReader().readLine() + request.getAttribute("x");
+                    }
+                    @PostMapping("/body")
+                    String body(@RequestBody Missing missing, @RequestBody Loose loose, @RequestBody Map<String, Object> map,
+                                @RequestParam Weird weird, org.springframework.web.context.request.WebRequest web) { return ""; }
+                    @GetMapping("/stored")
+                    Object stored(HttpServletRequest request) { return request; }
+                    String other(HttpServletRequest request) { return request.getParameter("o"); }
+                }
+                class Loose { @com.fasterxml.jackson.annotation.JsonAnySetter void any(String k, Object v) {} }
+                class Weird {}
+                @RestController
+                class Shared {
+                    @ModelAttribute void before() {}
+                    @GetMapping("/shared") String shared(@RequestParam String q) { return q; }
+                }
+                """);
+        assertEquals(Map.of("page", "int", "o", "text"), found.get("App.helper").inputs());
+        assertTrue(found.get("App.helper").complete());
+        assertEquals(java.util.List.of("container_whole", "container_whole"), codes(found.get("App.whole")));
+        assertEquals(java.util.List.of("dynamic_key"), codes(found.get("App.dynamic")));
+        assertEquals(java.util.List.of("raw_body", "raw_body", "helper"), codes(found.get("App.raw")));
+        assertEquals(java.util.List.of("external_class", "model_fields", "container_whole", "external_class", "helper"),
+                codes(found.get("App.body")));
+        assertEquals(java.util.List.of("helper"), codes(found.get("App.stored")));
+        assertEquals(java.util.List.of("class_view"), codes(found.get("Shared.shared")));
+        assertTrue(found.get("App.dynamic").reasons().get(0).line() > 0);
+        Map<String, Object> map = JavaInputSchemaCore.asMap(new JavaInputSchemaCore.Reason("helper", "x", 0));
+        assertEquals(Map.of("code", "helper", "detail", "x"), map);
+        assertEquals(java.util.List.of(), new JavaInputSchemaCore.Inputs("f", "a", Map.of(), true).reasons());
+    }
+
+    private static java.util.List<String> codes(JavaInputSchemaCore.Inputs entry) {
+        return entry.reasons().stream().map(JavaInputSchemaCore.Reason::code).toList();
+    }
 }

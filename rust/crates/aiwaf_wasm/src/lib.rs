@@ -334,8 +334,16 @@ impl RouteRiskChecker {
         self.risks.is_empty()
     }
 
+    /// Whether the manifest turned strict inputs on (its `strict_inputs` key). An engine
+    /// without this getter is too old to check them.
+    #[wasm_bindgen(getter)]
+    pub fn strict(&self) -> bool {
+        self.risks.strict()
+    }
+
     /// Reviews a request against its route's saved inputs, after the general check found
     /// `found` (or ""). Returns JSON: {"action":"mismatch","route","input","type"},
+    /// {"action":"unexpected","route","input"},
     /// {"action":"relax","route","rule"}, or null to keep the general check's answer.
     pub fn review(&self, path: &str, query: &str, body: &[u8], max_bytes: usize, found: &str) -> String {
         use aiwaf_core::route_risks::Review;
@@ -345,6 +353,10 @@ impl RouteRiskChecker {
                 serde_json::json!({"action": "mismatch", "route": route, "input": input, "type": kind}).to_string()
             }
             Some(Review::Relax { route, rule }) => serde_json::json!({"action": "relax", "route": route, "rule": rule}).to_string(),
+            Some(review @ Review::Unexpected { .. }) => {
+                let event = review.event("", "");
+                serde_json::json!({"action": "unexpected", "route": event["route"], "input": event["input"]}).to_string()
+            }
             None => "null".into(),
         }
     }

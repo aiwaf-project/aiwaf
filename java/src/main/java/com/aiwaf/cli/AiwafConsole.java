@@ -279,7 +279,7 @@ public final class AiwafConsole {
                         com.aiwaf.core.PathManifestCore.buildManifestFromSource("java-source", report.routes()));
                 if (!hasFlag(args, "--no-audit")) {
                     // The same parse found the routes and the injection findings.
-                    com.aiwaf.core.RouteRiskCore.applyReport(report, manifest);
+                    com.aiwaf.core.RouteRiskCore.applyReport(report, manifest, inputSources(List.of()));
                 }
                 com.aiwaf.core.PathManifestCore.writeManifest(manifest, java.nio.file.Path.of(output));
                 printManifestSummary(output, manifest);
@@ -293,9 +293,10 @@ public final class AiwafConsole {
         }
         String appName = parseOption(args, "--app");
         if (appName != null) {
-            Map<String, Object> manifest = com.aiwaf.spring.SpringPathManifest.launchAndGenerate(appName, output);
-            printManifestSummary(output, manifest);
-            auditIntoManifest(args, output);
+            com.aiwaf.spring.SpringPathManifest.Generated generated =
+                    com.aiwaf.spring.SpringPathManifest.launchAndGenerateWithRoutes(appName, output);
+            printManifestSummary(output, generated.manifest());
+            auditIntoManifest(args, output, generated.routes());
             return;
         }
         String clsName = parseOption(args, "--class");
@@ -310,7 +311,7 @@ public final class AiwafConsole {
                     com.aiwaf.core.PathManifestCore.discoverControllerRoutes(cls);
             com.aiwaf.core.PathManifestCore.generateManifest(routes, output);
             printManifestSummary(output, com.aiwaf.core.PathManifestCore.buildManifest("spring", routes));
-            auditIntoManifest(args, output);
+            auditIntoManifest(args, output, routes);
         } catch (Exception e) {
             System.err.println("Error generating manifest: " + e.getMessage());
         }
@@ -320,8 +321,27 @@ public final class AiwafConsole {
         return java.util.Arrays.asList(args).contains(flag);
     }
 
+    /**
+     * What init combines with the source scan: .aiwaf/inputs.json, AIWAF_OPENAPI_SPEC and recorded
+     * inputs, plus the framework's and @AiwafInputs declarations for the given live routes.
+     */
+    static com.aiwaf.core.InputSourcesCore.Sources inputSources(java.util.Collection<com.aiwaf.core.PathManifestCore.RouteInfo> routes) {
+        com.aiwaf.core.InputSourcesCore.Sources base;
+        try {
+            base = com.aiwaf.core.InputSourcesCore.sourcesFromEnvironment(java.nio.file.Path.of("."), System.getenv());
+        } catch (IOException | RuntimeException ex) {
+            System.err.println("Declared, OpenAPI or recorded inputs skipped: " + ex.getMessage());
+            base = com.aiwaf.core.InputSourcesCore.Sources.none();
+        }
+        return com.aiwaf.core.InputSourcesCore.forRoutes(routes, base);
+    }
+
     /** Saves injection findings from source into a written manifest. A failed scan leaves it unchanged. */
     static void auditIntoManifest(String[] args, String output) {
+        auditIntoManifest(args, output, List.of());
+    }
+
+    static void auditIntoManifest(String[] args, String output, java.util.Collection<com.aiwaf.core.PathManifestCore.RouteInfo> routes) {
         if (hasFlag(args, "--no-audit")) {
             return;
         }
@@ -333,7 +353,7 @@ public final class AiwafConsole {
             com.aiwaf.core.JavaSourceAnalysisCore.Report report =
                     com.aiwaf.core.JavaSourceAnalysisCore.analyze(java.nio.file.Path.of(source), false);
             System.out.println("Injection checks: " + com.aiwaf.core.RouteRiskCore.formatCounts(
-                    com.aiwaf.core.RouteRiskCore.updateManifest(report, java.nio.file.Path.of(output)), output));
+                    com.aiwaf.core.RouteRiskCore.updateManifest(report, java.nio.file.Path.of(output), inputSources(routes)), output));
         } catch (IOException | RuntimeException ex) {
             System.err.println("Injection audit skipped: " + ex.getMessage());
         } catch (LinkageError ex) {

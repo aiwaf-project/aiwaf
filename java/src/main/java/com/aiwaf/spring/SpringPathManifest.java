@@ -64,8 +64,16 @@ public final class SpringPathManifest {
         return manifest;
     }
 
+    /** A written manifest and the live routes it came from, whose handlers init reads by reflection. */
+    public record Generated(Map<String, Object> manifest, List<PathManifestCore.RouteInfo> routes) {}
+
     /** Start, inspect, and close a Spring Boot or plain annotation application context. */
     public static Map<String, Object> launchAndGenerate(String applicationClassName, String outputPath, String... applicationArgs) {
+        return launchAndGenerateWithRoutes(applicationClassName, outputPath, applicationArgs).manifest();
+    }
+
+    /** As launchAndGenerate, also returning the discovered routes. */
+    public static Generated launchAndGenerateWithRoutes(String applicationClassName, String outputPath, String... applicationArgs) {
         if (applicationClassName == null || applicationClassName.isBlank()) {
             throw new IllegalArgumentException("--app requires a Spring application class");
         }
@@ -73,7 +81,8 @@ public final class SpringPathManifest {
         try {
             Class<?> applicationClass = Class.forName(applicationClassName);
             context = launch(applicationClass, applicationArgs == null ? new String[0] : applicationArgs);
-            return generate(context, outputPath);
+            List<PathManifestCore.RouteInfo> routes = discoverRoutes(context);
+            return new Generated(generate(context, outputPath), routes);
         } catch (ReflectiveOperationException ex) {
             Throwable cause = ex instanceof InvocationTargetException invocation && invocation.getCause() != null
                     ? invocation.getCause() : ex;

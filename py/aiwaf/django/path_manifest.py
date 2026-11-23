@@ -10,6 +10,7 @@ from django.urls.resolvers import URLPattern, URLResolver
 
 from aiwaf.core.api_detection import detect_api_endpoint
 from aiwaf.core.auth_detection import detect_auth_endpoint
+from aiwaf.core.input_sources import combine, declared_on, django_inputs, view_arguments
 from aiwaf.core.route_risks import audit_into_manifest
 from aiwaf.core.path_manifest import build_manifest, build_route_entry, is_internal_aiwaf_path, write_manifest
 from aiwaf.core.source_methods import (
@@ -184,6 +185,12 @@ def _collect_routes(patterns: Any, prefix: str = "") -> dict[str, dict[str, Any]
             },
         )
         entry['request_constraints'] = django_declarations(callback, methods)
+        framework_inputs = combine(django_inputs(callback, methods), view_arguments(callback, methods))
+        if framework_inputs is not None:
+            entry["declared_inputs"] = framework_inputs
+        declaration = declared_on(callback)
+        if declaration is not None:
+            entry["input_declaration"] = declaration
         routes[path] = merge_entries(routes.get(path), entry)
     return routes
 

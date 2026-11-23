@@ -1,6 +1,71 @@
 # Changelog
 
-## Python 1.3.0 / aiwaf-rust 0.2.15 / Node.js 1.3.0 / WASM 0.2.11 / Java 1.4.0 — prepared release
+## Python 1.3.1 / Node.js 1.3.1 / Java 1.4.0 — prepared release
+
+- **Release note:** Python 1.3.0, npm 1.3.0 and aiwaf-rust 0.2.15 are published; this release
+  adds the route input work below. aiwaf-rust and aiwaf-wasm are unchanged, so Python 1.3.1
+  still requires `aiwaf-rust>=0.2.15` and npm `aiwaf-wasm ^0.2.11`. Java 1.4.0 (not yet on
+  Maven Central) also carries the Java changes listed under 1.3.0.
+- **Strict inputs** (`AIWAF_STRICT_INPUTS`, off by default), in aiwaf-rust 0.2.16, aiwaf-wasm
+  0.2.12 and Java: on a route whose saved input list is complete, a query or body name it never
+  reads is `schema_unexpected_input`, logged in `AIWAF_ROUTE_SCHEMA_MODE=monitor` and blocked in
+  `enforce`. CSRF tokens, `utm_*`, `fbclid`, `gclid`, `msclkid` and `_` are always allowed;
+  `AIWAF_STRICT_INPUTS_ALLOW` adds names. Hosts pass it in the manifest the engine gets
+  (`strict_inputs`), so older engines ignore it, and AIWAF warns and leaves it off with them.
+  Shared cases: `strict_cases` in `tests/fixtures/route_schema_cases.json`.
+- Recording turns on from AIWAF itself with `AIWAF_RECORD_INPUTS`: Flask's and FastAPI's
+  `AIWAF(app)`, the Node.js middleware (from where it hands the request on, so its own reads
+  aren't counted), Spring Boot (`aiwaf.record-inputs`, a filter registered last) and Django
+  (aiwaf's app adds `DjangoInputRecorder` last to `MIDDLEWARE`).
+- Route input lists (`init`) say why they're incomplete, follow imports, and take more sources,
+  in Python, Node.js and Java:
+  - `inputs_incomplete` lists each reason with its code, detail, file and line, and init's
+    summary counts them: `helper`, `container_whole`, `dynamic_key`, `raw_body`, `class_view`,
+    `dependency`, `external_class`, `model_fields`, `middleware` (Node.js) and `observed`.
+  - Forms, serializers, models, zod schemas, helpers and constants are followed into the
+    project's other files through imports (Python and Node.js), and the request into static
+    methods of other classes (Java).
+  - The framework is asked what it reads: Django generic views, DRF views, FastAPI's resolved
+    parameters and dependencies, and Spring handler methods and body classes by reflection.
+    Python reads the fields of classes the code reading couldn't from already-imported modules.
+    Node.js reads Fastify route schemas, Hapi `validate` schemas (Joi), and NestJS `@Query()`
+    and `@Body()` parameters, pipes and DTO classes (class-validator or `@nestjs/swagger`
+    metadata) from the live app, and celebrate and express-validator middleware on Express
+    routes. The Fastify plugin now records routes registered after it, with their schemas, as
+    `fastify.aiwafRoutes`.
+  - Node.js NestJS manifests are built from the controllers' metadata, with Nest's own route path
+    rules (global prefix exclusions, `RouterModule` paths, URI versioning), and Express route
+    extraction reads Express 5's `app.router` as well as Express 4's `app._router`; before, a
+    live Nest 11 (Express 5) app produced no routes.
+  - Express routes with middleware are classified by their last function, the handler, not the
+    first middleware.
+  - Node.js reads zod 3 and zod 4 schemas at runtime (Fastify route schemas, nestjs-zod DTOs),
+    and `aiwaf.inputs()` takes a zod or Joi schema or a DTO class as well as a name map.
+  - Node.js source reading understands validators written on the route: express-validator
+    (`query`, `body`, `check`, `param`, `header`, `cookie`, `checkSchema`, `checkExact`) and
+    celebrate. `checkExact`, or celebrate closing both query and body, makes the route complete.
+  - Node.js dev dependencies: zod, celebrate, express-validator and nestjs-zod, so these readers
+    are tested against the real libraries.
+  - Node.js source reading also recognizes validators called through a namespace import
+    (`ev.body('x')`, `ev.checkExact([...])`), an object on `this`, or a function's result.
+  - Node.js reads a validation middleware's zod or Joi schema from its closure, through the
+    inspector while the manifest is built, as for `validate(schema, 'query')`.
+  - Django views read webargs arguments too (any webargs parser).
+  - Node.js reads route middleware the project defines (`app.post('/x', checkBody, handler)`)
+    from source like the handler, instead of giving it a `middleware` reason.
+  - Python reads webargs `@use_args`/`@use_kwargs` and flask-smorest `@blp.arguments` on Flask
+    views, from the live app (each decorator layer's schema, location and unknown setting) and
+    from source (dict argmaps and marshmallow Schema classes, with `data_key`, `dump_only` and
+    `Meta.unknown`). Query and body arguments that both RAISE on unknown names make the route
+    complete. webargs and flask-smorest join the CI test installs.
+  - Declarations: `@aiwaf.inputs(...)` (Python), `aiwaf.inputs({...})(handler)` (Node.js),
+    `@AiwafInputs` (Java), or `.aiwaf/inputs.json`. OpenAPI specs with `AIWAF_OPENAPI_SPEC`.
+  - Recorders for tests and staging, on only with `AIWAF_RECORD_INPUTS`: Django middleware,
+    Flask, ASGI (FastAPI and Starlette), Express and a servlet filter. They record the names
+    handlers read to `.aiwaf/observed_inputs.jsonl`, which init adds; a name the analysis
+    missed makes the route incomplete.
+
+## Python 1.3.0 / aiwaf-rust 0.2.15 / Node.js 1.3.0 / WASM 0.2.11 — released
 
 - **Release note:** aiwaf-rust 0.2.14 and aiwaf-wasm 0.2.11 are published and carry the
   checks below. npm `aiwaf` requires `aiwaf-wasm ^0.2.11` (was ^0.2.9), with the lockfile

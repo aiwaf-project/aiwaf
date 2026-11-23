@@ -85,6 +85,39 @@ test('the engine reviews payload findings against the route inputs init saved', 
   expect(middleware.inspectPayload(request({ body: "x' OR '1'='1" }))).toMatchObject({ status: 403 });
 });
 
+test('strict inputs block names a complete route never reads, in the engine', async () => {
+  const schema = JSON.parse(fs.readFileSync(path.join(__dirname, '../../tests/fixtures/route_schema_cases.json'), 'utf8'));
+  const manifestPath = path.join(temp(), 'paths.json');
+  fs.writeFileSync(manifestPath, JSON.stringify(schema.manifest));
+  const strict = await appWith({}, { manifestPath, routeSchemaMode: 'enforce', strictInputs: true, strictInputsAllow: ['trace_*'], logger: { warn() {} } });
+  expect((await post(strict, '/comments').send({ body: 'hi', post_id: 7, role: 'admin' })).body).toEqual({ error: 'schema_unexpected_input' });
+  expect((await post(strict, '/comments').send({ body: 'hi', post_id: 7, trace_id: 1 })).status).toBe(200);
+  expect((await post(strict, '/notes').send({ anything: 1 })).status).toBe(200);
+  const off = await appWith({}, { manifestPath, routeSchemaMode: 'enforce', logger: { warn() {} } });
+  expect((await post(off, '/comments').send({ body: 'hi', post_id: 7, role: 'admin' })).status).toBe(200);
+  // An engine without strict inputs warns and leaves them off.
+  const adapter = jest.requireActual('../lib/wasmAdapter');
+  let older;
+  jest.isolateModules(() => {
+    jest.doMock('../lib/wasmAdapter', () => ({
+      ...adapter,
+      createRequestPipeline: async (...args) => {
+        const pipeline = await adapter.createRequestPipeline(...args);
+        const supports = pipeline.native.supports.bind(pipeline.native);
+        pipeline.native.supports = feature => feature !== 'strict_inputs' && supports(feature);
+        return pipeline;
+      }
+    }));
+    older = require('../lib/nativePipeline');
+  });
+  jest.dontMock('../lib/wasmAdapter');
+  const warn = jest.fn();
+  const middleware = await older({ dataDir: temp(), manifestPath, routeSchemaMode: 'enforce', strictInputs: true, logger: { warn },
+    profile: { enabled: ['ip_keyword_block'] } });
+  handles.push(middleware);
+  expect(warn).toHaveBeenCalledWith(expect.stringContaining('strict inputs need aiwaf-wasm 0.2.12'));
+});
+
 test('unparsed JSON and form bodies are inspected, then parsed by the app as sent', async () => {
   const app = await appWith();
   const clean = { name: 'Ada', nested: { tags: ['a', 'b'] } };

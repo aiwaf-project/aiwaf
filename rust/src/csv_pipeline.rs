@@ -694,6 +694,9 @@ impl NativeCSVPipeline {
                         Some(aiwaf_core::route_risks::Review::Mismatch { .. }) if p.route_schema_mode == "enforce" => {
                             Some(("schema_type_mismatch".to_owned(), 403))
                         }
+                        Some(aiwaf_core::route_risks::Review::Unexpected { .. }) if p.route_schema_mode == "enforce" => {
+                            Some(("schema_unexpected_input".to_owned(), 403))
+                        }
                         Some(aiwaf_core::route_risks::Review::Relax { .. }) if p.route_schema_mode == "enforce" => None,
                         _ => found.map(|(found, _)| found),
                     };
@@ -1177,6 +1180,7 @@ impl NativeCSVPipeline {
         [
             "route_rule",
             "route_schema",
+            "strict_inputs",
             "rate_overrides",
             "sql_monitor",
             "uuid_fact",

@@ -31,6 +31,14 @@ function createExpressLikeResponse(reply) {
 function fastifyPlugin(fastify, opts = {}, done) {
   const middleware = createExpressMiddleware(opts);
 
+  // Routes registered after aiwaf, with their schemas, for generateFrameworkManifest('fastify', app).
+  if (!fastify.hasDecorator || !fastify.hasDecorator('aiwafRoutes')) {
+    if (fastify.decorate) fastify.decorate('aiwafRoutes', []);
+  }
+  fastify.addHook('onRoute', route => {
+    if (Array.isArray(fastify.aiwafRoutes)) fastify.aiwafRoutes.push(route);
+  });
+
   if (middleware.ready) {
     // Parsed bodies are available here; do not reject/inspect an unparsed stream onRequest.
     fastify.addHook('preValidation', async (request, reply) => {

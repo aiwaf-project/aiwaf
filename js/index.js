@@ -72,3 +72,6 @@ const webSocketGuard = require('./lib/webSocketGuard');
 module.exports.guardWebSocketServer = webSocketGuard.guardWebSocketServer;
 module.exports.guardSocketIo = webSocketGuard.guardSocketIo;
 module.exports.inspectMessage = webSocketGuard.inspectMessage;
+// Declared inputs for routes whose code can't be read in full, and recording what handlers read.
+module.exports.inputs = require('./lib/inputSources').inputs;
+module.exports.recordInputs = require('./lib/inputRecorder').recordInputs;

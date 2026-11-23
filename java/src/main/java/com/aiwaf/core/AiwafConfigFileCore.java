@@ -240,6 +240,8 @@ public final class AiwafConfigFileCore {
                 "sql_injection_mode", config.sqlInjectionMode,
                 "injection_risk_mode", config.injectionRiskMode,
                 "route_schema_mode", config.routeSchemaMode,
+                "strict_inputs", config.strictInputs,
+                "strict_inputs_allow", config.strictInputsAllow,
                 "allow_compressed_request_bodies", config.allowCompressedRequestBodies,
                 "max_parameter_count", config.maxParameterCount,
                 "max_parameter_bytes", config.maxParameterBytes,

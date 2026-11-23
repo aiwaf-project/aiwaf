@@ -943,3 +943,29 @@ def test_the_pipeline_passes_the_manifest_when_it_has_inputs(tmp_path, monkeypat
     (tmp_path / "plain.json").write_text(json.dumps({"routes": {"/x": {}}}), encoding="utf-8")
     plain = CSVPipeline({"data_dir": str(tmp_path), "manifest_path": str(tmp_path / "plain.json")})
     assert "route_manifest" not in plain.profile
+
+
+@pytest.mark.skipif(not rust.NativeCSVPipeline.supports("strict_inputs"), reason="strict inputs need a newer aiwaf-rust")
+def test_the_engine_blocks_unexpected_inputs_with_strict_inputs(tmp_path, monkeypatch, caplog):
+    from aiwaf.core.csv_pipeline import CSVPipeline
+
+    manifest = tmp_path / "paths.json"
+    manifest.write_text(json.dumps(_SCHEMA["manifest"]), encoding="utf-8")
+    monkeypatch.delenv("AIWAF_STRICT_INPUTS", raising=False)
+
+    def status(config, body):
+        pipeline = CSVPipeline({"data_dir": str(tmp_path), "enabled": ["ip_keyword_block"], "learning": False,
+                                "manifest_path": str(manifest), "route_schema_mode": "enforce", **config})
+        _, result, payload = pipeline.begin(ip="8.8.8.8", path="/comments", method="POST", headers={}, query=b"",
+                                            body=body, exists=True, methods={"POST"})
+        return result, json.loads(payload) if payload else None
+
+    extra = b'{"body": "hi", "post_id": 7, "role": "admin"}'
+    assert status({"strict_inputs": True}, extra) == (403, {"error": "schema_unexpected_input"})
+    assert status({"strict_inputs": True, "strict_inputs_allow": ["role"]}, extra)[0] == 0
+    assert status({}, extra)[0] == 0
+    # An engine without strict inputs warns and leaves them off.
+    monkeypatch.setattr(rust.NativeCSVPipeline, "supports", staticmethod(lambda name: name != "strict_inputs"), raising=False)
+    with caplog.at_level("WARNING"):
+        assert status({"strict_inputs": True}, extra)[0] == 0
+    assert "Strict inputs need aiwaf-rust 0.2.16" in caplog.text
