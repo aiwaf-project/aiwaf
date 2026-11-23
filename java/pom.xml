@@ -51,12 +51,25 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <jackson.version>2.22.3</jackson.version>
     <junit.version>5.14.4</junit.version>
-    <assertj.version>3.27.6</assertj.version>
+    <assertj.version>3.27.7</assertj.version>
     <spring.version>7.0.9</spring.version>
     <spring-boot.version>4.0.8</spring-boot.version>
     <maxmind-db.version>4.2.0</maxmind-db.version>
     <jedis.version>7.5.3</jedis.version>
+    <!-- Jedis 7.5.3 brings org.json 20251224, which has CVE-2026-59171 (unbounded numbers in
+         JSONTokener). Drop this pin once a Jedis release depends on 20260719 or newer. -->
+    <org-json.version>20260719</org-json.version>
   </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.json</groupId>
+        <artifactId>json</artifactId>
+        <version>${org-json.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
 
   <dependencies>
     <dependency>

@@ -12,6 +12,11 @@
   0.24, and aiwaf-rust never calls it on them), but scanners flag every PyO3 before 0.29. The
   Python API is unchanged; the training CSV reader holds its reader in a `Mutex`, because PyO3
   classes must now be thread-safe.
+- Dependency alerts: Java pins `org.json` 20260719 (Jedis 7.5.3 brings 20251224, with
+  CVE-2026-59171) and tests with AssertJ 3.27.7; Rust locks `rand` 0.8.6. The unused root
+  `requirements.txt` and `tests/flask/requirements.txt`, frozen copies of a development
+  environment that scanners read as production pins, are removed: installs use the ranges in
+  `pyproject.toml`.
 - Node.js loads without `sqlite3`'s native binary, which npm 12 doesn't build unless the app
   approves its install script: `require('aiwaf')` used to fail with knex's "npm install sqlite3"
   hint. The database now connects on first use, the stores keep their data in CSV files under
