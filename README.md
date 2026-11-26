@@ -364,6 +364,13 @@ aiwaf init --framework flask --app app:app --source src    # audits another fold
 aiwaf init --framework flask --app app:app --no-audit      # saves no route checks
 ```
 
+With `--no-audit` the inputs `init` still knows are saved with their types: the framework's
+own lists (a Fastify or Hapi schema, Nest DTOs, FastAPI parameters, Spring's bound parameters
+and body classes), `.aiwaf/inputs.json`, and in Java `--source` what the parse read. Their
+types are checked, but no list is marked complete (`not_audited`): a complete list with no
+saved injection risks tells AIWAF the route reaches no risky call, which only the audit can
+say. So strict inputs, and the relaxed SQL rules for typed routes, need the audit.
+
 Node.js `aiwaf init` and `aiwaf manifest` accept `--source` and `--no-audit` too. Java `init --source` uses
 the same parse for routes and findings, and `init --app` audits `src/main/java` (or
 `--audit-source`). `aiwaf audit --manifest <file>` refreshes the saved findings without
@@ -401,10 +408,13 @@ from your code: `int`, `float`, `bool`, `uuid` or `text`.
 
 Types come from what the code says:
 - Python: `int(request.GET["page"])`, `type=int`, FastAPI type hints and Pydantic models, Django
-  forms and DRF serializers.
-- Node.js: `parseInt(req.query.page)`, `Number(...)`, destructuring, and zod object schemas.
+  forms and DRF serializers. A read kept in a variable takes the type of its later cast, as
+  `page = request.GET.get("page")` then `int(page)`, or `size = int(size)` in a `try`.
+- Node.js: `parseInt(req.query.page)`, `Number(...)`, destructuring, and zod object schemas, and
+  the same later casts: `const { limit } = req.query` then `Number(limit)`.
 - Java: `@RequestParam int page`, `@RequestBody` and `@ModelAttribute` classes and records,
-  `Pageable`, and `Integer.parseInt(request.getParameter("n"))`.
+  `Pageable`, and `Integer.parseInt(request.getParameter("n"))`, also through a local:
+  `String raw = request.getParameter("n")` then `Integer.parseInt(raw)`.
 
 Forms, serializers, models, zod schemas, helper functions and string constants are followed
 into the project's other files through imports: `from .forms import ContactForm`, `import {
@@ -427,6 +437,7 @@ held in a constant, as in `request.GET[PAGE_PARAM]` or `getParameter(PAGE)`, is 
 | `middleware` | Node.js route middleware that isn't a body parser may read the body. |
 | `observed` | A recording saw the code read a name the analysis didn't find. |
 | `unread_view` | Several handlers serve the path, and one's code wasn't found. |
+| `not_audited` | `init` ran without the injection audit, so the route's risks aren't known. |
 
 Then `init` fills in what reading the code can't see:
 

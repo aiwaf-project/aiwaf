@@ -196,13 +196,92 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
     let current = read;
     let parent = parents.get(current);
     // Through a default, as in parseInt(req.query.page || '1').
-    while (parent && parent.type === 'LogicalExpression' && parent.left === current) {
+    while (parent && parent.type === 'LogicalExpression' && ['||', '??'].includes(parent.operator) && parent.left === current) {
       current = parent;
       parent = parents.get(current);
     }
     if (isCall(parent) && parent.arguments[0] === current) return CONVERTERS.get(dotted(parent.callee)) || 'text';
     if (parent && parent.type === 'UnaryExpression' && parent.operator === '+') return 'float';
+    // const page = req.query.page, cast later: parseInt(page, 10).
+    if (parent && parent.type === 'VariableDeclarator' && parent.init === current && parent.id.type === 'Identifier') {
+      return castLater(parent.id.name);
+    }
+    if (parent && parent.type === 'AssignmentExpression' && parent.operator === '=' && parent.right === current
+      && parent.left.type === 'Identifier') return castLater(parent.left.name);
     return 'text';
+  };
+
+  // The cast a use of a variable is the argument of (through a default, as in
+  // parseInt(page || '1')), or null.
+  const castOf = use => {
+    let current = use;
+    let parent = parents.get(current);
+    while (parent && parent.type === 'LogicalExpression' && ['||', '??'].includes(parent.operator) && parent.left === current) {
+      current = parent;
+      parent = parents.get(current);
+    }
+    if (isCall(parent) && parent.arguments[0] === current && CONVERTERS.has(dotted(parent.callee))) return CONVERTERS.get(dotted(parent.callee));
+    if (parent && parent.type === 'UnaryExpression' && parent.operator === '+') return 'float';
+    return null;
+  };
+  // A use that only tests the value: if (page), !page, page === undefined, page == null, page !== ''.
+  const checksOnly = use => {
+    const parent = parents.get(use);
+    if (!parent) return false;
+    if (['IfStatement', 'WhileStatement', 'ConditionalExpression'].includes(parent.type) && parent.test === use) return true;
+    if (parent.type === 'UnaryExpression' && parent.operator === '!') return true;
+    if (parent.type === 'BinaryExpression' && ['===', '!==', '==', '!='].includes(parent.operator)) {
+      const other = parent.left === use ? parent.right : parent.left;
+      return other.type === 'NullLiteral' || (other.type === 'Identifier' && other.name === 'undefined')
+        || (other.type === 'StringLiteral' && other.value === '');
+    }
+    return false;
+  };
+  // A reference to the variable, not its declaration, an assignment to it, or a property name.
+  const references = (item, name) => {
+    if (item.type !== 'Identifier' || item.name !== name) return false;
+    const parent = parents.get(item);
+    if (!parent) return false;
+    if (parent.type === 'VariableDeclarator' && parent.id === item) return false;
+    if (parent.type === 'AssignmentExpression' && parent.left === item) return false;
+    if (isMember(parent) && parent.property === item && !parent.computed) return false;
+    if (parent.type === 'ObjectProperty' && parent.key === item && !parent.computed && !parent.shorthand) return false;
+    // The name declared by a pattern, as limit in const { limit } = req.query.
+    if (parent.type === 'ObjectProperty' && parents.get(parent) && parents.get(parent).type === 'ObjectPattern') return false;
+    if (parent.type === 'ArrayPattern' || parent.type === 'AssignmentPattern' && parent.left === item) return false;
+    return true;
+  };
+  // Where name = Number(name) replaces the read for the rest of the function: the first such
+  // assignment that always runs (in the body, or a try block, not under an if).
+  const recastAt = name => {
+    for (const item of nodes) {
+      if (!(item.type === 'AssignmentExpression' && item.operator === '=' && item.left.type === 'Identifier' && item.left.name === name)) continue;
+      const value = item.right;
+      if (!(isCall(value) && CONVERTERS.has(dotted(value.callee)) && value.arguments[0]
+        && value.arguments[0].type === 'Identifier' && value.arguments[0].name === name)) continue;
+      let current = parents.get(item);
+      if (!current || current.type !== 'ExpressionStatement') continue;
+      current = parents.get(current);
+      while (current && current.type === 'BlockStatement') {
+        const owner = parents.get(current);
+        if (owner === node) return item.end;
+        if (!(owner && owner.type === 'TryStatement' && owner.block === current)) break;
+        current = parents.get(owner);
+      }
+    }
+    return null;
+  };
+  const castLater = name => {
+    const kinds = new Set();
+    const after = recastAt(name);
+    for (const item of nodes) {
+      if (!references(item, name)) continue;
+      const kind = castOf(item);
+      if (kind) kinds.add(kind);
+      else if (after !== null && item.start > after) continue;
+      else if (!checksOnly(item)) return 'text';
+    }
+    return kinds.size === 1 ? [...kinds][0] : 'text';
   };
 
   const container = (expr, label) => {
@@ -231,7 +310,8 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
         for (const property of parent.id.properties) {
           const key = property.type === 'ObjectProperty' ? (property.key.name || property.key.value) : null;
           if (!key || property.computed) incomplete('container_whole', `the rest of ${label} is kept whole`, property);
-          else merge(inputs, key, 'text');
+          // const { limit } = req.query, then Number(limit): the local name's casts give the type.
+          else merge(inputs, key, property.value && property.value.type === 'Identifier' ? castLater(property.value.name) : 'text');
         }
         return;
       }

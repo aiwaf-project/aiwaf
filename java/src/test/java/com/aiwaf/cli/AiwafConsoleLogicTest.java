@@ -266,4 +266,31 @@ class AiwafConsoleLogicTest {
         assertEquals(0, status[0]);
         assertTrue(java.nio.file.Files.readString(manifest).contains("/orders"));
     }
+
+    @org.springframework.web.bind.annotation.RestController
+    public static class PagedController {
+        @org.springframework.web.bind.annotation.GetMapping("/paged")
+        public String list(@org.springframework.web.bind.annotation.RequestParam("page") int page) { return "[]"; }
+    }
+
+    @Test
+    void init_without_the_audit_keeps_typed_inputs_but_not_as_complete(@org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+        java.nio.file.Path manifest = directory.resolve("paths.json");
+        int[] status = new int[1];
+        stderrOf(() -> status[0] = AiwafConsole.handleGenerateManifest(new String[]{
+                "init", "--class", PagedController.class.getName(), "--output", manifest.toString(), "--no-audit"}));
+        assertEquals(0, status[0]);
+        String text = java.nio.file.Files.readString(manifest);
+        assertTrue(text.contains("\"page\" : \"int\"") || text.contains("\"page\":\"int\""), text);
+        assertTrue(text.contains("not_audited"), text);
+        assertTrue(!text.contains("injection_audit"), text);
+
+        java.nio.file.Files.writeString(directory.resolve("App.java"), VULNERABLE);
+        java.nio.file.Path source = directory.resolve("source.json");
+        stderrOf(() -> status[0] = AiwafConsole.handleGenerateManifest(new String[]{
+                "init", "--source", directory.toString(), "--output", source.toString(), "--no-audit"}));
+        assertEquals(0, status[0]);
+        String parsed = java.nio.file.Files.readString(source);
+        assertTrue(parsed.contains("not_audited") && !parsed.contains("injection_risks") && !parsed.contains("injection_audit"), parsed);
+    }
 }

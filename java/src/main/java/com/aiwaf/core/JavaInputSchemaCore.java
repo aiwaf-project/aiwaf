@@ -2,6 +2,7 @@ package com.aiwaf.core;
 
 import com.sun.source.tree.AnnotationTree;
 import com.sun.source.tree.AssignmentTree;
+import com.sun.source.tree.BinaryTree;
 import com.sun.source.tree.ClassTree;
 import com.sun.source.tree.CompilationUnitTree;
 import com.sun.source.tree.ExpressionTree;
@@ -403,6 +404,42 @@ public final class JavaInputSchemaCore {
     }
 
     /**
+     * The type a local holding a read is parsed to: every use of it parses it to that one type,
+     * apart from checks of whether it was sent (raw == null, raw.isEmpty()). Null, so text, when
+     * any use does anything else.
+     */
+    static String castLater(CompilationUnitTree unit, MethodTree method, String name) {
+        if (method.getBody() == null) return null;
+        Set<String> kinds = new java.util.HashSet<>();
+        boolean[] other = {false};
+        new TreePathScanner<Void, Void>() {
+            @Override
+            public Void visitIdentifier(IdentifierTree node, Void unused) {
+                if (!node.getName().contentEquals(name)) return null;
+                Tree parent = getCurrentPath().getParentPath().getLeaf();
+                if (parent instanceof AssignmentTree assignment && assignment.getVariable() == node) return null;
+                if (parent instanceof MethodInvocationTree call && !call.getArguments().isEmpty() && call.getArguments().get(0) == node
+                        && PARSERS.containsKey(call.getMethodSelect().toString())) {
+                    kinds.add(PARSERS.get(call.getMethodSelect().toString()));
+                } else if (parent instanceof BinaryTree binary
+                        && (binary.getKind() == Tree.Kind.EQUAL_TO || binary.getKind() == Tree.Kind.NOT_EQUAL_TO)
+                        && (binary.getLeftOperand().getKind() == Tree.Kind.NULL_LITERAL || binary.getRightOperand().getKind() == Tree.Kind.NULL_LITERAL)) {
+                    return null;
+                } else if (parent instanceof MemberSelectTree select && select.getExpression() == node
+                        && Set.of("isEmpty", "isBlank").contains(select.getIdentifier().toString())
+                        && getCurrentPath().getParentPath().getParentPath().getLeaf() instanceof MethodInvocationTree check
+                        && check.getArguments().isEmpty()) {
+                    return null;
+                } else {
+                    other[0] = true;
+                }
+                return null;
+            }
+        }.scan(TreePath.getPath(unit, method.getBody()), null);
+        return !other[0] && kinds.size() == 1 ? kinds.iterator().next() : null;
+    }
+
+    /**
      * What a handler reads from its HttpServletRequest, as request.getParameter("q"), following the
      * request into the class's own methods, as in return render(request).
      */
@@ -443,6 +480,10 @@ public final class JavaInputSchemaCore {
                         Tree outer = callPath.getParentPath() == null ? null : callPath.getParentPath().getLeaf();
                         String kind = outer instanceof MethodInvocationTree parse && !parse.getArguments().isEmpty()
                                 && parse.getArguments().get(0) == invocation ? PARSERS.get(parse.getMethodSelect().toString()) : null;
+                        // String raw = request.getParameter("n"), parsed later: Integer.parseInt(raw).
+                        if (kind == null && outer instanceof VariableTree local && local.getInitializer() == invocation) {
+                            kind = castLater(unit, method, local.getName().toString());
+                        }
                         merge(inputs, text, kind == null ? "text" : kind);
                     } else {
                         gaps.add(unit, "dynamic_key", "request." + called + " is called with a key that isn't a constant", call);

@@ -182,4 +182,27 @@ class JavaInputSchemaCoreTest {
     private static java.util.List<String> codes(JavaInputSchemaCore.Inputs entry) {
         return entry.reasons().stream().map(JavaInputSchemaCore.Reason::code).toList();
     }
+
+    @Test
+    void aReadKeptInALocalTakesTheTypeItIsParsedTo() throws Exception {
+        Map<String, JavaInputSchemaCore.Inputs> found = inputs(HEADER + """
+                class App extends HttpServlet {
+                    protected void doGet(HttpServletRequest request, HttpServletResponse response) {
+                        String raw = request.getParameter("limit");
+                        if (raw == null || raw.isBlank()) return;
+                        int limit = Integer.parseInt(raw);
+                        String flag = request.getParameter("flag");
+                        boolean on = Boolean.parseBoolean(flag);
+                        String name = request.getParameter("name");
+                        log(name);
+                        int n = Integer.parseInt(name);
+                        String both = request.getParameter("both");
+                        long a = Long.parseLong(both);
+                        double b = Double.parseDouble(both);
+                    }
+                    void log(String text) {}
+                }
+                """);
+        assertEquals(Map.of("limit", "int", "flag", "bool", "name", "text", "both", "text"), found.get("App.doGet").inputs());
+    }
 }

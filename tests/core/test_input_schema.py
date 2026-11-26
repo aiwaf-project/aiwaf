@@ -284,3 +284,23 @@ def test_views_that_read_nothing_and_dict_bodies():
     assert [reason["code"] for reason in found["events"]["reasons"]] == ["container_whole"]
     assert [reason["code"] for reason in found["typed"]["reasons"]] == ["container_whole"]
     assert "helper" not in found
+
+
+def test_a_read_assigned_to_a_variable_takes_the_type_of_its_later_casts():
+    found = inputs(
+        "def later(request):\n    page = request.GET.get('page', '1')\n    if not page:\n        page = '1'\n    return int(page)\n"
+        "def recast(request):\n    size = request.GET.get('size')\n    try:\n        size = int(size)\n"
+        "    except (TypeError, ValueError):\n        size = 10\n    return size\n"
+        "def top(request):\n    n = request.GET['n']\n    n = float(n)\n    return n * 2\n"
+        "def none(request):\n    n: str = request.GET.get('n')\n    if n is None or n == '':\n        return 0\n    return float(n)\n"
+        "def under_if(request):\n    n = request.GET['n']\n    if flag:\n        n = int(n)\n    return n\n"
+        "def before(request):\n    n = request.GET['n']\n    log(n)\n    n = int(n)\n    return n\n"
+        "def two(request):\n    n = request.POST['n']\n    return int(n), float(n)\n"
+        "def other(request):\n    n = request.GET['n']\n    n = str(n)\n    return n\n"
+    )
+    assert found["later"][0] == {"page": "int"}
+    assert found["recast"][0] == {"size": "int"}
+    assert found["top"][0] == {"n": "float"}
+    assert found["none"][0] == {"n": "float"}
+    for name in ("under_if", "before", "two", "other"):
+        assert found[name][0] == {"n": "text"}, name

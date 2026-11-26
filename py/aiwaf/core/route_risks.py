@@ -310,26 +310,36 @@ def audit_into_manifest(manifest: dict, source: Optional[str]) -> Optional[dict[
     """Scan source and save its findings into a manifest that's about to be written.
 
     Returns the counts, or None when source is None or the scan fails. A failed scan leaves the
-    manifest without saved risks, so routes keep their normal checks.
+    manifest without saved risks, so routes keep their normal checks; the framework's and
+    declared inputs are saved either way.
     """
+    try:
+        sources = input_sources.sources_from_environment()
+    except (OSError, ValueError) as error:
+        LOGGER.warning("Declared, OpenAPI or recorded inputs skipped: %s", error)
+        sources = {}
+    audited = False
     try:
         if source is None:
             return None
         try:
             from .injection_analysis import analyze_path
 
-            try:
-                sources = input_sources.sources_from_environment()
-            except (OSError, ValueError) as error:
-                LOGGER.warning("Declared, OpenAPI or recorded inputs skipped: %s", error)
-                sources = {}
-            return apply_report(analyze_path(str(source)), manifest, sources)
+            counts = apply_report(analyze_path(str(source)), manifest, sources)
+            audited = True
+            return counts
         except Exception as error:  # noqa: BLE001 - a scan problem must not stop init
             LOGGER.warning("Injection audit skipped: %s", error)
             return None
     finally:
-        # What the framework declared is only for combining with the audit; never saved alone.
-        for data in (manifest.get("routes") or {}).values():
+        routes = manifest.get("routes") or {}
+        if not audited:
+            try:
+                input_sources.finalize_without_code(routes, **sources)
+            except Exception as error:  # noqa: BLE001 - framework inputs must not stop init
+                LOGGER.warning("Framework inputs skipped: %s", error)
+        # A declaration's raw form is only for combining; never saved itself.
+        for data in routes.values():
             if isinstance(data, dict):
                 data.pop("declared_inputs", None)
                 data.pop("input_declaration", None)

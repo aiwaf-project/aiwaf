@@ -348,9 +348,23 @@ function inferMethodsFromHandler(handler) {
   return analyzeHandlerAst(handler).methods || [];
 }
 
-function routeEntryFor({ routePath, methods = [], handler, name = '', view = '' }) {
+function routeEntryFor({ routePath, methods = [], handler, name = '', view = '', responseType = null }) {
   const inferredMethods = methods.length ? methods : inferMethodsFromHandler(handler);
-  const api = detectApiEndpoint(handler, routePath, inferredMethods);
+  let api = detectApiEndpoint(handler, routePath, inferredMethods);
+  // The framework's own word that the route answers with JSON (Nest's default, or a route list's
+  // response_type), where the handler's code doesn't show it.
+  if (responseType === 'html' && api.isApi) {
+    api = { ...api, isApi: false, responseType: '', payloadType: api.payloadType === 'json' ? '' : api.payloadType };
+  } else if (responseType === 'json' && !api.isApi) {
+    api = {
+      ...api,
+      isApi: true,
+      responseType: 'json',
+      payloadType: api.payloadType || 'json',
+      confidence: Math.max(api.confidence, 0.9),
+      signals: Array.from(new Set([...api.signals, 'framework:json_response'])).sort()
+    };
+  }
   const auth = detectAuthEndpoint(handler, routePath);
   const metadata = {
     response_type: api.responseType || undefined,
@@ -509,7 +523,8 @@ function normalizeRouteList(routesInput = []) {
       schema: route.schema,
       validate: route.validate,
       name: route.name || route.id || route.path || route.url || '',
-      view: route.view || ''
+      view: route.view || '',
+      responseType: route.responseType || route.response_type || null
     }))
     .filter(route => route.routePath);
 }
@@ -623,21 +638,35 @@ function extractNestRoutes(app, routesInput = null) {
 // Saves the source's injection findings into a manifest that's about to be written. A failed scan
 // leaves the manifest without saved risks, so routes keep their normal checks.
 function auditIntoManifest(manifest, source) {
-  try {
-    if (!source) return null;
-    const { analyzePath } = require('./injectionAnalysis');
-    let sources = {};
+  let sources = {};
+  const loadSources = () => {
     try {
       sources = require('./inputSources').sourcesFromEnvironment();
     } catch (error) {
       console.warn(`Declared, OpenAPI or recorded inputs skipped: ${error.message || error}`);
     }
-    return require('./routeRisks').applyReport(analyzePath(source), manifest, sources);
+  };
+  let audited = false;
+  try {
+    loadSources();
+    if (!source) return null;
+    const { analyzePath } = require('./injectionAnalysis');
+    const counts = require('./routeRisks').applyReport(analyzePath(source), manifest, sources);
+    audited = true;
+    return counts;
   } catch (error) {
     console.warn(`Injection audit skipped: ${error.message || error}`);
     return null;
   } finally {
-    // A declaration is only for combining with the audit; never saved alone.
+    // Without the code reading, the framework's and declared inputs are still saved.
+    if (!audited && manifest && manifest.routes) {
+      try {
+        require('./inputSources').finalizeWithoutCode(manifest.routes, sources);
+      } catch (error) {
+        console.warn(`Framework inputs skipped: ${error.message || error}`);
+      }
+    }
+    // A declaration's raw form is only for combining; never saved itself.
     for (const entry of Object.values((manifest && manifest.routes) || {})) {
       if (entry && typeof entry === 'object') {
         delete entry.input_declaration;

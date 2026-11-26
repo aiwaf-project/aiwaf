@@ -190,3 +190,30 @@ test('path parameters are never query or body inputs', () => {
   sources.finalize(routes);
   expect(routes['/items/:id'].inputs).toEqual({ q: 'text' });
 });
+
+test('a type the framework validates holds over an untyped read of the same name', () => {
+  const { finalize, finalizeWithoutCode } = require('../lib/inputSources');
+  const routes = {
+    '/orders': {
+      inputs: { sku: 'text', quantity: 'text', note: 'int' }, inputs_complete: true,
+      declared_inputs: { inputs: { sku: 'text', quantity: 'int', note: 'text' }, covers: [], reasons: [], standalone: false }
+    }
+  };
+  finalize(routes);
+  expect(routes['/orders'].inputs).toEqual({ sku: 'text', quantity: 'int', note: 'text' });
+  expect(routes['/orders'].inputs_complete).toBe(true);
+
+  const unread = {
+    '/orders': { declared_inputs: { inputs: { quantity: 'int' }, covers: [], reasons: [], standalone: false } },
+    '/items': { declared_inputs: { inputs: { id: 'int' }, covers: [], reasons: [], standalone: true } },
+    '/plain': {},
+    '/bad': null
+  };
+  finalizeWithoutCode(unread);
+  expect(unread['/orders']).toMatchObject({ inputs: { quantity: 'int' }, inputs_complete: false });
+  expect(unread['/orders'].inputs_incomplete.map(item => item.code)).toEqual(['not_audited']);
+  // Even a list complete on its own isn't complete unaudited: its risks weren't looked for.
+  expect(unread['/items']).toMatchObject({ inputs: { id: 'int' }, inputs_complete: false });
+  expect(unread['/plain'].inputs).toBeUndefined();
+});
+

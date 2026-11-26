@@ -281,4 +281,50 @@ class InputSourcesCoreTest {
                 + " routes; incomplete because of container_whole (1), observed (1)", InputSourcesCore.describe(counts));
         assertEquals("", InputSourcesCore.describe(new InputSourcesCore.Counts(0, 0, Map.of())));
     }
+
+    public record Line(String sku, int quantity) {}
+
+    public static class Orders {
+        @org.springframework.web.bind.annotation.GetMapping
+        public String list(@org.springframework.web.bind.annotation.RequestParam("page") int page) { return ""; }
+
+        @org.springframework.web.bind.annotation.PostMapping
+        public String create(@org.springframework.web.bind.annotation.RequestBody Line line) { return ""; }
+    }
+
+    private static Map<String, Object> ordersRoute() {
+        Map<String, Object> entry = new LinkedHashMap<>();
+        entry.put("methods", List.of("GET", "POST"));
+        entry.put("inputs", new TreeMap<>(Map.of("page", "text")));
+        entry.put("inputs_complete", true);
+        Map<String, Object> routes = new TreeMap<>();
+        routes.put("/orders", entry);
+        return routes;
+    }
+
+    @Test
+    void frameworkNamesAreClaimedByTheirMethodsAndTheirTypesHold() throws Exception {
+        List<PathManifestCore.RouteInfo> live = List.of(
+                new PathManifestCore.RouteInfo("/orders", List.of("GET"), Orders.class, method(Orders.class, "list")),
+                new PathManifestCore.RouteInfo("/orders", List.of("POST"), Orders.class, method(Orders.class, "create")));
+        InputSourcesCore.Sources sources = InputSourcesCore.forRoutes(live, InputSourcesCore.Sources.none());
+        Map<String, Object> routes = ordersRoute();
+        InputSourcesCore.finalize(routes, sources);
+        Map<?, ?> orders = (Map<?, ?>) routes.get("/orders");
+        // The code read page untyped; the framework binds it as an int.
+        assertEquals(Map.of("page", "int", "sku", "text", "quantity", "int"), orders.get("inputs"));
+        assertEquals(Map.of("GET", List.of("page"), "POST", List.of("quantity", "sku")), orders.get("inputs_by_method"));
+
+        Map<String, Object> unread = ordersRoute();
+        ((Map<String, Object>) unread.get("/orders")).remove("inputs");
+        ((Map<String, Object>) unread.get("/orders")).remove("inputs_complete");
+        unread.put("/plain", new LinkedHashMap<>(Map.of("methods", List.of("GET"))));
+        InputSourcesCore.finalizeWithoutCode(unread, sources);
+        Map<?, ?> types = (Map<?, ?>) unread.get("/orders");
+        assertEquals(Map.of("page", "int", "sku", "text", "quantity", "int"), types.get("inputs"));
+        assertEquals(false, types.get("inputs_complete"));
+        assertEquals(List.of("not_audited"), codes(types.get("inputs_incomplete")));
+        assertNull(types.get("inputs_by_method"));
+        assertNull(((Map<?, ?>) unread.get("/plain")).get("inputs"));
+    }
 }

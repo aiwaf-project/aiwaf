@@ -270,3 +270,30 @@ test('keys read inside an input are saved when every read of it reads constant k
   expect(routes['/x']._flat).toEqual(['user']);
 });
 
+
+test('a read assigned to a variable takes the type of its later casts', () => {
+  const found = inputs(`
+    app.get('/later', (req, res) => { const page = req.query.page; res.json({ page: parseInt(page, 10) }); });
+    app.get('/default', (req, res) => { const page = req.query.page; if (!page) return res.json({}); res.json({ n: parseInt(page || '1', 10), ok: page !== '' && page != null }); });
+    app.get('/recast', (req, res) => { let size = req.query.size; try { size = Number(size); } catch (e) { size = 10; } res.json({ size }); });
+    app.get('/assigned', (req, res) => { let n; n = req.query.n; res.json({ n: +n }); });
+    app.post('/orders', (req, res) => { const { sku, quantity: qty, limit = 5 } = req.body; res.json({ sku, qty: parseInt(qty, 10), limit }); });
+    app.get('/underif', (req, res) => { let size = req.query.size; if (flag) { size = Number(size); } res.json({ size }); });
+    app.get('/used', (req, res) => { const q = req.query.q; log(q); res.json({ n: Number(q) }); });
+    app.get('/two', (req, res) => { const n = req.query.n; res.json({ a: parseInt(n, 10), b: parseFloat(n) }); });
+    app.get('/test', (req, res) => { const n = req.query.n; res.json({ ok: n === undefined ? 0 : Number(n), more: n ? 1 : 0, first: [n][0] }); });
+    app.post('/login', (req, res) => { const { username, password } = req.body; res.json({ ok: Boolean(username && password), raw: Boolean(req.body.remember && req.body.token) }); });
+    app.get('/fallback', (req, res) => { const page = req.query.page; res.json({ page: parseInt(page ?? '1', 10) }); });
+  `);
+  expect(found['/login'][0]).toEqual({ username: 'text', password: 'text', remember: 'text', token: 'text' });
+  expect(found['/fallback'][0].page).toBe('int');
+  expect(found['/later'][0].page).toBe('int');
+  expect(found['/default'][0].page).toBe('int');
+  expect(found['/recast'][0].size).toBe('float');
+  expect(found['/assigned'][0].n).toBe('float');
+  expect(found['/orders'][0]).toEqual({ sku: 'text', quantity: 'int', limit: 'text' });
+  expect(found['/underif'][0].size).toBe('text');
+  expect(found['/used'][0].q).toBe('text');
+  expect(found['/two'][0].n).toBe('text');
+  expect(found['/test'][0].n).toBe('text');
+});

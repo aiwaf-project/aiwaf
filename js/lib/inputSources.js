@@ -256,7 +256,10 @@ function finalize(routes, sources = {}) {
       const covered = new Set(framework.covers || []);
       reasons = reasons.filter(item => !covered.has(item.code)).concat(framework.reasons || []);
       for (const [name, kind] of Object.entries(framework.inputs || {})) {
-        merge(found, name, kind);
+        // A type the framework validates (a schema's integer, a pipe's int) holds whatever the
+        // handler's own read says: the value reaching it has been checked, or coerced, already.
+        if (kind && kind !== 'text') found[name] = kind;
+        else merge(found, name, kind);
         flat.add(name);
       }
       read = read || Boolean(framework.standalone);
@@ -354,8 +357,41 @@ function sourcesFromEnvironment(root = '.', env = process.env) {
   return sources;
 }
 
+const NOT_AUDITED = reason('not_audited',
+  "init ran without the injection audit (--no-audit, or the scan failed), so the route's risks aren't known; its types are checked, but the list isn't treated as complete");
+
+/**
+ * Without the injection audit (--no-audit, or a scan that failed), the framework's and declared
+ * inputs still go into the manifest, but never as complete: a complete list with no saved risks
+ * tells the engine the route reaches no risky call, which only the audit can say. So the types
+ * are checked, and strict inputs and the relaxed SQL rules stay off for these routes.
+ */
+function finalizeWithoutCode(routes, sources = {}) {
+  // A framework list that isn't complete on its own still goes in (finalize skips a route it
+  // can't tell was read otherwise).
+  for (const data of Object.values(routes || {})) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) continue;
+    const framework = data.declared_inputs;
+    if (framework && typeof framework === 'object' && !framework.standalone) {
+      data.inputs_complete = false;
+      data.inputs_incomplete = [NOT_AUDITED];
+    }
+  }
+  const counts = finalize(routes, sources);
+  for (const data of Object.values(routes || {})) {
+    if (!data || typeof data !== 'object' || Array.isArray(data) || !('inputs' in data)) continue;
+    data.inputs_complete = false;
+    const reasons = (data.inputs_incomplete || []).filter(item => item.code !== 'not_audited');
+    data.inputs_incomplete = [NOT_AUDITED, ...reasons].slice(0, MAX_REASONS);
+    delete data.inputs_by_method;
+    delete data.inputs_nested;
+  }
+  return counts;
+}
+
 module.exports = {
   WHOLE,
+  finalizeWithoutCode,
   canonical,
   declaredOn,
   finalize,

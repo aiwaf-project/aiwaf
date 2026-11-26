@@ -8,12 +8,41 @@
   ^0.2.11, which let an install keep 0.2.11 and lose 1.3.2's per-method lists and nested keys),
   and the lockfile pins the published 0.2.13. Java 1.4.0 isn't on Maven Central yet; it also
   carries the Java `init` fixes below.
+- **Declared types hold:** a type the framework validates now wins over the handler's own
+  untyped read of the same name. A Fastify route whose JSON Schema types `quantity` as an
+  integer saved it as `text` when the handler read `const { quantity } = request.body`, so its
+  integer rule was never enforced. The same holds for Hapi schemas, Nest pipes and DTOs, and in
+  Python for FastAPI and Pydantic types.
+- **`--no-audit` keeps typed inputs:** with `--no-audit`, or when the source scan fails,
+  `init` (Python, npm and Java) dropped every input, including framework-declared ones and
+  `.aiwaf/inputs.json`. They are saved now, with their types, which are checked. No list is
+  marked complete without the audit (the new reason `not_audited`): a complete list with no
+  saved risks tells the engine the route reaches no risky call, so strict inputs and the
+  relaxed SQL rules for typed routes still need the audit.
+- **Koa and Nest JSON routes:** Koa handlers setting `ctx.body = { ... }` and Nest controller
+  methods were classified as pages with an unknown category. Koa's assignment is now a JSON
+  signal, controller method source is parsed, and Nest routes are JSON unless they use
+  `@Render`, `@Redirect`, `@Sse`, or `@Res()` / `@Next()` without passthrough. A `--routes`
+  entry can say `"response_type": "json"` itself.
+- **Later casts give types (Python and npm):** a read kept in a variable and cast later, as
+  Django's `page = request.GET.get("page")` then `int(page)`, or `size = int(size)` in a `try`,
+  is typed from the cast; so are Express's `const { limit } = req.query` then `Number(limit)`
+  and `parseInt(page || '1', 10)`. It stays text when the variable is also used another way, is
+  cast to two types, or is cast only under an `if`.
 - **Java `init`, the same fixes:** it no longer writes a manifest with no routes (`--source`,
   `--app` and `--class` alike), which replaced a working manifest with an empty one and still
   exited 0. Failures now exit non-zero: 1 when it finds no routes or can't load the class or
   folder, and 2 for a usage error; before, `--source` and `--class` errors and the usage text
   all exited 0. A class it can't find is named as such ("Controller class not found: ..."),
   where the message was the bare class name.
+- **Java live `init` keeps per-method lists:** `--app` and `--class` saved one list for every
+  method on a path, so strict inputs let a POST send `page`, a name only the GET handler reads;
+  `--source` split them. Each live handler's framework names are now claimed by the methods it
+  serves, giving the same `inputs_by_method`. A type Spring binds (`@RequestParam int page`)
+  also holds over the code's untyped read of the same name.
+- **Java later parse:** `String raw = request.getParameter("n")` followed by
+  `Integer.parseInt(raw)` saves `n` as int, as Python and npm now do for later casts. It stays
+  text when the local is used any other way (null and `isEmpty()` checks aside).
 - **Java `init --app` uses a free port:** Spring Boot's web server started on the app's
   configured port, so `init` failed while the app, or anything else, held it. It now passes
   `--server.port=0` unless the arguments set a port. `SpringPathManifest.launchAndDiscover`

@@ -431,7 +431,63 @@ class _Reads:
             _, parent = up(expr)
             if isinstance(parent, ast.Call) and parent.args and parent.args[0] is expr:
                 return _CONVERTERS.get(_dotted(parent.func), "text")
+            # page = request.GET.get("page"), cast later: int(page).
+            if isinstance(parent, (ast.Assign, ast.AnnAssign)) and getattr(parent, "value", None) is expr:
+                targets = parent.targets if isinstance(parent, ast.Assign) else [parent.target]
+                if len(targets) == 1 and isinstance(targets[0], ast.Name):
+                    return cast_later(targets[0].id)
             return "text"
+
+        def checks_only(use) -> bool:
+            """A use that only tests the value: if page, not page, page is None, page == ""."""
+            parent = parents.get(id(use))
+            if isinstance(parent, (ast.If, ast.While, ast.IfExp)) and parent.test is use:
+                return True
+            if isinstance(parent, ast.UnaryOp) and isinstance(parent.op, ast.Not):
+                return True
+            if isinstance(parent, ast.Compare) and parent.left is use and all(
+                    isinstance(op, (ast.Is, ast.IsNot, ast.Eq, ast.NotEq)) for op in parent.ops) and all(
+                    isinstance(item, ast.Constant) and item.value in (None, "") for item in parent.comparators):
+                return True
+            return False
+
+        def recast_at(variable: str) -> Optional[Tuple[int, int]]:
+            """Where variable = int(variable) replaces the read for the rest of the function: the
+            first such assignment that always runs (at the top, or in a try body, not under an if)."""
+            for statement in ast.walk(node):
+                if not (isinstance(statement, ast.Assign) and len(statement.targets) == 1
+                        and isinstance(statement.targets[0], ast.Name) and statement.targets[0].id == variable):
+                    continue
+                value = statement.value
+                if not (isinstance(value, ast.Call) and _dotted(value.func) in _CONVERTERS and value.args
+                        and isinstance(value.args[0], ast.Name) and value.args[0].id == variable):
+                    continue
+                current = parents.get(id(statement))
+                while current is not None and current is not node and isinstance(current, ast.Try) \
+                        and statement in getattr(current, "body", ()):
+                    statement, current = current, parents.get(id(current))
+                if current is node:
+                    end = (getattr(value, "end_lineno", 0) or 0, getattr(value, "end_col_offset", 0) or 0)
+                    return end
+            return None
+
+        def cast_later(variable: str) -> str:
+            """The type a variable holding a read is cast to: every use of it casts it to that one
+            type, apart from checks of whether it was sent and uses after an unconditional
+            variable = int(variable). Text when any other use does anything else."""
+            kinds = set()
+            after = recast_at(variable)
+            for use in ast.walk(node):
+                if not (isinstance(use, ast.Name) and use.id == variable and isinstance(use.ctx, ast.Load)):
+                    continue
+                parent = parents.get(id(use))
+                if isinstance(parent, ast.Call) and parent.args and parent.args[0] is use and _dotted(parent.func) in _CONVERTERS:
+                    kinds.add(_CONVERTERS[_dotted(parent.func)])
+                elif after is not None and (use.lineno, use.col_offset) > after:
+                    continue  # The cast value, not the read.
+                elif not checks_only(use):
+                    return "text"
+            return kinds.pop() if len(kinds) == 1 else "text"
 
         def label(expr) -> str:
             return _dotted(expr) or "the request body"

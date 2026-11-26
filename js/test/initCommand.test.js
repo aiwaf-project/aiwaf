@@ -152,6 +152,23 @@ describe('the aiwaf command', () => {
     expect(Object.keys(readRoutes(output))).toEqual(['/esm']);
   });
 
+  test('saves a Fastify schema\'s integer, with and without the audit', () => {
+    const app = fixture('fastify-schema', 'app.js');
+    const run = (...flags) => {
+      const output = path.join(dir, `paths${flags.length}.json`);
+      execFileSync(process.execPath, [CLI, 'init', '--app', app, '--output', output, ...flags], { cwd: dir, encoding: 'utf8', timeout: 30000 });
+      return readRoutes(output)['/orders'];
+    };
+    const audited = run('--source', fixture('fastify-schema'));
+    expect(audited.inputs).toEqual({ quantity: 'int', sku: 'text' });
+    expect(audited.inputs_complete).toBe(true);
+    expect(audited.response_type).toBe('json');
+    const unread = run('--no-audit', '--source', fixture('fastify-schema'));
+    expect(unread.inputs).toEqual({ quantity: 'int', sku: 'text' });
+    expect(unread.inputs_complete).toBe(false);
+    expect(unread.inputs_incomplete.map(item => item.code)).toEqual(['not_audited']);
+  });
+
   test('exits 1 and writes nothing for an app with no routes', () => {
     const output = path.join(dir, 'paths.json');
     const result = spawnSync(process.execPath, [CLI, 'manifest', '--app', fixture('express', 'empty.js'), '--output', output, '--no-audit'], {

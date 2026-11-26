@@ -5,7 +5,7 @@ const Hapi = require('@hapi/hapi');
 const Validate = require('@hapi/validate');
 const { NestFactory } = require('@nestjs/core');
 const {
-  Body, Controller, Get, Module, ParseIntPipe, Post, Query, Req, createParamDecorator
+  Body, Controller, Get, Module, Next, ParseIntPipe, Post, Query, Redirect, Render, Req, Res, createParamDecorator
 } = require('@nestjs/common');
 const framework = require('../lib/frameworkInputs');
 const { finalize } = require('../lib/inputSources');
@@ -197,6 +197,42 @@ describe('framework inputs', () => {
     }
   });
 
+  it('marks Nest routes JSON unless they render, redirect or answer through @Res()', async () => {
+    class OrdersController {
+      constructor() { this.orders = { all: () => [] }; }
+      list() { return this.orders.all(); }
+      page() { return {}; }
+      away() { return undefined; }
+      manual(res) { res.send('x'); }
+      pass(res) { res.status(201); return { ok: true }; }
+      chained(next) { next(); }
+    }
+    decorate(OrdersController, 'list', [Get()]);
+    decorate(OrdersController, 'page', [Get('page'), Render('orders')]);
+    decorate(OrdersController, 'away', [Get('away'), Redirect('/orders')]);
+    decorate(OrdersController, 'manual', [Get('manual')]);
+    Res()(OrdersController.prototype, 'manual', 0);
+    decorate(OrdersController, 'pass', [Post('pass')]);
+    Res({ passthrough: true })(OrdersController.prototype, 'pass', 0);
+    decorate(OrdersController, 'chained', [Get('chained')]);
+    Next()(OrdersController.prototype, 'chained', 0);
+    Controller('orders')(OrdersController);
+    class OrdersModule {}
+    Module({ controllers: [OrdersController] })(OrdersModule);
+    const app = await NestFactory.create(OrdersModule, { logger: false });
+    await app.init();
+    try {
+      const routes = extractNestRoutes(app);
+      const types = Object.fromEntries(Object.entries(routes).map(([path, entry]) => [path, entry.response_type || null]));
+      expect(types).toEqual({
+        '/orders': 'json', '/orders/page': 'html', '/orders/away': 'html', '/orders/manual': 'html', '/orders/pass': 'json', '/orders/chained': 'html'
+      });
+      expect(routes['/orders'].category).toBe('api');
+    } finally {
+      await app.close();
+    }
+  });
+
   it('handles Nest edge cases and non-Nest apps', () => {
     expect(framework.nestRoutes(null)).toEqual([]);
     expect(framework.nestRoutes({ container: {} })).toEqual([]);
@@ -251,7 +287,10 @@ describe('framework inputs', () => {
 
     const manifest = { routes: { '/x': { declared_inputs: {}, input_declaration: {} }, '/y': null } };
     auditIntoManifest(manifest, null);
-    expect(manifest.routes['/x']).toEqual({});
+    // Without the audit, the declaration still counts (an empty one says the route reads nothing),
+    // but not as complete: the route's risks weren't looked for.
+    expect(manifest.routes['/x']).toMatchObject({ inputs: {}, inputs_complete: false });
+    expect(manifest.routes['/x'].inputs_incomplete.map(item => item.code)).toEqual(['not_audited']);
   });
 });
 

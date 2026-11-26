@@ -299,6 +299,15 @@ public final class AiwafConsole {
                 if (!hasFlag(args, "--no-audit")) {
                     // The same parse found the routes and the injection findings.
                     com.aiwaf.core.RouteRiskCore.applyReport(report, manifest, inputSources(List.of()));
+                } else {
+                    // The parse read the inputs; without its findings saved, they aren't a complete list.
+                    com.aiwaf.core.JavaSourceAnalysisCore.Report inputsOnly = new com.aiwaf.core.JavaSourceAnalysisCore.Report(
+                            report.filesScanned(), List.of(), report.errors(), report.routes(), 0, 0, report.inputs());
+                    com.aiwaf.core.RouteRiskCore.applyReport(inputsOnly, manifest, inputSources(List.of()));
+                    manifest.remove("injection_audit");
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> routes = (Map<String, Object>) manifest.get("routes");
+                    com.aiwaf.core.InputSourcesCore.markNotAudited(routes);
                 }
                 writeFound(manifest, output, sourceRoot + " (java-source)");
                 printManifestSummary(output, manifest);
@@ -321,6 +330,12 @@ public final class AiwafConsole {
                 where = clsName + " (spring)";
             }
             Map<String, Object> manifest = com.aiwaf.core.PathManifestCore.buildManifest("spring", routes);
+            if (hasFlag(args, "--no-audit")) {
+                // The framework's and declared inputs, without the audit: types only.
+                @SuppressWarnings("unchecked")
+                Map<String, Object> found = (Map<String, Object>) manifest.get("routes");
+                com.aiwaf.core.InputSourcesCore.finalizeWithoutCode(found, inputSources(routes));
+            }
             writeFound(manifest, output, where);
             printManifestSummary(output, manifest);
             auditIntoManifest(args, output, routes);

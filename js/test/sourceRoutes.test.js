@@ -78,6 +78,25 @@ describe('handlers from source in manifests', () => {
     expect(inner.apiSignals).not.toContain('return:json_literal');
   });
 
+  test('Koa ctx.body objects and class methods read as JSON', () => {
+    const koa = async ctx => { ctx.body = { id: ctx.params.id }; };
+    expect(analyzeHandlerAst(koa).apiSignals).toContain('ctx.body:json');
+    const text = async ctx => { ctx.body = 'plain'; };
+    expect(analyzeHandlerAst(text).apiSignals).not.toContain('ctx.body:json');
+    class OrdersController {
+      list(query) { return { items: [], page: query.page }; }
+      async show() { return [1]; }
+    }
+    expect(analyzeHandlerAst(OrdersController.prototype.list).available).toBe(true);
+    expect(pathManifest.detectApiEndpoint(OrdersController.prototype.list, '/orders', ['GET']).isApi).toBe(true);
+    expect(pathManifest.detectApiEndpoint(OrdersController.prototype.show, '/orders/1', ['GET']).isApi).toBe(true);
+    const [, entry] = pathManifest.routeEntryFor({ routePath: '/x', methods: ['GET'], handler: () => 'x', responseType: 'json' });
+    expect(entry.response_type).toBe('json');
+    expect(entry.api_signals).toContain('framework:json_response');
+    const listed = pathManifest.buildFrameworkManifest('koa', null, { routes: [{ path: '/k', method: 'GET', response_type: 'json' }] });
+    expect(listed.routes['/k'].response_type).toBe('json');
+  });
+
   test('a route list keeps handlers it already has, and paths it has none for', () => {
     write('app.js', "app.get('/a', (req, res) => res.json({}));");
     const own = () => 1;

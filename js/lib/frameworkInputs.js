@@ -329,6 +329,27 @@ function handlerNames(proto) {
  * exclusions, RouterModule paths, URI versioning). Empty when app isn't a Nest application (or
  * reflect-metadata isn't loaded).
  */
+// Nest's RouteParamtypes.RESPONSE and NEXT: a handler taking @Res() or @Next() answers itself.
+const RESPONSE = 1;
+const NEXT = 2;
+
+/**
+ * How Nest answers for the handler: 'html' when it renders a template (@Render) or redirects
+ * (@Redirect), null for a server-sent event stream (@Sse) or a handler taking @Res() or @Next()
+ * without passthrough, which shapes its own response, and otherwise 'json': Nest sends the
+ * return value as JSON.
+ */
+function nestResponseType(controller, name, handler) {
+  if (metadata('__renderTemplate__', handler) !== undefined || metadata('__redirect__', handler) !== undefined) return 'html';
+  if (metadata('__sse__', handler)) return null;
+  const args = metadata('__routeArguments__', controller, name) || {};
+  for (const [key, value] of Object.entries(args)) {
+    const type = Number(String(key).split(':')[0]);
+    if ((type === RESPONSE || type === NEXT) && !(value && value.data && value.data.passthrough)) return null;
+  }
+  return 'json';
+}
+
 function nestRoutes(app, factory = undefined) {
   const container = app && app.container;
   if (!container || typeof container.getModules !== 'function' || typeof Reflect.getMetadata !== 'function') return [];
@@ -361,7 +382,10 @@ function nestRoutes(app, factory = undefined) {
               ? paths.create({ ctrlPath, modulePath, globalPrefix, controllerVersion, versioningOptions, methodVersion, methodPath }, code)
               : [joinPath(globalPrefix, modulePath, ctrlPath, methodPath)];
             for (const routePath of full) {
-              routes.push({ routePath, methods: verb ? [verb] : EVERY_METHOD, handler, name: `${controller.name}.${name}`, declared });
+              routes.push({
+                routePath, methods: verb ? [verb] : EVERY_METHOD, handler, name: `${controller.name}.${name}`, declared,
+                responseType: nestResponseType(controller, name, handler)
+              });
             }
           }
         }

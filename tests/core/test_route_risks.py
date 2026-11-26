@@ -604,3 +604,15 @@ def test_an_engine_without_exempt_paths_checks_no_strict_inputs(tmp_path, caplog
     assert "AIWAF_STRICT_INPUTS_EXEMPT needs aiwaf-rust 0.2.17" in caplog.text
     assert risks.review("/s", "q=1&extra=2", b"", 65536, None) is None
     assert RouteRisks(manifest, {"allow": [], "exempt": []}).review("/s", "q=1&extra=2", b"", 65536, None)[0] == "unexpected"
+
+
+def test_audit_into_manifest_without_source_keeps_framework_inputs():
+    from aiwaf.core.route_risks import audit_into_manifest
+
+    framework = {"inputs": {"quantity": "int"}, "covers": [], "reasons": [], "standalone": False}
+    manifest = {"routes": {"/orders": {"view": "v", "declared_inputs": framework, "input_declaration": None}}}
+    assert audit_into_manifest(manifest, None) is None
+    route = manifest["routes"]["/orders"]
+    assert route["inputs"] == {"quantity": "int"} and route["inputs_complete"] is False
+    assert "declared_inputs" not in route and "input_declaration" not in route
+    assert "injection_audit" not in manifest

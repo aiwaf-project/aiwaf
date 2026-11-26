@@ -13,9 +13,13 @@ const { handlerText } = require('./sourceRoutes');
 function parseFunctionSource(handler) {
   const source = handlerText(handler);
   if (!parser || source === null) return null;
+  // A class or object method's source, as list(query) { ... } from a Nest controller, parses
+  // only inside an object or a class.
   const candidates = [
     `(${source})`,
-    source
+    source,
+    `({ ${source} })`,
+    `(class { ${source} })`
   ];
   for (const candidate of candidates) {
     try {
@@ -174,6 +178,16 @@ function analyzeHandlerAst(handler) {
         requestBody = true;
         payloadType = payloadType || 'json';
         apiSignals.add(`body_model:${typeRef}`);
+      }
+    }
+
+    // Koa: ctx.body = { ... } (or ctx.response.body) sends the object as JSON.
+    if (node.type === 'AssignmentExpression' && node.operator === '=' && node.right
+      && ['ObjectExpression', 'ArrayExpression'].includes(node.right.type)) {
+      const target = memberParts(node.left).join('.');
+      if (/^(ctx|context)(\.response)?\.body$/.test(target)) {
+        apiScore += 60;
+        apiSignals.add('ctx.body:json');
       }
     }
 

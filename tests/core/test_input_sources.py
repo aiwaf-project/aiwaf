@@ -450,3 +450,25 @@ def test_combining_handlers_keeps_nested_keys_only_where_neither_takes_the_field
     whole = {"inputs": {"customer": "text"}, "covers": ["a"], "reasons": [], "standalone": True}
     assert combine(nested, other)["nested"] == {"customer": ["email"], "note": ["body"]}
     assert "nested" not in combine(nested, whole) and "nested" not in combine(whole, nested)
+
+
+def test_a_type_the_framework_validates_holds_over_an_untyped_read():
+    from aiwaf.core.input_sources import finalize_without_code
+
+    framework = {"inputs": {"quantity": "int", "note": "text"}, "covers": [], "reasons": [], "standalone": False}
+    routes = {"/orders": {"inputs": {"quantity": "text", "note": "int"}, "inputs_complete": True, "declared_inputs": dict(framework)}}
+    finalize(routes)
+    assert routes["/orders"]["inputs"] == {"quantity": "int", "note": "text"}
+
+    unread = {
+        "/orders": {"declared_inputs": dict(framework)},
+        "/items": {"declared_inputs": {**framework, "standalone": True}},
+        "/plain": {},
+    }
+    finalize_without_code(unread)
+    assert unread["/orders"]["inputs"] == {"quantity": "int", "note": "text"}
+    assert unread["/orders"]["inputs_complete"] is False
+    assert [reason["code"] for reason in unread["/orders"]["inputs_incomplete"]] == ["not_audited"]
+    # Even a list complete on its own isn't complete unaudited: its risks weren't looked for.
+    assert unread["/items"]["inputs_complete"] is False
+    assert "inputs" not in unread["/plain"]

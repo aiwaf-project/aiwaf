@@ -479,15 +479,28 @@ public final class InputSourcesCore {
         for (PathManifestCore.RouteInfo route : routes) {
             if (route == null || route.method() == null) continue;
             String path = PathManifestCore.normalizePath(route.path());
-            Map<String, Object> found = frameworkInputs(route.method());
+            Map<String, Object> found = new LinkedHashMap<>(frameworkInputs(route.method()));
+            // The methods this handler serves claim its names, so a GET handler's page isn't a
+            // name the POST handler on the same path reads.
+            Map<String, Set<String>> claims = new TreeMap<>();
+            for (String verb : route.httpMethods() == null ? List.<String>of() : route.httpMethods()) {
+                claims.computeIfAbsent(verb.toUpperCase(Locale.ROOT), key -> new TreeSet<>())
+                        .addAll(((Map<String, String>) found.get("inputs")).keySet());
+            }
+            found.put("methods", claims);
             framework.merge(path, found, (old, now) -> {
                 Map<String, Object> combined = new LinkedHashMap<>(old);
                 Map<String, String> inputs = new LinkedHashMap<>((Map<String, String>) old.get("inputs"));
                 ((Map<String, String>) now.get("inputs")).forEach((name, kind) -> merge(inputs, name, kind));
                 List<Object> reasons = new ArrayList<>((List<Object>) old.get("reasons"));
                 reasons.addAll((List<Object>) now.get("reasons"));
+                Map<String, Set<String>> methods = new TreeMap<>();
+                for (Object side : List.of(old.getOrDefault("methods", Map.of()), now.getOrDefault("methods", Map.of()))) {
+                    ((Map<String, Set<String>>) side).forEach((verb, names) -> methods.computeIfAbsent(verb, key -> new TreeSet<>()).addAll(names));
+                }
                 combined.put("inputs", inputs);
                 combined.put("reasons", reasons);
+                combined.put("methods", methods);
                 combined.put("standalone", Boolean.TRUE.equals(old.get("standalone")) && Boolean.TRUE.equals(now.get("standalone")));
                 return combined;
             });
@@ -543,6 +556,51 @@ public final class InputSourcesCore {
         return narrower ? result : null;
     }
 
+    /**
+     * finalize without the injection audit (--no-audit). The framework's and declared inputs still
+     * go into the manifest, but never as complete: see markNotAudited.
+     */
+    @SuppressWarnings("unchecked")
+    public static Counts finalizeWithoutCode(Map<String, Object> routes, Sources sources) {
+        // A framework list that isn't complete on its own still goes in (finalize skips a route it
+        // can't tell was read otherwise).
+        for (Map.Entry<String, Object> route : routes.entrySet()) {
+            Map<String, Object> framework = sources.framework().get(route.getKey());
+            if (framework != null && !Boolean.TRUE.equals(framework.get("standalone")) && route.getValue() instanceof Map<?, ?> raw) {
+                ((Map<String, Object>) raw).put("inputs_complete", false);
+                ((Map<String, Object>) raw).put("inputs_incomplete", List.of(reason("not_audited", "init ran without the injection audit")));
+            }
+        }
+        Counts counts = finalize(routes, sources);
+        markNotAudited(routes);
+        return counts;
+    }
+
+    /**
+     * Marks every route's input list as not audited. A complete list with no saved risks tells the
+     * engine the route reaches no risky call, which only the injection audit can say; so without
+     * it the types are checked, while strict inputs and the relaxed SQL rules stay off.
+     */
+    @SuppressWarnings("unchecked")
+    public static void markNotAudited(Map<String, Object> routes) {
+        for (Object value : routes.values()) {
+            if (!(value instanceof Map<?, ?> raw) || !raw.containsKey("inputs")) continue;
+            Map<String, Object> data = (Map<String, Object>) raw;
+            data.put("inputs_complete", false);
+            List<Map<String, Object>> reasons = new ArrayList<>();
+            reasons.add(reason("not_audited", "init ran without the injection audit (--no-audit), so the route's risks "
+                    + "aren't known; its types are checked, but the list isn't treated as complete"));
+            if (data.get("inputs_incomplete") instanceof List<?> saved) {
+                for (Object item : saved) {
+                    if (item instanceof Map<?, ?> map && !"not_audited".equals(map.get("code"))) reasons.add((Map<String, Object>) map);
+                }
+            }
+            data.put("inputs_incomplete", List.copyOf(reasons.subList(0, Math.min(reasons.size(), MAX_REASONS))));
+            data.remove("inputs_by_method");
+            data.remove("inputs_nested");
+        }
+    }
+
     public static Counts finalize(Map<String, Object> routes, Sources sources) {
         int complete = 0;
         int incomplete = 0;
@@ -574,9 +632,20 @@ public final class InputSourcesCore {
                 Collection<Object> covers = (Collection<Object>) framework.getOrDefault("covers", List.of());
                 reasons.removeIf(item -> covers.contains(item.get("code")));
                 reasons.addAll((Collection<Map<String, Object>>) framework.getOrDefault("reasons", List.of()));
+                Map<String, Set<String>> frameworkMethods = (Map<String, Set<String>>) framework.getOrDefault("methods", Map.of());
                 ((Map<String, String>) framework.getOrDefault("inputs", Map.of())).forEach((name, kind) -> {
-                    merge(found, name, kind);
-                    shared.add(name);
+                    // A type the framework binds (@RequestParam int page) holds whatever the code
+                    // reading says: the value reaching the handler is converted already.
+                    if (kind != null && !kind.equals("text")) found.put(name, kind);
+                    else merge(found, name, kind);
+                    boolean claimed = false;
+                    for (Map.Entry<String, Set<String>> verb : frameworkMethods.entrySet()) {
+                        if (verb.getValue().contains(name)) {
+                            claims.computeIfAbsent(verb.getKey(), item -> new TreeSet<>()).add(name);
+                            claimed = true;
+                        }
+                    }
+                    if (!claimed) shared.add(name);
                 });
                 read = read || Boolean.TRUE.equals(framework.get("standalone"));
             }

@@ -745,6 +745,35 @@ def _declare(inputs: Dict[str, str], declared: Mapping[str, Any]) -> bool:
     return bool(declared.get("complete", True))
 
 
+def finalize_without_code(routes: Dict[str, Any], **sources: Any) -> Dict[str, Any]:
+    """finalize without the injection audit (--no-audit, or a scan that failed).
+
+    The framework's and declared inputs still go into the manifest, but never as complete: a
+    complete list with no saved risks tells the engine the route reaches no risky call, which
+    only the audit can say. So the types are checked, and strict inputs and the relaxed SQL
+    rules stay off for these routes.
+    """
+    # A framework list that isn't complete on its own still goes in (finalize skips a route it
+    # can't tell was read otherwise).
+    for data in routes.values():
+        framework = data.get("declared_inputs") if isinstance(data, dict) else None
+        if isinstance(framework, dict) and not framework.get("standalone"):
+            data["inputs_complete"] = False
+            data["inputs_incomplete"] = [_reason("not_audited", "init ran without the injection audit")]
+    counts = finalize(routes, **sources)
+    for data in routes.values():
+        if not isinstance(data, dict) or "inputs" not in data:
+            continue
+        data["inputs_complete"] = False
+        reasons = [reason for reason in data.get("inputs_incomplete") or [] if reason.get("code") != "not_audited"]
+        data["inputs_incomplete"] = [_reason(
+            "not_audited", "init ran without the injection audit (--no-audit, or the scan failed), so the route's risks "
+            "aren't known; its types are checked, but the list isn't treated as complete"), *reasons][:_MAX_REASONS]
+        data.pop("inputs_by_method", None)
+        data.pop("inputs_nested", None)
+    return counts
+
+
 def finalize(
     routes: Dict[str, Any],
     *,
@@ -776,7 +805,12 @@ def finalize(
             reasons.extend(framework.get("reasons") or ())
             framework_nested = framework.get("nested") or {}
             for name, kind in (framework.get("inputs") or {}).items():
-                _merge(found, name, kind)
+                # A type the framework validates (a Pydantic int, a schema's integer) holds whatever
+                # the handler's own read says: the value reaching it is checked, or coerced, already.
+                if kind and kind != "text":
+                    found[name] = kind
+                else:
+                    _merge(found, name, kind)
                 if name not in framework_nested:
                     flat.add(name)
             # The framework parses these fields into models that drop undeclared keys, so their
@@ -901,7 +935,7 @@ def sources_from_environment(root: str = ".") -> Dict[str, Any]:
 
 
 __all__ = [
-    "inputs", "declared_on", "class_fields", "resolve_class", "django_inputs", "fastapi_inputs", "canonical",
+    "inputs", "declared_on", "class_fields", "finalize_without_code", "resolve_class", "django_inputs", "fastapi_inputs", "canonical",
     "openapi_inputs", "load_spec", "load_observations", "load_declarations", "finalize", "describe",
     "sources_from_environment", "WHOLE",
 ]
