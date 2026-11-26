@@ -180,6 +180,12 @@ This is how plain Servlet applications get a manifest:
 java -cp <classpath> com.aiwaf.cli.AiwafConsole init --source src --output .aiwaf/paths.json
 ```
 
+`init --app <SpringApplicationClass>` starts the Spring application instead and reads its live
+routes, then closes it. Its web server listens on a free port meanwhile (`--server.port=0`), so
+`init` works while the app, or anything else, holds the configured port. As in Python and
+Node.js, `init` writes nothing when it finds no routes, and every failure (no routes, a class
+or folder it can't find, a usage error) exits non-zero, so a build step running it fails too.
+
 ### SQL detection
 
 AIWAF checks request values for SQL injection with a tokenizer. It tries each value as a

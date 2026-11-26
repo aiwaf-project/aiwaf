@@ -1,12 +1,23 @@
 # Changelog
 
-## Python 1.3.3 / Node.js 1.3.3 — prepared release
+## Python 1.3.3 / Node.js 1.3.3 / Java 1.4.0 — prepared release
 
 - **Release note:** no engine changes. Python 1.3.2, npm 1.3.2, aiwaf-rust 0.2.17 and
   aiwaf-wasm 0.2.13 are published, so `python-v1.3.3` and `js-v1.3.3` can be tagged now.
   Python still requires `aiwaf-rust>=0.2.17`. npm now requires `aiwaf-wasm ^0.2.13` (was
   ^0.2.11, which let an install keep 0.2.11 and lose 1.3.2's per-method lists and nested keys),
-  and the lockfile pins the published 0.2.13.
+  and the lockfile pins the published 0.2.13. Java 1.4.0 isn't on Maven Central yet; it also
+  carries the Java `init` fixes below.
+- **Java `init`, the same fixes:** it no longer writes a manifest with no routes (`--source`,
+  `--app` and `--class` alike), which replaced a working manifest with an empty one and still
+  exited 0. Failures now exit non-zero: 1 when it finds no routes or can't load the class or
+  folder, and 2 for a usage error; before, `--source` and `--class` errors and the usage text
+  all exited 0. A class it can't find is named as such ("Controller class not found: ..."),
+  where the message was the bare class name.
+- **Java `init --app` uses a free port:** Spring Boot's web server started on the app's
+  configured port, so `init` failed while the app, or anything else, held it. It now passes
+  `--server.port=0` unless the arguments set a port. `SpringPathManifest.launchAndDiscover`
+  reads the routes without writing a manifest.
 - **npm `aiwaf init`:** loads the app and writes the manifest from the routes it registers, as
   Python's init does. It finds the app as package.json's main, or `app.js`, `server.js` or
   `index.js` (also under `src/` and `dist/`), or `--app <file>`, with `--export <name>` for a

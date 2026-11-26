@@ -62,4 +62,35 @@ class SpringPathManifestTest {
         assertNotNull(chain.getRequest());
         context.close();
     }
+
+    /** An app with the request mapping a web app has, without the servlet container. */
+    @org.springframework.context.annotation.Configuration
+    @org.springframework.context.annotation.Import(LiveController.class)
+    public static class LiveApp {
+        @org.springframework.context.annotation.Bean
+        public RequestMappingHandlerMapping requestMappingHandlerMapping() {
+            return new RequestMappingHandlerMapping();
+        }
+    }
+
+    @Test
+    void init_listens_on_a_free_port_unless_told_otherwise() {
+        assertEquals(List.of("--server.port=0"), List.of(SpringPathManifest.withFreePort(null)));
+        assertEquals(List.of("--server.port=0", "--debug"), List.of(SpringPathManifest.withFreePort(new String[]{"--debug"})));
+        String[] own = {"--server.port=9090"};
+        assertSame(own, SpringPathManifest.withFreePort(own));
+        String[] spaced = {"--server.port", "9090"};
+        assertSame(spaced, SpringPathManifest.withFreePort(spaced));
+    }
+
+    @Test
+    void launch_and_discover_reads_routes_without_writing() {
+        List<PathManifestCore.RouteInfo> routes = SpringPathManifest.launchAndDiscover(
+                LiveApp.class.getName(), "--spring.main.web-application-type=none");
+        assertEquals(List.of("/live/{uuid}"), routes.stream().map(PathManifestCore.RouteInfo::path).toList());
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () -> SpringPathManifest.launchAndDiscover(" "));
+        IllegalStateException missing = org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+                () -> SpringPathManifest.launchAndDiscover("demo.Missing"));
+        org.junit.jupiter.api.Assertions.assertTrue(missing.getMessage().startsWith("Spring application class not found: demo.Missing"));
+    }
 }

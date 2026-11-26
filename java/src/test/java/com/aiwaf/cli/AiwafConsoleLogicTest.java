@@ -204,4 +204,66 @@ class AiwafConsoleLogicTest {
         String output = out.toString();
         assertTrue(output.contains("noop"));
     }
+
+    @org.springframework.web.bind.annotation.RestController
+    public static class OrdersController {
+        @org.springframework.web.bind.annotation.GetMapping("/orders")
+        public String list() { return "[]"; }
+    }
+
+    private static String stderrOf(Runnable action) {
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        PrintStream oldErr = System.err;
+        PrintStream oldOut = System.out;
+        System.setErr(new PrintStream(err));
+        System.setOut(new PrintStream(new ByteArrayOutputStream()));
+        try {
+            action.run();
+        } finally {
+            System.setErr(oldErr);
+            System.setOut(oldOut);
+        }
+        return err.toString();
+    }
+
+    @Test
+    void init_writes_nothing_when_it_finds_no_routes(@org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+        java.nio.file.Path manifest = directory.resolve("paths.json");
+        java.nio.file.Files.writeString(manifest, "{\"routes\": {\"/kept\": {}}}");
+        java.nio.file.Path empty = java.nio.file.Files.createDirectory(directory.resolve("empty"));
+        int[] status = new int[1];
+        String err = stderrOf(() -> status[0] = AiwafConsole.handleGenerateManifest(
+                new String[]{"init", "--source", empty.toString(), "--output", manifest.toString()}));
+        assertEquals(1, status[0]);
+        assertTrue(err.contains("No routes found in " + empty + " (java-source), so " + manifest + " was not written"), err);
+        assertEquals("{\"routes\": {\"/kept\": {}}}", java.nio.file.Files.readString(manifest));
+    }
+
+    @Test
+    void init_fails_with_a_status_and_a_reason(@org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) {
+        String output = directory.resolve("paths.json").toString();
+        int[] status = new int[1];
+        assertTrue(stderrOf(() -> status[0] = AiwafConsole.handleGenerateManifest(new String[]{"init"})).contains("Usage: aiwaf-cli init"));
+        assertEquals(2, status[0]);
+        assertTrue(stderrOf(() -> status[0] = AiwafConsole.handleGenerateManifest(new String[]{"init", "--class", "demo.Missing", "--output", output}))
+                .contains("Controller class not found: demo.Missing"));
+        assertEquals(1, status[0]);
+        assertTrue(stderrOf(() -> status[0] = AiwafConsole.handleGenerateManifest(new String[]{"init", "--app", "demo.MissingApp", "--output", output}))
+                .contains("Spring application class not found: demo.MissingApp"));
+        assertEquals(1, status[0]);
+        assertTrue(stderrOf(() -> status[0] = AiwafConsole.handleGenerateManifest(new String[]{"init", "--source", directory.resolve("nowhere").toString(), "--output", output}))
+                .contains("Error generating manifest"));
+        assertEquals(1, status[0]);
+        assertTrue(!java.nio.file.Files.exists(java.nio.file.Path.of(output)));
+    }
+
+    @Test
+    void init_reads_one_controller_class(@org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+        java.nio.file.Path manifest = directory.resolve("paths.json");
+        int[] status = new int[1];
+        stderrOf(() -> status[0] = AiwafConsole.handleGenerateManifest(new String[]{
+                "init", "--class", OrdersController.class.getName(), "--output", manifest.toString(), "--no-audit"}));
+        assertEquals(0, status[0]);
+        assertTrue(java.nio.file.Files.readString(manifest).contains("/orders"));
+    }
 }

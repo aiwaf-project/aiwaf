@@ -45,7 +45,11 @@ public final class AiwafConsole {
                 case "geo" -> handleGeo(manager(), args);
                 case "exempt-path", "path-exemptions" -> handleExemptPath(manager(), args);
                 case "whois" -> handleWhois(args);
-                case "generate-manifest", "init" -> handleGenerateManifest(args);
+                case "generate-manifest", "init" -> {
+                    int status = handleGenerateManifest(args);
+                    // A failure must fail the command; success returns, as the other commands do.
+                    if (status != 0) System.exit(status);
+                }
                 case "audit" -> System.exit(handleAudit(args));
                 case "train", "train-model" -> handleCoreCommand("train-model", args);
                 case "replay" -> handleCoreCommand("replay", args);
@@ -264,57 +268,80 @@ public final class AiwafConsole {
         try { return Files.size(path); } catch (IOException ignored) { return 0L; }
     }
 
-    private static void handleGenerateManifest(String[] args) {
+    /**
+     * init: writes .aiwaf/paths.json from the app's routes. Returns the exit status: 0 when it
+     * wrote a manifest, 1 when it couldn't, or found no routes, and 2 for usage errors. A manifest
+     * with no routes is never written: it would look configured while protecting no route, and
+     * would replace one that works.
+     */
+    static int handleGenerateManifest(String[] args) {
         String outputOption = parseOption(args, "--output");
         String output = outputOption != null
                 ? outputOption
                 : (args.length > 1 && !args[1].startsWith("--")
                         ? args[1] : com.aiwaf.core.PathManifestCore.DEFAULT_MANIFEST_PATH);
         String sourceRoot = parseOption(args, "--source");
-        if (sourceRoot != null) {
-            try {
+        String appName = parseOption(args, "--app");
+        String clsName = parseOption(args, "--class");
+        if (sourceRoot == null && appName == null && clsName == null) {
+            System.err.println("Usage: aiwaf-cli init --app <SpringApplicationClass> [--output .aiwaf/paths.json]");
+            System.err.println("   or: aiwaf-cli init --source <folder> [--output .aiwaf/paths.json]");
+            System.err.println("   or: aiwaf-cli init --class <ControllerClass> [--output .aiwaf/paths.json]");
+            return 2;
+        }
+        try {
+            if (sourceRoot != null) {
                 com.aiwaf.core.JavaSourceAnalysisCore.Report report =
                         com.aiwaf.core.JavaSourceAnalysisCore.analyze(java.nio.file.Path.of(sourceRoot), false);
+                report.errors().forEach(error -> System.err.println(error.get("file") + ": not analyzed: " + error.get("error")));
                 Map<String, Object> manifest = new java.util.LinkedHashMap<>(
                         com.aiwaf.core.PathManifestCore.buildManifestFromSource("java-source", report.routes()));
                 if (!hasFlag(args, "--no-audit")) {
                     // The same parse found the routes and the injection findings.
                     com.aiwaf.core.RouteRiskCore.applyReport(report, manifest, inputSources(List.of()));
                 }
-                com.aiwaf.core.PathManifestCore.writeManifest(manifest, java.nio.file.Path.of(output));
+                writeFound(manifest, output, sourceRoot + " (java-source)");
                 printManifestSummary(output, manifest);
-                report.errors().forEach(error -> System.err.println(error.get("file") + ": not analyzed: " + error.get("error")));
-            } catch (IOException | IllegalStateException ex) {
-                System.err.println("Error generating manifest: " + ex.getMessage());
-            } catch (LinkageError ex) {
-                System.err.println("Error generating manifest: source analysis needs a JDK, and this Java runtime has no compiler.");
+                return 0;
             }
-            return;
-        }
-        String appName = parseOption(args, "--app");
-        if (appName != null) {
-            com.aiwaf.spring.SpringPathManifest.Generated generated =
-                    com.aiwaf.spring.SpringPathManifest.launchAndGenerateWithRoutes(appName, output);
-            printManifestSummary(output, generated.manifest());
-            auditIntoManifest(args, output, generated.routes());
-            return;
-        }
-        String clsName = parseOption(args, "--class");
-        if (clsName == null) {
-            System.out.println("Usage: aiwaf-cli init --app <SpringApplicationClass> [--output .aiwaf/paths.json]");
-            System.out.println("   or: aiwaf-cli init --source <folder> [--output .aiwaf/paths.json]");
-            return;
-        }
-        try {
-            Class<?> cls = Class.forName(clsName);
-            List<com.aiwaf.core.PathManifestCore.RouteInfo> routes =
-                    com.aiwaf.core.PathManifestCore.discoverControllerRoutes(cls);
-            com.aiwaf.core.PathManifestCore.generateManifest(routes, output);
-            printManifestSummary(output, com.aiwaf.core.PathManifestCore.buildManifest("spring", routes));
+            List<com.aiwaf.core.PathManifestCore.RouteInfo> routes;
+            String where;
+            if (appName != null) {
+                routes = com.aiwaf.spring.SpringPathManifest.launchAndDiscover(appName);
+                where = appName + " (spring)";
+            } else {
+                Class<?> cls;
+                try {
+                    cls = Class.forName(clsName);
+                } catch (ClassNotFoundException ex) {
+                    throw new IllegalStateException("Controller class not found: " + clsName
+                            + " (check the name and that the app's classes are on the classpath)", ex);
+                }
+                routes = com.aiwaf.core.PathManifestCore.discoverControllerRoutes(cls);
+                where = clsName + " (spring)";
+            }
+            Map<String, Object> manifest = com.aiwaf.core.PathManifestCore.buildManifest("spring", routes);
+            writeFound(manifest, output, where);
+            printManifestSummary(output, manifest);
             auditIntoManifest(args, output, routes);
-        } catch (Exception e) {
-            System.err.println("Error generating manifest: " + e.getMessage());
+            return 0;
+        } catch (LinkageError ex) {
+            System.err.println("Error generating manifest: source analysis needs a JDK, and this Java runtime has no compiler.");
+            return 1;
+        } catch (IOException | RuntimeException ex) {
+            System.err.println("Error generating manifest: " + ex.getMessage());
+            return 1;
         }
+    }
+
+    /** Writes init's manifest, or throws when it has no routes, leaving any manifest there as it was. */
+    static void writeFound(Map<String, Object> manifest, String output, String where) {
+        Object routes = manifest.get("routes");
+        if (!(routes instanceof Map<?, ?> map) || map.isEmpty()) {
+            throw new IllegalStateException("No routes found in " + where + ", so " + output + " was not written. "
+                    + "Check that the app's controllers are loaded (or that --source is the folder holding them).");
+        }
+        com.aiwaf.core.PathManifestCore.writeManifest(manifest, java.nio.file.Path.of(output));
     }
 
     private static boolean hasFlag(String[] args, String flag) {

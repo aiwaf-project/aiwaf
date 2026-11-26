@@ -74,15 +74,30 @@ public final class SpringPathManifest {
 
     /** As launchAndGenerate, also returning the discovered routes. */
     public static Generated launchAndGenerateWithRoutes(String applicationClassName, String outputPath, String... applicationArgs) {
+        List<PathManifestCore.RouteInfo> routes = launchAndDiscover(applicationClassName, applicationArgs);
+        Map<String, Object> manifest = PathManifestCore.buildManifest("spring", routes);
+        PathManifestCore.writeManifest(manifest, Path.of(
+                outputPath == null || outputPath.isBlank() ? PathManifestCore.DEFAULT_MANIFEST_PATH : outputPath));
+        return new Generated(manifest, routes);
+    }
+
+    /**
+     * Start a Spring Boot or plain annotation application context, read its routes, and close it,
+     * writing nothing. A Spring Boot web server listens on a free port meanwhile (server.port=0)
+     * unless applicationArgs set one, so init works while the app, or anything else, holds its port.
+     */
+    public static List<PathManifestCore.RouteInfo> launchAndDiscover(String applicationClassName, String... applicationArgs) {
         if (applicationClassName == null || applicationClassName.isBlank()) {
             throw new IllegalArgumentException("--app requires a Spring application class");
         }
         ConfigurableApplicationContext context = null;
         try {
             Class<?> applicationClass = Class.forName(applicationClassName);
-            context = launch(applicationClass, applicationArgs == null ? new String[0] : applicationArgs);
-            List<PathManifestCore.RouteInfo> routes = discoverRoutes(context);
-            return new Generated(generate(context, outputPath), routes);
+            context = launch(applicationClass, withFreePort(applicationArgs));
+            return discoverRoutes(context);
+        } catch (ClassNotFoundException ex) {
+            throw new IllegalStateException("Spring application class not found: " + applicationClassName
+                    + " (check the name and that the app's classes are on the classpath)", ex);
         } catch (ReflectiveOperationException ex) {
             Throwable cause = ex instanceof InvocationTargetException invocation && invocation.getCause() != null
                     ? invocation.getCause() : ex;
@@ -91,6 +106,18 @@ public final class SpringPathManifest {
         } finally {
             if (context != null) context.close();
         }
+    }
+
+    /** The arguments with --server.port=0 first, unless they already set the port. */
+    static String[] withFreePort(String[] applicationArgs) {
+        String[] given = applicationArgs == null ? new String[0] : applicationArgs;
+        for (String arg : given) {
+            if (arg != null && (arg.startsWith("--server.port=") || arg.equals("--server.port"))) return given;
+        }
+        String[] args = new String[given.length + 1];
+        args[0] = "--server.port=0";
+        System.arraycopy(given, 0, args, 1, given.length);
+        return args;
     }
 
     private static ConfigurableApplicationContext launch(Class<?> applicationClass, String[] applicationArgs)
