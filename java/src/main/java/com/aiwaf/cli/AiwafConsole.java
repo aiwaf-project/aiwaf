@@ -330,15 +330,11 @@ public final class AiwafConsole {
                 where = clsName + " (spring)";
             }
             Map<String, Object> manifest = com.aiwaf.core.PathManifestCore.buildManifest("spring", routes);
-            if (hasFlag(args, "--no-audit")) {
-                // The framework's and declared inputs, without the audit: types only.
-                @SuppressWarnings("unchecked")
-                Map<String, Object> found = (Map<String, Object>) manifest.get("routes");
-                com.aiwaf.core.InputSourcesCore.finalizeWithoutCode(found, inputSources(routes));
-            }
+            // The audit runs before anything is written, so a failed one leaves the old manifest.
+            String audit = auditInMemory(args, output, manifest, routes);
             writeFound(manifest, output, where);
             printManifestSummary(output, manifest);
-            auditIntoManifest(args, output, routes);
+            System.out.println(audit);
             return 0;
         } catch (LinkageError ex) {
             System.err.println("Error generating manifest: source analysis needs a JDK, and this Java runtime has no compiler.");
@@ -378,29 +374,39 @@ public final class AiwafConsole {
         return com.aiwaf.core.InputSourcesCore.forRoutes(routes, base);
     }
 
-    /** Saves injection findings from source into a written manifest. A failed scan leaves it unchanged. */
-    static void auditIntoManifest(String[] args, String output) {
-        auditIntoManifest(args, output, List.of());
-    }
-
-    static void auditIntoManifest(String[] args, String output, java.util.Collection<com.aiwaf.core.PathManifestCore.RouteInfo> routes) {
+    /**
+     * Combines the injection audit and the framework's inputs into a manifest about to be written,
+     * and says what was saved. Without the audit (--no-audit, or a source with no Java files) the
+     * inputs keep their types but no list counts as complete: only the audit can say a route
+     * reaches no risky call. Throws when the source is missing or the scan fails, so init stops
+     * without writing.
+     */
+    @SuppressWarnings("unchecked")
+    static String auditInMemory(String[] args, String output, Map<String, Object> manifest,
+                                java.util.Collection<com.aiwaf.core.PathManifestCore.RouteInfo> routes) throws IOException {
+        Map<String, Object> found = (Map<String, Object>) manifest.get("routes");
         if (hasFlag(args, "--no-audit")) {
-            return;
+            com.aiwaf.core.InputSourcesCore.finalizeWithoutCode(found, inputSources(routes));
+            return "Injection checks: not run (--no-audit)";
         }
         String source = parseOption(args, "--audit-source");
         if (source == null) {
             source = java.nio.file.Files.isDirectory(java.nio.file.Path.of("src", "main", "java")) ? "src/main/java" : ".";
         }
-        try {
-            com.aiwaf.core.JavaSourceAnalysisCore.Report report =
-                    com.aiwaf.core.JavaSourceAnalysisCore.analyze(java.nio.file.Path.of(source), false);
-            System.out.println("Injection checks: " + com.aiwaf.core.RouteRiskCore.formatCounts(
-                    com.aiwaf.core.RouteRiskCore.updateManifest(report, java.nio.file.Path.of(output), inputSources(routes)), output));
-        } catch (IOException | RuntimeException ex) {
-            System.err.println("Injection audit skipped: " + ex.getMessage());
-        } catch (LinkageError ex) {
-            System.err.println("Injection audit skipped: source analysis needs a JDK, and this Java runtime has no compiler.");
+        java.nio.file.Path root = java.nio.file.Path.of(source);
+        if (!java.nio.file.Files.exists(root)) {
+            throw new IllegalStateException("The audit source " + source + " doesn't exist, so " + output
+                    + " was not written. Pass the app's source folder with --audit-source, or --no-audit.");
         }
+        com.aiwaf.core.JavaSourceAnalysisCore.Report report = com.aiwaf.core.JavaSourceAnalysisCore.analyze(root, false);
+        if (report.filesScanned() == 0) {
+            System.err.println("The injection audit found no Java files in " + source + ", so no route counts as audited.");
+            com.aiwaf.core.InputSourcesCore.finalizeWithoutCode(found, inputSources(routes));
+            return "Injection checks: not run (no Java files in " + source + ")";
+        }
+        report.errors().forEach(error -> System.err.println(error.get("file") + ": not analyzed: " + error.get("error")));
+        return "Injection checks: " + com.aiwaf.core.RouteRiskCore.formatCounts(
+                com.aiwaf.core.RouteRiskCore.applyReport(report, manifest, inputSources(routes)), output);
     }
 
     /** Reports possible injection paths. Returns the exit status. */

@@ -293,4 +293,30 @@ class AiwafConsoleLogicTest {
         String parsed = java.nio.file.Files.readString(source);
         assertTrue(parsed.contains("not_audited") && !parsed.contains("injection_risks") && !parsed.contains("injection_audit"), parsed);
     }
+
+    @Test
+    void init_keeps_the_old_manifest_when_the_audit_source_is_missing(@org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+        java.nio.file.Path manifest = directory.resolve("paths.json");
+        java.nio.file.Files.writeString(manifest, "{\"routes\": {\"/kept\": {}}}");
+        int[] status = new int[1];
+        String err = stderrOf(() -> status[0] = AiwafConsole.handleGenerateManifest(new String[]{
+                "init", "--class", PagedController.class.getName(), "--output", manifest.toString(),
+                "--audit-source", directory.resolve("nowhere").toString()}));
+        assertEquals(1, status[0]);
+        assertTrue(err.contains("doesn't exist, so " + manifest + " was not written"), err);
+        assertEquals("{\"routes\": {\"/kept\": {}}}", java.nio.file.Files.readString(manifest));
+    }
+
+    @Test
+    void an_audit_that_reads_no_files_counts_as_no_audit(@org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+        java.nio.file.Path manifest = directory.resolve("paths.json");
+        java.nio.file.Path empty = java.nio.file.Files.createDirectory(directory.resolve("empty"));
+        int[] status = new int[1];
+        String err = stderrOf(() -> status[0] = AiwafConsole.handleGenerateManifest(new String[]{
+                "init", "--class", PagedController.class.getName(), "--output", manifest.toString(), "--audit-source", empty.toString()}));
+        assertEquals(0, status[0]);
+        assertTrue(err.contains("found no Java files"), err);
+        String text = java.nio.file.Files.readString(manifest);
+        assertTrue(text.contains("not_audited") && !text.contains("injection_audit"), text);
+    }
 }

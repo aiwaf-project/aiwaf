@@ -37,11 +37,13 @@ def _init(argv) -> None:
     from aiwaf.core.path_manifest import EmptyManifestError, write_found_manifest
     from aiwaf.fast.path_manifest import generate_fastapi_manifest
 
+    from aiwaf.core.route_risks import AuditError
+
     app = _load_fastapi_app(args.app)
-    manifest = generate_fastapi_manifest(app, args.output, audit_source=".", write=False)
     try:
+        manifest = generate_fastapi_manifest(app, args.output, audit_source=".", write=False)
         write_found_manifest(manifest, args.output, f"{args.app} (fastapi)")
-    except EmptyManifestError as exc:
+    except (EmptyManifestError, AuditError) as exc:
         sys.stderr.write(f"{exc}\n")
         raise SystemExit(1) from None
     print(f"Generated {args.output}")

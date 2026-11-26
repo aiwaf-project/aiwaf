@@ -1,6 +1,33 @@
 # Changelog
 
-## Python 1.3.3 / Node.js 1.3.3 / Java 1.4.0 — prepared release
+## Unreleased (after Python 1.3.3 / Node.js 1.3.3; Java 1.4.0 prepared)
+
+- **Routes `init` missed:**
+  - FastAPI routes added with `include_router()`, which FastAPI keeps as one entry and resolves
+    while serving, and routes of apps attached with `mount()`, nested mounts included, all under
+    their prefixes. Only top-level `@app` routes were saved.
+  - An Express router mounted at several prefixes (`app.use(['/account', '/me'], router)`), in
+    Express 4 (one pattern with `|`) and Express 5 (one matcher per path). The router was skipped.
+  - Fastify routes registered before the AIWAF plugin, which its `onRoute` hook never sees: they
+    now come from Fastify's own route table, with the plugin's records kept for the rest.
+- **A failed audit no longer replaces a manifest:** a missing audit source (`--source` in Python
+  and npm, `--audit-source` in Java) or a scan that fails now stops `init` with exit status 1,
+  writing nothing. Python and npm warned and carried on; Java wrote the manifest first, so it
+  replaced a working one with one missing its typed and per-method inputs, and exited 0. Java
+  now audits before writing, as Python and npm do.
+- **An audit that reads no files is no audit:** an audit source holding no Python, JavaScript or
+  Java files left lists marked complete, as if every route had been checked for risky calls. It
+  now counts as `--no-audit`, with a warning: types are saved and checked, no list is complete,
+  and no `injection_audit` is saved.
+- **npm audit crash on inputs named like object properties:** a handler (or a helper it
+  calls) reading `body.constructor` or `body.toString` crashed the audit with "is not
+  iterable". The audit used to log that as skipped and save no findings or inputs; now that a
+  failed scan stops `init`, it surfaced, and those names are ordinary keys.
+- **Route-inventory tests** compare `init`'s routes with what each framework reports or serves:
+  FastAPI's OpenAPI paths for each mounted app, a real request to every Express route, and
+  Fastify's `hasRoute()`.
+
+## Python 1.3.3 / Node.js 1.3.3 (released) / Java 1.4.0 (prepared)
 
 - **Release note:** no engine changes. Python 1.3.2, npm 1.3.2, aiwaf-rust 0.2.17 and
   aiwaf-wasm 0.2.13 are published, so `python-v1.3.3` and `js-v1.3.3` can be tagged now.

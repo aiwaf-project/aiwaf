@@ -277,8 +277,36 @@ def test_audit_into_manifest_saves_findings_and_survives_failures(tmp_path, capl
     manifest["injection_audit"]["unlinked_findings"] = 2
     assert "2 findings couldn't be tied" in describe_audit(manifest)
     with caplog.at_level(logging.WARNING, logger="aiwaf.injection_risk"):
-        assert audit_into_manifest({"routes": {}}, str(tmp_path / "missing")) is None
-    assert "Injection audit skipped" in caplog.text
+        (tmp_path / "empty").mkdir()
+        assert audit_into_manifest({"routes": {}}, str(tmp_path / "empty")) is None
+    assert "found no Python files" in caplog.text
+
+
+def test_audit_into_manifest_refuses_a_missing_or_failing_source(tmp_path, monkeypatch):
+    from aiwaf.core import injection_analysis
+    from aiwaf.core.route_risks import AuditError, audit_into_manifest
+
+    with pytest.raises(AuditError, match="doesn't exist"):
+        audit_into_manifest({"routes": {}}, str(tmp_path / "missing"))
+
+    def broken(_path):
+        raise RuntimeError("parser crashed")
+
+    monkeypatch.setattr(injection_analysis, "analyze_path", broken)
+    with pytest.raises(AuditError, match="parser crashed"):
+        audit_into_manifest({"routes": {}}, str(tmp_path))
+
+
+def test_an_audit_that_reads_no_files_counts_as_no_audit(tmp_path):
+    from aiwaf.core.route_risks import audit_into_manifest
+
+    framework = {"inputs": {"quantity": "int"}, "covers": [], "reasons": [], "standalone": True}
+    manifest = {"routes": {"/orders": {"view": "v", "declared_inputs": framework}}}
+    assert audit_into_manifest(manifest, str(tmp_path)) is None
+    route = manifest["routes"]["/orders"]
+    assert route["inputs"] == {"quantity": "int"} and route["inputs_complete"] is False
+    assert [reason["code"] for reason in route["inputs_incomplete"]] == ["not_audited"]
+    assert "injection_audit" not in manifest
 
 
 ORDINARY = json.loads((Path(__file__).parents[1] / "fixtures" / "ordinary_text.json").read_text(encoding="utf-8"))["values"]

@@ -364,6 +364,10 @@ aiwaf init --framework flask --app app:app --source src    # audits another fold
 aiwaf init --framework flask --app app:app --no-audit      # saves no route checks
 ```
 
+When the audit source doesn't exist, or the scan fails, `init` stops with exit status 1 and
+writes nothing, so an existing manifest stays. A source with no files to read counts as
+`--no-audit`, with a warning.
+
 With `--no-audit` the inputs `init` still knows are saved with their types: the framework's
 own lists (a Fastify or Hapi schema, Nest DTOs, FastAPI parameters, Spring's bound parameters
 and body classes), `.aiwaf/inputs.json`, and in Java `--source` what the parse read. Their

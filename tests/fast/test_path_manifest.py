@@ -178,3 +178,54 @@ def test_fastapi_manifest_detects_api_endpoint_from_response_model_and_body_mode
     assert route["api_confidence"] >= 0.5
     assert route["request_body"] is True
     assert "response_model" in route["api_signals"]
+
+
+def test_fastapi_manifest_lists_every_route_the_app_serves():
+    """Compared with what FastAPI itself reports: each app's OpenAPI paths under its mount."""
+    from fastapi import APIRouter
+
+    app = FastAPI()
+    items = APIRouter(prefix="/items")
+    nested = APIRouter(prefix="/notes")
+
+    @nested.get("/{note_id}")
+    def read_note(note_id: int):
+        return {"id": note_id}
+
+    @items.get("/{item_id}")
+    def read_item(item_id: int, verbose: bool = False):
+        return {"id": item_id}
+
+    items.include_router(nested)
+    app.include_router(items, prefix="/v1")
+    admin = FastAPI()
+
+    @admin.post("/stats")
+    def stats(days: int = 7):
+        return {"days": days}
+
+    inner = FastAPI()
+
+    @inner.get("/deep")
+    def deep(q: str = ""):
+        return {"q": q}
+
+    admin.mount("/inner", inner)
+    app.mount("/admin", admin)
+
+    from starlette.staticfiles import StaticFiles
+
+    app.mount("/static", StaticFiles(directory=".", check_dir=False), name="static")
+
+    @app.get("/health")
+    def health():
+        return {"ok": True}
+
+    served = set(app.openapi()["paths"])
+    served |= {"/admin" + path for path in admin.openapi()["paths"]}
+    served |= {"/admin/inner" + path for path in inner.openapi()["paths"]}
+    routes = extract_fastapi_routes(app)
+    assert set(routes) == served == {"/health", "/v1/items/{item_id}", "/v1/items/notes/{note_id}", "/admin/stats", "/admin/inner/deep"}
+    assert routes["/admin/stats"]["methods"] == ["POST"]
+    assert routes["/v1/items/{item_id}"]["declared_inputs"]["inputs"] == {"verbose": "bool"}
+

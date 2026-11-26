@@ -21,10 +21,12 @@ class Command(BaseCommand):
         from aiwaf.django.path_manifest import generate_django_manifest
 
         output = options.get("output") or ".aiwaf/paths.json"
-        manifest = generate_django_manifest(output, audit_source=".", write=False)
+        from aiwaf.core.route_risks import AuditError
+
         try:
+            manifest = generate_django_manifest(output, audit_source=".", write=False)
             write_found_manifest(manifest, output, "the Django URLconf")
-        except EmptyManifestError as exc:
+        except (EmptyManifestError, AuditError) as exc:
             raise CommandError(str(exc)) from None
         self.stdout.write(self.style.SUCCESS(f"Generated {output}"))
         self.stdout.write(f"Framework: {manifest['framework']}")

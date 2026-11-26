@@ -196,23 +196,29 @@ def _handle_init(argv) -> None:
         framework = framework or _infer_framework_from_app(app)
 
     framework = _detect_framework(framework, app)
-    if framework == "django":
-        _configure_django_for_init(args.settings)
+    from aiwaf.core.route_risks import AuditError
 
-        from aiwaf.django.path_manifest import generate_django_manifest
+    try:
+        if framework == "django":
+            _configure_django_for_init(args.settings)
 
-        manifest = generate_django_manifest(args.output, audit_source=audit_source, write=False)
-    else:
-        if app is None:
-            parser.error("--app is required for Flask/FastAPI")
-        if framework == "flask":
-            from aiwaf.flask.path_manifest import generate_flask_manifest
+            from aiwaf.django.path_manifest import generate_django_manifest
 
-            manifest = generate_flask_manifest(app, args.output, audit_source=audit_source, write=False)
+            manifest = generate_django_manifest(args.output, audit_source=audit_source, write=False)
         else:
-            from aiwaf.fast.path_manifest import generate_fastapi_manifest
+            if app is None:
+                parser.error("--app is required for Flask/FastAPI")
+            if framework == "flask":
+                from aiwaf.flask.path_manifest import generate_flask_manifest
 
-            manifest = generate_fastapi_manifest(app, args.output, audit_source=audit_source, write=False)
+                manifest = generate_flask_manifest(app, args.output, audit_source=audit_source, write=False)
+            else:
+                from aiwaf.fast.path_manifest import generate_fastapi_manifest
+
+                manifest = generate_fastapi_manifest(app, args.output, audit_source=audit_source, write=False)
+    except AuditError as exc:
+        sys.stderr.write(f"{exc} {args.output} was not written.\n")
+        raise SystemExit(1) from None
 
     from aiwaf.core.path_manifest import EmptyManifestError, write_found_manifest
     from aiwaf.core.route_risks import describe_audit

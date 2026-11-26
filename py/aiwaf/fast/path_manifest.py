@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
-from typing import Any
+from typing import Any, Optional
 
 from aiwaf.core.api_detection import detect_api_endpoint
 from aiwaf.core.auth_detection import detect_auth_endpoint
@@ -135,10 +135,61 @@ def _methods(route: Any, endpoint: Any = None) -> list[str]:
     return sorted(methods or {"GET"})
 
 
+def _join(prefix: str, path: str) -> str:
+    """A route's path under a mount or include prefix."""
+    if not prefix:
+        return path
+    if not path or path == "/":
+        return prefix.rstrip("/") or "/"
+    return prefix.rstrip("/") + "/" + path.lstrip("/")
+
+
+def _walk_routes(routes, prefix: str = "", mounts: Optional[list] = None, depth: int = 0):
+    """Every endpoint route the app serves, as (full path, route), with its mounts.
+
+    Routes from include_router() (which FastAPI keeps as one entry whose routes it resolves when
+    serving), from apps and routers attached with mount(), and from those apps' own included
+    routers, all under their prefixes. mounts collects the mount prefixes.
+    """
+    if depth > 8:
+        return
+    for route in routes or ():
+        candidates = getattr(route, "effective_candidates", None)
+        if callable(candidates):  # FastAPI's include_router(): the router, with its prefix applied.
+            try:
+                found = candidates()
+            except Exception:  # noqa: BLE001 - a private FastAPI API; skip it rather than fail init
+                continue
+            for candidate in found:
+                if callable(getattr(candidate, "effective_candidates", None)):
+                    yield from _walk_routes([candidate], prefix, mounts, depth + 1)
+                    continue
+                original = getattr(candidate, "original_route", None)
+                path = getattr(candidate, "path", "") or getattr(getattr(candidate, "starlette_route", None), "path", "")
+                if original is not None and path:
+                    yield _join(prefix, path), original
+            continue
+        path = getattr(route, "path", None)
+        if getattr(route, "endpoint", None) is None and hasattr(route, "routes"):
+            # A Mount (an app or router attached with mount()), or a Host.
+            inner = prefix if path is None else _join(prefix, path)
+            if mounts is not None and path:
+                mounts.append(inner.rstrip("/") + "/")
+            try:
+                children = list(route.routes or ())
+            except Exception:  # noqa: BLE001 - a mounted app without routes, as StaticFiles
+                children = []
+            yield from _walk_routes(children, inner, mounts, depth + 1)
+            continue
+        if path:
+            yield _join(prefix, path), route
+
+
 def extract_fastapi_routes(app) -> dict[str, dict[str, Any]]:
     routes: dict[str, dict[str, Any]] = {}
-    for route in getattr(app, "routes", []):
-        path_template = getattr(route, "path", None)
+    mounted: list = []
+    for full_path, route in _walk_routes(getattr(app, "routes", []), mounts=mounted):
+        path_template = full_path
         raw_endpoint = getattr(route, "endpoint", None)
         endpoint = _unwrap_endpoint(raw_endpoint)
         if not path_template or endpoint is None:
@@ -183,8 +234,6 @@ def extract_fastapi_routes(app) -> dict[str, dict[str, Any]]:
         if declaration is not None:
             entry["input_declaration"] = declaration
         routes[path] = merge_entries(routes.get(path), entry)
-    from starlette.routing import Mount
-    mounted = [route.path.rstrip('/') + '/' for route in getattr(app, 'routes', []) if isinstance(route, Mount)]
     return mask_shadowed_declarations(routes, mounted)
 
 

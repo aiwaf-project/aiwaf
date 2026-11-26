@@ -123,7 +123,8 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
   const inputs = {};
   const reasons = [];
   // Keys read inside an input, as name in req.body.user.name; and inputs used any other way.
-  const nested = {};
+  // Prototype-free, so an input named constructor or toString is a key like any other.
+  const nested = Object.create(null);
   const flat = new Set();
   // Where each name was read: from a body container, or something else.
   const fromBody = new Set();
@@ -169,7 +170,9 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
         : handlerInputs(target, found.scope.schemas || schemas, other, '', { [name.name]: label });
       for (const [key, kind] of Object.entries(result.inputs)) {
         merge(inputs, key, kind);
-        if (result.nested && result.nested[key]) for (const sub of result.nested[key]) (nested[key] = nested[key] || new Set()).add(sub);
+        if (result.nested && Object.prototype.hasOwnProperty.call(result.nested, key)) {
+          for (const sub of result.nested[key]) (nested[key] = nested[key] || new Set()).add(sub);
+        }
         else flat.add(key);
       }
       for (const reason of result.reasons) {
@@ -766,9 +769,10 @@ function mergeInto(routes, path, entry) {
   for (const [name, kind] of Object.entries(entry.inputs)) {
     merge(data.inputs, name, kind);
     // An input's inner keys are only known when every handler reading it reads them.
-    if (entry.nested && entry.nested[name]) {
-      data._nested = data._nested || {};
-      data._nested[name] = [...new Set([...(data._nested[name] || []), ...entry.nested[name]])].sort();
+    const own = (table, key) => Boolean(table) && Object.prototype.hasOwnProperty.call(table, key);
+    if (own(entry.nested, name)) {
+      data._nested = data._nested || Object.create(null);
+      data._nested[name] = [...new Set([...(own(data._nested, name) ? data._nested[name] : []), ...entry.nested[name]])].sort();
     } else {
       data._flat = [...new Set([...(data._flat || []), name])];
     }

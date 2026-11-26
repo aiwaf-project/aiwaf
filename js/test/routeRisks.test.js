@@ -269,7 +269,7 @@ describe('route risks', () => {
     expect(() => applyReport({ findings: [] }, { routes: [] })).toThrow('no routes');
   });
 
-  test('manifest generation saves audit findings, and a failed scan saves none', () => {
+  test('manifest generation saves audit findings, and a missing source is an error', () => {
     const { generateFrameworkManifest, auditIntoManifest } = require('../lib/pathManifest');
     fs.writeFileSync(path.join(directory, 'app.js'), "app.get('/x', (req, res) => { db.query('SELECT ' + req.query.id); });");
     const output = path.join(directory, 'out', 'paths.json');
@@ -278,13 +278,8 @@ describe('route risks', () => {
     expect(manifest.routes['/x'].injection_risks).toEqual([{ sink: 'sql', input: 'id', confidence: 'high' }]);
     expect(loadManifest(output).routes['/y'].injection_risks).toBeUndefined();
     expect(generateFrameworkManifest('express', null, output, { routes }).injection_audit).toBeUndefined();
-    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
-    try {
-      expect(auditIntoManifest({ routes: {} }, path.join(directory, 'missing'))).toBeNull();
-      expect(warn.mock.calls[0][0]).toContain('Injection audit skipped');
-    } finally {
-      warn.mockRestore();
-    }
+    // A missing source stops init, so a good manifest isn't replaced by one without risks.
+    expect(() => auditIntoManifest({ routes: {} }, path.join(directory, 'missing'))).toThrow(/doesn't exist/);
   });
 
   test('the audit command saves to a manifest', () => {

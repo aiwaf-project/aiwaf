@@ -99,6 +99,84 @@ describe('aiwaf init', () => {
   });
 });
 
+describe('route inventory: init lists what the framework serves', () => {
+  test('Express routers mounted at several prefixes, and twice', async () => {
+    const output = path.join(dir, 'paths.json');
+    const { io } = capture();
+    expect(await runInit(['--app', fixture('express', 'multi.js'), '--output', output, '--no-audit'], io)).toBe(0);
+    const listed = Object.keys(readRoutes(output)).sort();
+    expect(listed).toEqual(['/account/profile', '/me/profile', '/members/:member/posts', '/one/list', '/two/list', '/users/:user/posts']);
+    // Every listed route answers through the app itself, and an unlisted one doesn't.
+    const app = require(fixture('express', 'multi.js'));
+    const server = await new Promise(resolve => { const started = app.listen(0, () => resolve(started)); });
+    try {
+      const status = async route => (await fetch(`http://127.0.0.1:${server.address().port}${route.replace(/:\w+/g, 'x')}`)).status;
+      for (const route of listed) expect([route, await status(route)]).toEqual([route, 200]);
+      expect(await status('/three/list')).toBe(404);
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+    }
+  });
+
+  test('Fastify routes registered before the AIWAF plugin', async () => {
+    const output = path.join(dir, 'paths.json');
+    const { io } = capture();
+    const app = fixture('fastify-before', 'app.js');
+    expect(await runInit(['--app', app, '--output', output, '--source', fixture('fastify-before')], io)).toBe(0);
+    const routes = readRoutes(output);
+    expect(Object.keys(routes).sort()).toEqual(['/early', '/late']);
+    expect(routes['/late'].inputs).toEqual({ n: 'int' });
+    const fastify = require(app);
+    await fastify.ready();
+    try {
+      for (const [route, entry] of Object.entries(routes)) {
+        for (const method of entry.methods) expect(fastify.hasRoute({ url: route, method })).toBe(true);
+      }
+    } finally {
+      await fastify.close();
+    }
+  });
+});
+
+describe('the audit', () => {
+  test('a missing audit source fails init and keeps the old manifest', async () => {
+    const output = path.join(dir, 'paths.json');
+    fs.writeFileSync(output, '{"routes": {"/kept": {}}}');
+    const { lines, io } = capture();
+    expect(await runInit(['--app', fixture('express', 'app.js'), '--output', output, '--source', path.join(dir, 'nowhere')], io)).toBe(1);
+    expect(lines.err.join('\n')).toMatch(/The audit source .*nowhere doesn't exist/);
+    expect(fs.readFileSync(output, 'utf8')).toBe('{"routes": {"/kept": {}}}');
+  });
+
+  test('an audit that reads no files counts as no audit', async () => {
+    const output = path.join(dir, 'paths.json');
+    const empty = path.join(dir, 'empty');
+    fs.mkdirSync(empty);
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { io } = capture();
+      expect(await runInit(['--app', fixture('fastify-schema', 'app.js'), '--output', output, '--source', empty], io)).toBe(0);
+      expect(warn.mock.calls.flat().join('\n')).toMatch(/found no JavaScript or TypeScript files/);
+    } finally {
+      warn.mockRestore();
+    }
+    const manifest = JSON.parse(fs.readFileSync(output, 'utf8'));
+    expect(manifest.injection_audit).toBeUndefined();
+    expect(manifest.routes['/orders']).toMatchObject({ inputs: { quantity: 'int', sku: 'text' }, inputs_complete: false });
+  });
+
+  test('a scan that fails is an error', () => {
+    const pathManifest = require('../lib/pathManifest');
+    const analysis = require('../lib/injectionAnalysis');
+    const spy = jest.spyOn(analysis, 'analyzePath').mockImplementation(() => { throw new Error('parser crashed'); });
+    try {
+      expect(() => pathManifest.auditIntoManifest({ routes: {} }, dir)).toThrow(pathManifest.AuditError);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
 describe('aiwaf manifest', () => {
   test('without a route list, loads the app as init does', async () => {
     const output = path.join(dir, 'paths.json');

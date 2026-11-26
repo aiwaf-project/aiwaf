@@ -306,12 +306,17 @@ def apply_report(report: Mapping[str, Any], manifest: dict, sources: Optional[Ma
     return {"routes": len(collected), "linked": linked, "unlinked": unlinked, "inputs": typed}
 
 
+class AuditError(RuntimeError):
+    """init's injection audit couldn't run, so init must not write a manifest."""
+
+
 def audit_into_manifest(manifest: dict, source: Optional[str]) -> Optional[dict[str, int]]:
     """Scan source and save its findings into a manifest that's about to be written.
 
-    Returns the counts, or None when source is None or the scan fails. A failed scan leaves the
-    manifest without saved risks, so routes keep their normal checks; the framework's and
-    declared inputs are saved either way.
+    Returns the counts, or None when there was no audit: source is None, or the scan read no
+    files. Then the framework's and declared inputs are still saved, with their types, but not as
+    complete, since only an audit can say a route reaches no risky call. Raises AuditError when
+    source doesn't exist or the scan fails, so init stops without replacing a good manifest.
     """
     try:
         sources = input_sources.sources_from_environment()
@@ -322,15 +327,20 @@ def audit_into_manifest(manifest: dict, source: Optional[str]) -> Optional[dict[
     try:
         if source is None:
             return None
-        try:
-            from .injection_analysis import analyze_path
+        if not os.path.exists(str(source)):
+            raise AuditError(f"The audit source {source} doesn't exist. Pass the app's source folder with --source, or --no-audit.")
+        from .injection_analysis import analyze_path
 
-            counts = apply_report(analyze_path(str(source)), manifest, sources)
-            audited = True
-            return counts
-        except Exception as error:  # noqa: BLE001 - a scan problem must not stop init
-            LOGGER.warning("Injection audit skipped: %s", error)
+        try:
+            report = analyze_path(str(source))
+        except Exception as error:  # noqa: BLE001 - reported to init, which stops
+            raise AuditError(f"The injection audit of {source} failed: {error}") from error
+        if not report.get("files_scanned"):
+            LOGGER.warning("The injection audit found no Python files in %s, so no route counts as audited.", source)
             return None
+        counts = apply_report(report, manifest, sources)
+        audited = True
+        return counts
     finally:
         routes = manifest.get("routes") or {}
         if not audited:

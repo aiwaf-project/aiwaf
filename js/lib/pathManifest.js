@@ -440,21 +440,8 @@ function routerOf(app) {
   }
 }
 
-/**
- * Where a router layer is mounted, as in app.use('/account', router): '' at the root, or null
- * when its pattern can't be read back as a path. Express 4 keeps the pattern on the layer;
- * Express 5 only inside its matcher, read through the inspector.
- */
-function mountPath(layer) {
-  if (layer.slash || (layer.regexp && layer.regexp.fast_slash)) return '';
-  let regexp = layer.regexp;
-  let keys = layer.keys || [];
-  if (!(regexp instanceof RegExp) && Array.isArray(layer.matchers) && layer.matchers[0]) {
-    const values = require('./frameworkInputs').closureValues(layer.matchers[0]);
-    regexp = (values.find(([, value]) => value instanceof RegExp) || [])[1];
-    keys = (values.find(([name]) => name === 'keys') || [])[1] || [];
-  }
-  if (!(regexp instanceof RegExp)) return null;
+// One mount pattern's path, '' at the root, or null when it can't be read back as a path.
+function patternPath(regexp, keys) {
   let source = regexp.source.replace(/^\^/, '');
   // The end of a mount pattern: Express 4's \/?(?=\/|$), Express 5's (?:\/$)?(?=\/|$).
   for (const tail of ['\\/?(?=\\/|$)', '(?:\\/$)?(?=\\/|$)', '(?=\\/|$)']) {
@@ -479,13 +466,66 @@ function mountPath(layer) {
   return /[()[\]*+?|^$]/.test(path) ? null : path;
 }
 
+// Splits a pattern at its top-level |, as Express 4 compiles app.use(['/a', '/b'], router).
+function alternatives(source) {
+  const parts = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === '\\') { index += 1; continue; }
+    if (char === '(' || char === '[') depth += 1;
+    else if (char === ')' || char === ']') depth -= 1;
+    else if (char === '|' && depth === 0) {
+      parts.push(source.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(source.slice(start));
+  return parts;
+}
+
+/**
+ * Every path a router layer is mounted at, as in app.use(['/account', '/me'], router): '' at the
+ * root. Empty when a pattern can't be read back as a path. Express 4 keeps the pattern on the
+ * layer; Express 5 keeps one matcher per path, read through the inspector.
+ */
+function mountPaths(layer) {
+  if (layer.slash || (layer.regexp && layer.regexp.fast_slash)) return [''];
+  const patterns = [];
+  if (layer.regexp instanceof RegExp) {
+    let offset = 0;
+    const keys = layer.keys || [];
+    for (const part of alternatives(layer.regexp.source)) {
+      // Express 4 numbers an alternation's keys across every path, in order.
+      const count = (part.match(/\((?!\?)/g) || []).length;
+      patterns.push([new RegExp(part, layer.regexp.flags), keys.slice(offset, offset + count)]);
+      offset += count;
+    }
+  } else if (Array.isArray(layer.matchers)) {
+    for (const matcher of layer.matchers) {
+      const values = require('./frameworkInputs').closureValues(matcher);
+      const regexp = (values.find(([, value]) => value instanceof RegExp) || [])[1];
+      const keys = (values.find(([name]) => name === 'keys') || [])[1] || [];
+      if (regexp instanceof RegExp) patterns.push([regexp, keys]);
+    }
+  }
+  const paths = patterns.map(([regexp, keys]) => patternPath(regexp, keys));
+  return paths.length && paths.every(item => item !== null) ? paths : [];
+}
+
+/** Where a router layer is mounted: its first path (see mountPaths), or null. */
+function mountPath(layer) {
+  const paths = mountPaths(layer);
+  return paths.length ? paths[0] : null;
+}
+
 function extractExpressRoutes(app) {
   const routes = {};
   // Routes on the app, and on routers it mounts, under their mount paths.
   const visit = (stack, prefix, depth) => (stack || []).forEach(layer => {
     if (!layer.route && layer.handle && Array.isArray(layer.handle.stack) && depth < 8) {
-      const mounted = mountPath(layer);
-      if (mounted !== null) visit(layer.handle.stack, `${prefix}${mounted}`, depth + 1);
+      for (const mounted of mountPaths(layer)) visit(layer.handle.stack, `${prefix}${mounted}`, depth + 1);
       return;
     }
     add(layer, prefix);
@@ -550,9 +590,29 @@ function fastifyRouteList(fastify) {
   return list;
 }
 
+/**
+ * A Fastify app's routes, as a route list: the AIWAF plugin's records (with handlers and schemas)
+ * and, for routes registered before the plugin, which its onRoute hook never saw, Fastify's own
+ * route table.
+ */
+function fastifyRoutes(fastify) {
+  const recorded = Array.isArray(fastify?.aiwafRoutes) ? fastify.aiwafRoutes.filter(route => route && typeof route === 'object') : [];
+  const seen = new Set();
+  for (const route of recorded) {
+    const routePath = route.url || route.path;
+    for (const method of [].concat(route.method || route.methods || [])) seen.add(`${String(method).toUpperCase()} ${routePath}`);
+  }
+  const missing = [];
+  for (const route of fastifyRouteList(fastify)) {
+    const methods = route.methods.filter(method => !seen.has(`${method} ${route.path}`));
+    if (methods.length) missing.push({ ...route, methods });
+  }
+  return [...recorded, ...missing];
+}
+
 function extractFastifyRoutes(fastify, routesInput = null) {
   const routes = {};
-  normalizeRouteList(routesInput || fastify?.aiwafRoutes || fastify?.routes || [])
+  normalizeRouteList(routesInput || (fastify?.aiwafRoutes ? fastifyRoutes(fastify) : null) || fastify?.routes || [])
     .forEach(route => addRoute(routes, route));
   if (Object.keys(routes).length) return routes;
   normalizeRouteList(fastifyRouteList(fastify)).forEach(route => addRoute(routes, route));
@@ -635,8 +695,18 @@ function extractNestRoutes(app, routesInput = null) {
   }
 }
 
-// Saves the source's injection findings into a manifest that's about to be written. A failed scan
-// leaves the manifest without saved risks, so routes keep their normal checks.
+/** init's injection audit couldn't run, so init must not write a manifest. */
+class AuditError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'AuditError';
+  }
+}
+
+// Saves the source's injection findings into a manifest that's about to be written. Without an
+// audit (no source, or a scan that read no files) the framework's and declared inputs are still
+// saved, but not as complete. Throws AuditError when the source is missing or the scan fails, so
+// init stops without replacing a good manifest.
 function auditIntoManifest(manifest, source) {
   let sources = {};
   const loadSources = () => {
@@ -650,13 +720,24 @@ function auditIntoManifest(manifest, source) {
   try {
     loadSources();
     if (!source) return null;
+    if (!require('fs').existsSync(source)) {
+      throw new AuditError(`The audit source ${source} doesn't exist. Pass the app's source folder with --source, or --no-audit.`);
+    }
     const { analyzePath } = require('./injectionAnalysis');
-    const counts = require('./routeRisks').applyReport(analyzePath(source), manifest, sources);
+    let report;
+    try {
+      report = analyzePath(source);
+    } catch (error) {
+      throw new AuditError(`The injection audit of ${source} failed: ${error.message || error}`);
+    }
+    // No files read is no audit: nothing says these routes reach no risky call.
+    if (!report.files_scanned) {
+      console.warn(`The injection audit found no JavaScript or TypeScript files in ${source}, so no route counts as audited.`);
+      return null;
+    }
+    const counts = require('./routeRisks').applyReport(report, manifest, sources);
     audited = true;
     return counts;
-  } catch (error) {
-    console.warn(`Injection audit skipped: ${error.message || error}`);
-    return null;
   } finally {
     // Without the code reading, the framework's and declared inputs are still saved.
     if (!audited && manifest && manifest.routes) {
@@ -723,8 +804,8 @@ function buildFrameworkManifest(framework, app, options = {}) {
   const handlerSource = options.handlerSource || options.auditSource;
   if (options.routes) {
     options = { ...options, routes: withSourceHandlers(options.routes, handlerSource) };
-  } else if (normalized === 'fastify' && app && !app.aiwafRoutes) {
-    const listed = fastifyRouteList(app);
+  } else if (normalized === 'fastify' && app) {
+    const listed = fastifyRoutes(app);
     if (listed.length) options = { ...options, routes: withSourceHandlers(listed, handlerSource) };
   }
   const extractors = {
@@ -751,6 +832,7 @@ function buildFrameworkManifest(framework, app, options = {}) {
 }
 
 module.exports = {
+  AuditError,
   DEFAULT_MANIFEST_PATH,
   auditIntoManifest,
   SCHEMA_VERSION,
@@ -765,8 +847,10 @@ module.exports = {
   routeEntryFor,
   extractExpressRoutes,
   mountPath,
+  mountPaths,
   extractFastifyRoutes,
   fastifyRouteList,
+  fastifyRoutes,
   extractHapiRoutes,
   extractKoaRoutes,
   extractNextRoutes,

@@ -250,3 +250,18 @@ def test_init_lists_the_keys_of_a_nested_pydantic_body(monkeypatch, tmp_path):
     route = json.loads((tmp_path / ".aiwaf" / "paths.json").read_text(encoding="utf-8"))["routes"]["/orders"]
     assert route["inputs_nested"] == {"customer": ["email"]}
     assert route["inputs_complete"] is True
+
+
+def test_init_keeps_the_old_manifest_when_the_audit_source_is_missing(monkeypatch, tmp_path, capsys):
+    pytest.importorskip("flask")
+    _drop_app_module()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "app.py").write_text("from flask import Flask\napp = Flask(__name__)\napp.add_url_rule('/a', 'a', lambda: 'ok')\n",
+                                     encoding="utf-8")
+    output = tmp_path / "paths.json"
+    output.write_text('{"routes": {"/kept": {}}}', encoding="utf-8")
+    with pytest.raises(SystemExit) as exited:
+        _handle_init(["--framework", "flask", "--app", "app:app", "--source", "nowhere", "--output", str(output), "--no-native"])
+    assert exited.value.code == 1
+    assert "The audit source nowhere doesn't exist" in capsys.readouterr().err
+    assert output.read_text(encoding="utf-8") == '{"routes": {"/kept": {}}}'

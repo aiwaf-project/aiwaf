@@ -297,3 +297,11 @@ test('a read assigned to a variable takes the type of its later casts', () => {
   expect(found['/two'][0].n).toBe('text');
   expect(found['/test'][0].n).toBe('text');
 });
+
+test('inputs named like object properties are ordinary keys', () => {
+  const found = inputs(`
+    function readCtor(body) { return body.constructor.name + body.toString.length; }
+    app.post('/ctor', (req, res) => { res.json({ a: readCtor(req.body), b: req.body.constructor.prototype }); });
+  `);
+  expect(Object.keys(found['/ctor'][0]).sort()).toEqual(['constructor', 'toString']);
+});
