@@ -188,9 +188,11 @@ def extract_fastapi_routes(app) -> dict[str, dict[str, Any]]:
     return mask_shadowed_declarations(routes, mounted)
 
 
-def generate_fastapi_manifest(app, output_path: str = ".aiwaf/paths.json", *, audit_source: str | None = None) -> dict[str, Any]:
-    """Write a manifest. With audit_source, also save that source's injection findings."""
+def generate_fastapi_manifest(app, output_path: str = ".aiwaf/paths.json", *, audit_source: str | None = None, write: bool = True) -> dict[str, Any]:
+    """Write a manifest (or only build it, with write=False). With audit_source, also save that
+    source's injection findings."""
     manifest = build_manifest(framework="fastapi", routes=extract_fastapi_routes(app))
     audit_into_manifest(manifest, audit_source)
-    write_manifest(manifest, output_path)
+    if write:
+        write_manifest(manifest, output_path)
     return manifest

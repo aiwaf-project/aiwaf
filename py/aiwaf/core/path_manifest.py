@@ -186,6 +186,24 @@ def write_manifest(manifest: Mapping[str, Any], output_path: str | Path = DEFAUL
     return path
 
 
+class EmptyManifestError(ValueError):
+    """init found no routes, so it wrote nothing."""
+
+
+def write_found_manifest(manifest: Mapping[str, Any], output_path: str | Path, where: str) -> Path:
+    """Write init's manifest, or raise EmptyManifestError when it has no routes.
+
+    An empty manifest would look configured while protecting no route, and would replace a
+    working one, so it is never written.
+    """
+    if not manifest.get("routes"):
+        raise EmptyManifestError(
+            f"No routes found in {where}, so {output_path} was not written. Check that the app is "
+            "loaded after its routes, blueprints and routers are registered."
+        )
+    return write_manifest(manifest, output_path)
+
+
 def load_manifest(path: str | Path = DEFAULT_MANIFEST_PATH) -> dict[str, Any] | None:
     manifest_path = Path(path)
     if not manifest_path.exists():

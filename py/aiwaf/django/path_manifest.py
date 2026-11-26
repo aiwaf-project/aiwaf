@@ -198,9 +198,11 @@ def extract_django_routes() -> dict[str, dict[str, Any]]:
     resolver = get_resolver()
     return mask_shadowed_declarations(_collect_routes(resolver.url_patterns))
 
-def generate_django_manifest(output_path: str = ".aiwaf/paths.json", *, audit_source: str | None = None) -> dict[str, Any]:
-    """Write a manifest. With audit_source, also save that source's injection findings."""
+def generate_django_manifest(output_path: str = ".aiwaf/paths.json", *, audit_source: str | None = None, write: bool = True) -> dict[str, Any]:
+    """Write a manifest (or only build it, with write=False). With audit_source, also save that
+    source's injection findings."""
     manifest = build_manifest(framework="django", routes=extract_django_routes())
     audit_into_manifest(manifest, audit_source)
-    write_manifest(manifest, output_path)
+    if write:
+        write_manifest(manifest, output_path)
     return manifest

@@ -398,3 +398,55 @@ def test_closure_schemas_of_a_views_own_decorators():
         post = view
 
     assert input_sources.view_arguments(type("V", (), {"view_class": Items})(), ["POST", "GET"])["inputs"]["qty"] == "int"
+
+
+def test_fastapi_bodies_list_the_keys_inside_nested_models():
+    from fastapi import FastAPI
+    from pydantic import BaseModel, ConfigDict
+
+    class Customer(BaseModel):
+        email: str
+        name: typing.Optional[str] = None
+
+    class Loose(BaseModel):
+        model_config = ConfigDict(extra="allow")
+        anything: str
+
+    class Order(BaseModel):
+        sku: str
+        customer: Customer
+        backup: typing.Optional[Customer] = None
+        extra: Loose
+        tags: typing.List[str] = []
+
+    app = FastAPI()
+
+    @app.post("/orders")
+    def create(order: Order):
+        return {"email": order.customer.email}
+
+    route = next(item for item in app.routes if getattr(item, "path", "") == "/orders")
+    found = fastapi_inputs(route)
+    assert found["nested"] == {"backup": ["email", "name"], "customer": ["email", "name"]}
+    assert set(found["inputs"]) == {"sku", "customer", "backup", "extra", "tags"}
+    assert input_sources.nested_fields(str) == {} and input_sources.nested_fields(Customer) == {}
+    assert input_sources._object_class(typing.Union[int, str]) is None
+
+
+def test_finalize_keeps_a_frameworks_nested_keys_over_the_codes_whole_reading():
+    framework = {"inputs": {"customer": "text", "sku": "text"}, "covers": [], "reasons": [], "standalone": True,
+                 "nested": {"customer": ["email"]}}
+    routes = {"/orders": {"methods": ["POST"], "inputs": {"customer": "text"}, "inputs_complete": True,
+                          "_flat": {"customer"}, "declared_inputs": framework}}
+    finalize(routes)
+    assert routes["/orders"]["inputs_nested"] == {"customer": ["email"]}
+
+
+def test_combining_handlers_keeps_nested_keys_only_where_neither_takes_the_field_whole():
+    from aiwaf.core.input_sources import combine
+
+    nested = {"inputs": {"customer": "text"}, "covers": ["a"], "reasons": [], "standalone": True, "nested": {"customer": ["email"]}}
+    other = {"inputs": {"note": "text"}, "covers": ["a"], "reasons": [], "standalone": True, "nested": {"note": ["body"]}}
+    whole = {"inputs": {"customer": "text"}, "covers": ["a"], "reasons": [], "standalone": True}
+    assert combine(nested, other)["nested"] == {"customer": ["email"], "note": ["body"]}
+    assert "nested" not in combine(nested, whole) and "nested" not in combine(whole, nested)

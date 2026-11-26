@@ -34,7 +34,7 @@ function nowUtcIso() {
 }
 
 function sourceSignals(handler) {
-  const source = typeof handler === 'function' ? Function.prototype.toString.call(handler) : '';
+  const source = require('./sourceRoutes').handlerText(handler) || '';
   const lower = source.toLowerCase();
   const signals = [];
   const formSignals = [];
@@ -134,7 +134,7 @@ function detectApiEndpoint(handler, routePath = '', methods = []) {
 function detectAuthEndpoint(handler, routePath = '') {
   const pathLower = normalizePath(routePath).toLowerCase();
   const ast = analyzeHandlerAst(handler);
-  const source = typeof handler === 'function' ? Function.prototype.toString.call(handler).toLowerCase() : '';
+  const source = (require('./sourceRoutes').handlerText(handler) || '').toLowerCase();
   const signals = [];
   let score = 0;
   let action = '';
@@ -501,6 +501,7 @@ function extractExpressRoutes(app) {
 
 function normalizeRouteList(routesInput = []) {
   return (Array.isArray(routesInput) ? routesInput : [])
+    .filter(route => route && typeof route === 'object')
     .map(route => ({
       routePath: route.path || route.url || route.routePath || route.pattern,
       methods: [].concat(route.methods || route.method || []).map(method => String(method).toUpperCase()),
@@ -513,10 +514,33 @@ function normalizeRouteList(routesInput = []) {
     .filter(route => route.routePath);
 }
 
+// A ready Fastify app's routes, as a route list, from printRoutes({ commonPrefix: false }), which
+// prints one full path per line with its methods: "├── /api/items/:id (GET, HEAD)". Fastify
+// doesn't hand back its handlers, so the source supplies them (withSourceHandlers).
+function fastifyRouteList(fastify) {
+  if (typeof fastify?.printRoutes !== 'function') return [];
+  let printed = '';
+  try {
+    printed = String(fastify.printRoutes({ commonPrefix: false }) || '');
+  } catch (_) {
+    return [];
+  }
+  const list = [];
+  for (const line of printed.split('\n')) {
+    const match = /(\/\S*)\s+\(([A-Z, ]+)\)\s*$/.exec(line);
+    if (!match) continue;
+    const methods = match[2].split(',').map(method => method.trim()).filter(method => method && method !== 'HEAD');
+    if (methods.length) list.push({ path: match[1], methods });
+  }
+  return list;
+}
+
 function extractFastifyRoutes(fastify, routesInput = null) {
   const routes = {};
   normalizeRouteList(routesInput || fastify?.aiwafRoutes || fastify?.routes || [])
     .forEach(route => addRoute(routes, route));
+  if (Object.keys(routes).length) return routes;
+  normalizeRouteList(fastifyRouteList(fastify)).forEach(route => addRoute(routes, route));
   if (Object.keys(routes).length) return routes;
 
   if (typeof fastify?.printRoutes === 'function') {
@@ -543,9 +567,28 @@ function extractHapiRoutes(server, routesInput = null) {
   return routes;
 }
 
-function extractKoaRoutes(_app, routesInput = []) {
+function extractKoaRoutes(app, routesInput = []) {
   const routes = {};
-  normalizeRouteList(routesInput).forEach(route => addRoute(routes, route));
+  if (routesInput && routesInput.length) {
+    normalizeRouteList(routesInput).forEach(route => addRoute(routes, route));
+    return routes;
+  }
+  // A Koa app keeps no routes itself; @koa/router's and koa-router's routes() middleware keeps
+  // its router, whose layers have the path, methods and handlers.
+  for (const middleware of (app && Array.isArray(app.middleware) ? app.middleware : [])) {
+    const router = middleware && middleware.router;
+    for (const layer of (router && Array.isArray(router.stack) ? router.stack : [])) {
+      if (!layer || typeof layer.path !== 'string' || !Array.isArray(layer.methods) || !layer.methods.length) continue;
+      const handlers = (layer.stack || []).filter(item => typeof item === 'function');
+      addRoute(routes, {
+        routePath: layer.path,
+        methods: layer.methods.map(method => String(method).toUpperCase()).filter(method => method !== 'HEAD'),
+        handler: handlers[handlers.length - 1],
+        handlers,
+        name: layer.name || layer.path
+      });
+    }
+  }
   return routes;
 }
 
@@ -618,7 +661,43 @@ function generateExpressManifest(app, outputPath = DEFAULT_MANIFEST_PATH, option
 }
 
 function generateFrameworkManifest(framework, app, outputPath = DEFAULT_MANIFEST_PATH, options = {}) {
+  const manifest = buildFrameworkManifest(framework, app, options);
+  writeManifest(manifest, outputPath);
+  return manifest;
+}
+
+// A JSON route list can't carry handlers; each listed route without one gets its handler's text
+// from the source, when the source registers it, so its API and form signals aren't lost.
+function withSourceHandlers(routesInput, source) {
+  if (!Array.isArray(routesInput) || !routesInput.length || !source) return routesInput;
+  let handlers;
+  try {
+    handlers = require('./sourceRoutes').routeHandlers(source);
+  } catch (_) {
+    return routesInput;
+  }
+  if (!handlers.size) return routesInput;
+  const { handlerFor } = require('./sourceRoutes');
+  return routesInput.map(route => {
+    if (!route || route.handler || route.handle || route.endpoint) return route;
+    const routePath = route.path || route.url || route.routePath || route.pattern;
+    if (!routePath) return route;
+    const methods = [].concat(route.methods || route.method || []).map(method => String(method).toUpperCase());
+    const handler = handlerFor(handlers, routePath, methods);
+    return handler ? { ...route, handler } : route;
+  });
+}
+
+/** A framework app's manifest, with the source's injection findings, without writing it. */
+function buildFrameworkManifest(framework, app, options = {}) {
   const normalized = String(framework || '').toLowerCase();
+  const handlerSource = options.handlerSource || options.auditSource;
+  if (options.routes) {
+    options = { ...options, routes: withSourceHandlers(options.routes, handlerSource) };
+  } else if (normalized === 'fastify' && app && !app.aiwafRoutes) {
+    const listed = fastifyRouteList(app);
+    if (listed.length) options = { ...options, routes: withSourceHandlers(listed, handlerSource) };
+  }
   const extractors = {
     express: () => options.routes ? extractNextRoutes(options.routes) : extractExpressRoutes(app),
     sails: () => options.routes ? extractNextRoutes(options.routes) : extractExpressRoutes(app),
@@ -639,7 +718,6 @@ function generateFrameworkManifest(framework, app, outputPath = DEFAULT_MANIFEST
     appContext: options.appContext || {}
   });
   auditIntoManifest(manifest, options.auditSource);
-  writeManifest(manifest, outputPath);
   return manifest;
 }
 
@@ -659,12 +737,14 @@ module.exports = {
   extractExpressRoutes,
   mountPath,
   extractFastifyRoutes,
+  fastifyRouteList,
   extractHapiRoutes,
   extractKoaRoutes,
   extractNextRoutes,
   extractNestRoutes,
   generateExpressManifest,
   generateFrameworkManifest,
+  buildFrameworkManifest,
   detectApiEndpoint,
   detectAuthEndpoint
 };

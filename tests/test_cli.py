@@ -179,8 +179,9 @@ def test_init_prints_the_native_setup_unless_asked_not_to(monkeypatch, tmp_path,
     pytest.importorskip(framework)
     _drop_app_module()
     monkeypatch.chdir(tmp_path)
-    source = ("from flask import Flask\napp = Flask(__name__)\napp.config['AIWAF_RATE_MAX'] = 7\n" if framework == "flask"
-              else "from fastapi import FastAPI\napp = FastAPI()\n")
+    source = ("from flask import Flask\napp = Flask(__name__)\napp.config['AIWAF_RATE_MAX'] = 7\n"
+              "app.add_url_rule('/health', 'health', lambda: 'ok')\n" if framework == "flask"
+              else "from fastapi import FastAPI\napp = FastAPI()\napp.get('/health')(lambda: {'ok': True})\n")
     (tmp_path / "app.py").write_text(source, encoding="utf-8")
 
     _handle_init(["--framework", framework, "--app", "app:app"])
@@ -217,3 +218,35 @@ def test_native_setup_says_when_the_switch_is_automatic(monkeypatch):
     monkeypatch.delenv("AIWAF_NATIVE_PIPELINE", raising=False)
     text = describe_native_setup(NativeConversion(config={}), "flask")
     assert "runs as the native pipeline automatically" in text and "AIWAF_NATIVE_PIPELINE = False" in text
+
+
+def test_init_writes_nothing_for_an_app_with_no_routes(monkeypatch, tmp_path, capsys):
+    pytest.importorskip("flask")
+    _drop_app_module()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "app.py").write_text("from flask import Flask\napp = Flask(__name__)\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as exited:
+        _handle_init(["--framework", "flask", "--app", "app:app", "--no-native"])
+    assert exited.value.code == 1
+    assert "No routes found in app:app (flask)" in capsys.readouterr().err
+    assert not (tmp_path / ".aiwaf" / "paths.json").exists()
+
+
+def test_init_lists_the_keys_of_a_nested_pydantic_body(monkeypatch, tmp_path):
+    pytest.importorskip("fastapi")
+    _drop_app_module()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "app.py").write_text(
+        "from fastapi import FastAPI\n"
+        "from pydantic import BaseModel\n"
+        "class Customer(BaseModel):\n    email: str\n"
+        "class Order(BaseModel):\n    sku: str\n    customer: Customer\n"
+        "app = FastAPI()\n"
+        "@app.post('/orders')\n"
+        "def create(order: Order):\n    return {'email': order.customer.email}\n",
+        encoding="utf-8",
+    )
+    _handle_init(["--framework", "fastapi", "--app", "app:app", "--no-native"])
+    route = json.loads((tmp_path / ".aiwaf" / "paths.json").read_text(encoding="utf-8"))["routes"]["/orders"]
+    assert route["inputs_nested"] == {"customer": ["email"]}
+    assert route["inputs_complete"] is True

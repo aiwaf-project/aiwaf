@@ -177,6 +177,38 @@ def class_fields(cls: Any) -> Optional[Dict[str, str]]:
     return None
 
 
+def _object_class(annotation: Any) -> Any:
+    """The class an annotation names, through Optional and Annotated, or None."""
+    origin = typing.get_origin(annotation)
+    if origin is typing.Annotated:
+        return _object_class(typing.get_args(annotation)[0])
+    if origin is typing.Union or (origin is not None and getattr(origin, "__name__", "") == "UnionType"):
+        classes = [arg for arg in typing.get_args(annotation) if arg is not type(None)]
+        return _object_class(classes[0]) if len(classes) == 1 else None
+    return annotation if isinstance(annotation, type) else None
+
+
+def nested_fields(cls: Any) -> Dict[str, List[str]]:
+    """The keys inside a Pydantic model's object-valued fields, as {"customer": ["email"]}.
+
+    Only fields whose type is itself a model, dataclass or other class with declared fields,
+    and only one level down, as inputs_nested holds. A field typed as a list, a dict or a
+    model that accepts undeclared fields is left out, so its whole value keeps being checked.
+    """
+    model_fields = getattr(cls, "model_fields", None)
+    if not isinstance(model_fields, dict) or not hasattr(cls, "model_config"):
+        return {}
+    found: Dict[str, List[str]] = {}
+    for name, field in model_fields.items():
+        inner = _object_class(field.annotation)
+        if inner is None or inner in (str, bytes, int, float, bool) or not hasattr(inner, "__mro__"):
+            continue
+        keys = class_fields(inner)
+        if keys:
+            found[field.alias or name] = sorted(keys)
+    return found
+
+
 def _loaded_module(name: str) -> Any:
     """An already-imported module by its name, or one whose name ends with it. Never imports."""
     if not name:
@@ -320,6 +352,8 @@ def fastapi_inputs(route: Any) -> Optional[dict]:
         return None
     found: Dict[str, str] = {}
     reasons: List[dict] = []
+    # The keys inside object-valued body fields, from the models that declare them.
+    nested: Dict[str, set] = {}
     # Every parameter in the dependency tree, as FastAPI resolves them for the endpoint.
     queries: List[Any] = []
     bodies: List[Any] = []
@@ -352,6 +386,8 @@ def fastapi_inputs(route: Any) -> Optional[dict]:
         if fields is not None:
             for name, kind in fields.items():
                 _merge(found, name, kind)
+            for name, keys in nested_fields(model).items():
+                nested.setdefault(name, set()).update(keys)
         elif len(bodies) == 1 and not embedded and isinstance(model, type) and hasattr(model, "model_fields"):
             reasons.append(_reason("model_fields", f"{model.__name__} accepts fields it doesn't declare"))
         else:
@@ -368,7 +404,10 @@ def fastapi_inputs(route: Any) -> Optional[dict]:
 
     walk(dependant, True)
     standalone = not getattr(dependant, "request_param_name", None)
-    return {"inputs": found, "covers": ["dependency", "external_class", "model_fields"], "reasons": reasons, "standalone": standalone}
+    result = {"inputs": found, "covers": ["dependency", "external_class", "model_fields"], "reasons": reasons, "standalone": standalone}
+    if nested:
+        result["nested"] = {name: sorted(keys) for name, keys in nested.items()}
+    return result
 
 
 # 3. OpenAPI -----------------------------------------------------------------------------------
@@ -459,12 +498,22 @@ def combine(first: Optional[dict], second: Optional[dict]) -> Optional[dict]:
     """Two framework declarations for one route (say, its GET and POST handlers) as one."""
     if not first or not second:
         return first or second
-    return {
+    combined = {
         "inputs": {**first["inputs"], **second["inputs"]},
         "covers": [code for code in first["covers"] if code in second["covers"]],
         "reasons": [*first["reasons"], *second["reasons"]],
         "standalone": bool(first["standalone"] and second["standalone"]),
     }
+    # A field's inner keys hold only when neither handler takes the field whole.
+    nested: Dict[str, set] = {}
+    for own, other in ((first, second), (second, first)):
+        for name, keys in (own.get("nested") or {}).items():
+            if name in other["inputs"] and name not in (other.get("nested") or {}):
+                continue
+            nested.setdefault(name, set()).update(keys)
+    if nested:
+        combined["nested"] = {name: sorted(keys) for name, keys in nested.items()}
+    return combined
 
 
 def _request_schema(value: Any) -> Optional[type]:
@@ -725,9 +774,16 @@ def finalize(
             covered = set(framework.get("covers") or ())
             reasons = [reason for reason in reasons if reason.get("code") not in covered]
             reasons.extend(framework.get("reasons") or ())
+            framework_nested = framework.get("nested") or {}
             for name, kind in (framework.get("inputs") or {}).items():
                 _merge(found, name, kind)
-                flat.add(name)
+                if name not in framework_nested:
+                    flat.add(name)
+            # The framework parses these fields into models that drop undeclared keys, so their
+            # declared keys stand even where reading the code found only the whole field.
+            for name, keys in framework_nested.items():
+                nested.setdefault(name, set()).update(keys)
+                flat.discard(name)
             read = read or bool(framework.get("standalone"))
         before = set(found)
         reasons = _resolve_classes(data, found, reasons)

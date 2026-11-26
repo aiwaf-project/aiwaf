@@ -201,20 +201,28 @@ def _handle_init(argv) -> None:
 
         from aiwaf.django.path_manifest import generate_django_manifest
 
-        manifest = generate_django_manifest(args.output, audit_source=audit_source)
+        manifest = generate_django_manifest(args.output, audit_source=audit_source, write=False)
     else:
         if app is None:
             parser.error("--app is required for Flask/FastAPI")
         if framework == "flask":
             from aiwaf.flask.path_manifest import generate_flask_manifest
 
-            manifest = generate_flask_manifest(app, args.output, audit_source=audit_source)
+            manifest = generate_flask_manifest(app, args.output, audit_source=audit_source, write=False)
         else:
             from aiwaf.fast.path_manifest import generate_fastapi_manifest
 
-            manifest = generate_fastapi_manifest(app, args.output, audit_source=audit_source)
+            manifest = generate_fastapi_manifest(app, args.output, audit_source=audit_source, write=False)
 
+    from aiwaf.core.path_manifest import EmptyManifestError, write_found_manifest
     from aiwaf.core.route_risks import describe_audit
+
+    where = args.app or args.settings or os.environ.get("DJANGO_SETTINGS_MODULE") or "the Django project"
+    try:
+        write_found_manifest(manifest, args.output, f"{where} ({framework})")
+    except EmptyManifestError as exc:
+        sys.stderr.write(f"{exc}\n")
+        raise SystemExit(1) from None
 
     print(f"Generated {args.output}")
     print(f"Framework: {manifest['framework']}")

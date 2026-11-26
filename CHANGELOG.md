@@ -1,6 +1,40 @@
 # Changelog
 
-## Python 1.3.2 / aiwaf-rust 0.2.17 / Node.js 1.3.2 / WASM 0.2.13 / Java 1.4.0 — prepared release
+## Python 1.3.3 / Node.js 1.3.3 — prepared release
+
+- **Release note:** no engine changes. Python 1.3.2, npm 1.3.2, aiwaf-rust 0.2.17 and
+  aiwaf-wasm 0.2.13 are published, so `python-v1.3.3` and `js-v1.3.3` can be tagged now.
+  Python still requires `aiwaf-rust>=0.2.17`. npm now requires `aiwaf-wasm ^0.2.13` (was
+  ^0.2.11, which let an install keep 0.2.11 and lose 1.3.2's per-method lists and nested keys),
+  and the lockfile pins the published 0.2.13.
+- **npm `aiwaf init`:** loads the app and writes the manifest from the routes it registers, as
+  Python's init does. It finds the app as package.json's main, or `app.js`, `server.js` or
+  `index.js` (also under `src/` and `dist/`), or `--app <file>`, with `--export <name>` for a
+  named export or a factory. Servers the app starts don't bind a port while it loads, which is
+  also how an app that only calls `app.listen()` is found. It reads Express (with mounted
+  routers), Fastify, Hapi, Nest and Koa with `@koa/router` or `koa-router`, from CommonJS, ES
+  modules, or TypeScript Node can run. Before, `init` was an unknown command.
+- **No empty manifests:** `aiwaf init` (Python and npm, including `aiwaf fastapi init`, the
+  Flask CLI and Django's `manage.py aiwaf init`) and npm `aiwaf manifest` write nothing and exit
+  with an error when they find no routes. npm `manifest` without `--routes` used to report
+  success with 0 routes, which turned off route-specific protection without saying so and
+  replaced any manifest already there. Without `--routes` it now loads the app as `init` does.
+- **Route lists keep API detection:** a `--routes` JSON list carries no handlers, so routes such
+  as `POST /orders` answering with `res.json()` were classified as pages unless under `/api/`.
+  Their handlers now come from the source (`app.post('/orders', handler)`,
+  `router.route('/x').get(...)`, including routers mounted under a prefix), giving the same API,
+  form and request-body signals as the live app.
+- **Fastify routes from a live app:** the manifest found none, because Fastify's default
+  `printRoutes()` output is a prefix tree. It now reads one full path per line, with methods.
+- **Handlers returning an object** (`async () => ({ ok: true })`, as Fastify, Hapi and Nest
+  handlers do) count as JSON responses.
+- **Python: nested Pydantic bodies:** a FastAPI body model field typed as another model, as
+  `customer: Customer`, now saves that model's declared fields as `inputs_nested`
+  (`{"customer": ["email", "name"]}`), so strict inputs checks keys inside it. FastAPI parses
+  the body into the model, which drops undeclared keys, so these lists stand even where reading
+  the code found only the whole field. A model that allows undeclared fields gets no list.
+
+## Python 1.3.2 / aiwaf-rust 0.2.17 / Node.js 1.3.2 / WASM 0.2.13 / Java 1.4.0 — released
 
 - **Release note:** Python 1.3.1, npm 1.3.1, aiwaf-rust 0.2.16 and aiwaf-wasm 0.2.12 are
   published. Publish aiwaf-rust 0.2.17 (`rust-v0.2.17`) before Python 1.3.2, which requires

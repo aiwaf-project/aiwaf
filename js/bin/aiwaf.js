@@ -151,32 +151,6 @@ async function operationalStats(limit = 5000) {
   });
 }
 
-function parseManifestArgs(args = []) {
-  const options = {
-    framework: 'express',
-    output: process.env.AIWAF_PATH_MANIFEST || '.aiwaf/paths.json',
-    routes: [],
-    source: '.',
-    audit: true
-  };
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === '--framework' || arg === '-f') {
-      options.framework = args[++index] || options.framework;
-    } else if (arg === '--output' || arg === '-o') {
-      options.output = args[++index] || options.output;
-    } else if (arg === '--source') {
-      options.source = args[++index] || options.source;
-    } else if (arg === '--no-audit') {
-      options.audit = false;
-    } else if (arg === '--routes' || arg === '-r') {
-      const routeFile = args[++index];
-      options.routes = routeFile ? readJsonFile(routeFile) : [];
-    }
-  }
-  return options;
-}
-
 async function diagnoseIp(ip) {
   const blocklistManager = require('../lib/blocklistManager');
   const exemptionStore = require('../lib/exemptionStore');
@@ -268,6 +242,9 @@ async function runReset(args) {
   return print({ ok: true, reset: results });
 }
 
+// Set by init and manifest, which load the app: the process exits once they finish.
+let exitAfterInit = false;
+
 async function main() {
   const argv = [...process.argv];
   for (const index of [2, 3]) {
@@ -306,6 +283,7 @@ async function main() {
         'import <input.json>',
         'model info|export|import|clear [file]',
         'train',
+        'init [--app app.js] [--export app] [--framework express] [--output .aiwaf/paths.json] [--no-audit]',
         'manifest --framework <name> --routes <routes.json> [--output .aiwaf/paths.json]',
         'whois <domain|ip>',
         'diagnose <ip>',
@@ -366,23 +344,13 @@ async function main() {
     }
   }
 
-  if (cmd === 'manifest') {
-    const options = parseManifestArgs([subcmd, ...args].filter(Boolean));
-    const manifest = pathManifest.generateFrameworkManifest(
-      options.framework,
-      null,
-      options.output,
-      { routes: options.routes, auditSource: options.audit ? options.source : null }
-    );
-    const audit = manifest.injection_audit;
-    return print({
-      ok: true,
-      output: options.output,
-      framework: options.framework,
-      routes: Object.keys(manifest.routes || {}).length,
-      injection_check_routes: Object.values(manifest.routes || {}).filter(entry => entry && entry.injection_risks).length,
-      unlinked_findings: audit ? audit.unlinked_findings : null
-    });
+  if (cmd === 'init' || cmd === 'manifest') {
+    const initCommand = require('../lib/initCommand');
+    const run = cmd === 'init' ? initCommand.runInit : initCommand.runManifest;
+    process.exitCode = await run([subcmd, ...args].filter(item => item !== undefined));
+    // A loaded app can keep timers and connections open; the manifest is written, so stop here.
+    exitAfterInit = true;
+    return;
   }
 
   if (cmd === 'list' && subcmd === 'blocklist') {
@@ -561,4 +529,5 @@ main()
         // The requested operation has already completed; cleanup is best effort.
       }
     }
+    if (exitAfterInit) process.exit(process.exitCode || 0);
   });

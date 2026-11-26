@@ -1447,13 +1447,15 @@ def main():
 
     elif args.command == 'init':
         try:
+            from aiwaf.core.path_manifest import write_found_manifest
             from aiwaf.flask.path_manifest import generate_flask_manifest
 
             app = _load_flask_app(args.app)
-            manifest = generate_flask_manifest(app, args.output, audit_source=".")
+            manifest = generate_flask_manifest(app, args.output, audit_source=".", write=False)
+            write_found_manifest(manifest, args.output, f"{args.app} (flask)")
         except Exception as e:
             print(f" Init failed: {e}")
-            return
+            sys.exit(1)
         print(f"Generated {args.output}")
         print(f"Framework: {manifest['framework']}")
         print(f"Routes: {len(manifest.get('routes', {}))}")

@@ -39,12 +39,12 @@ the supported Redis backends when sharing limits across workers.
 
 Each package is versioned and released independently.
 
-Python 1.3.2, Rust/Python 0.2.17, Node.js 1.3.2, WASM 0.2.13, and Java 1.4.0 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
+Python 1.3.3, Rust/Python 0.2.17, Node.js 1.3.3, WASM 0.2.13, and Java 1.4.0 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
 
 | Runtime | Package | Repository version | Primary use |
 | --- | --- | ---: | --- |
-| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.3.2` | Django, Flask, and FastAPI protection |
-| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.3.2` | Express and Node framework middleware |
+| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.3.3` | Django, Flask, and FastAPI protection |
+| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.3.3` | Express and Node framework middleware |
 | Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.17` | Native Python acceleration and JSON model inference |
 | WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.13` | Rust detection and model primitives for JavaScript |
 | Java | `io.github.aiwaf-project:aiwaf-java` | `1.4.0` | Spring MVC and Jakarta Servlet protection |
@@ -358,7 +358,7 @@ aiwaf init --framework flask --app app:app --source src    # audits another fold
 aiwaf init --framework flask --app app:app --no-audit      # saves no route checks
 ```
 
-Node.js `aiwaf manifest` accepts `--source` and `--no-audit` too. Java `init --source` uses
+Node.js `aiwaf init` and `aiwaf manifest` accept `--source` and `--no-audit` too. Java `init --source` uses
 the same parse for routes and findings, and `init --app` audits `src/main/java` (or
 `--audit-source`). `aiwaf audit --manifest <file>` refreshes the saved findings without
 rebuilding the manifest.
@@ -521,10 +521,12 @@ routes with no saved inputs, path parameters, headers and other bodies are never
 
 Keys inside an object-valued input are checked too when `init` knows them all
 (`inputs_nested`): from code that reads only constant keys inside it, as
-`data["user"]["name"]` or `req.body.user.name`, in every handler that reads it, or from a Java
-body class's nested classes. A JSON `{"user": {"role": "admin"}}`, or a form's `user[role]`, is
-then `user.role`, unexpected. An input a handler passes on whole, or one that a framework schema
-or declaration names, has no such list and isn't checked inside.
+`data["user"]["name"]` or `req.body.user.name`, in every handler that reads it, from a FastAPI
+body model whose field is itself a Pydantic model (`customer: Customer` gives `customer`'s
+declared fields, one level down), or from a Java body class's nested classes. A JSON
+`{"user": {"role": "admin"}}`, or a form's `user[role]`, is then `user.role`, unexpected. An
+input a handler passes on whole, a model that allows undeclared fields, or one that another
+framework schema or declaration names, has no such list and isn't checked inside.
 
 `AIWAF_STRICT_INPUTS_EXEMPT=/webhooks/,/legacy/*` lists path prefixes strict inputs skips, for
 routes that take whatever their senders add.
@@ -610,7 +612,7 @@ Java 1.4.0, after it is published to Maven Central:
 
 The Python package requires Python 3.10 or newer. Framework dependencies are optional, so install only the extra needed by the application.
 
-Python 1.3.2 requires `aiwaf-rust>=0.2.17`; the `rust` extra remains an installation
+Python 1.3.3 requires `aiwaf-rust>=0.2.17`; the `rust` extra remains an installation
 alias. Publish the matching Rust wheel with `NativeCSVPipeline` support before
 the Python release. The Rust release workflow builds Linux x86_64/aarch64,
 musl x86_64, macOS x86_64/arm64 and Windows x86_64 wheels and checks the native
@@ -1340,17 +1342,36 @@ app.use(aiwaf({
 
 Applications can also use `aiwaf.exempt`, `aiwaf.exemptFrom`, `aiwaf.only`, and `aiwaf.requireProtection` to build route policies.
 
-Generate an Express route manifest after routes are registered:
+Generate the route manifest with `aiwaf init`, which loads your app, as Python's init does, and
+records every route it registers, routers mounted with `app.use('/prefix', router)` included:
+
+```bash
+npx aiwaf init                                  # package.json main, else app.js, server.js or index.js
+npx aiwaf init --app src/server.js              # a specific file
+npx aiwaf init --app src/app.js --export createApp   # a named export, or a function returning the app
+```
+
+It reads Express (and Sails and Nest, which run on Express), Fastify, Hapi, and Koa apps that
+use `@koa/router` or `koa-router`. Loading runs the app's module code, but any server it starts is
+stopped from binding a port, so an app that only calls `app.listen()` is found too. It accepts
+ES modules, and TypeScript that your Node version can run (otherwise pass the compiled file).
+
+When it finds no routes it writes nothing and exits with status 1, so an empty manifest never
+looks configured while protecting no route, or replaces one that works. The same holds for
+`aiwaf manifest` and for Python's `init`.
+
+From inside the app, after its routes are registered:
 
 ```javascript
 aiwaf.generateExpressManifest(app, '.aiwaf/paths.json');
 ```
 
-Or generate one from a route list with the CLI:
+For an app that can't be loaded this way, list the routes in JSON. The handlers come from the
+source (`--source`, default the current folder), so a route such as `POST /orders` that answers
+with `res.json()` is classified as an API route as it is from the live app:
 
 ```bash
-cd js
-npm run aiwaf -- manifest --framework express --routes routes.json --output .aiwaf/paths.json
+npx aiwaf manifest --framework express --routes routes.json --output .aiwaf/paths.json
 ```
 
 ### JavaScript configuration
@@ -1997,8 +2018,8 @@ Release versions and tags must match the relevant manifest.
 
 | Package | Manifest | Tag | Workflow |
 | --- | --- | --- | --- |
-| Python `aiwaf` | `pyproject.toml` | `python-v1.3.2` | `python-publish.yml` |
-| npm `aiwaf` | `js/package.json` | `js-v1.3.2` | `npm-publish.yml` |
+| Python `aiwaf` | `pyproject.toml` | `python-v1.3.3` | `python-publish.yml` |
+| npm `aiwaf` | `js/package.json` | `js-v1.3.3` | `npm-publish.yml` |
 | PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.17` | `rust-publish.yml` |
 | npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.13` | `wasm-publish.yml` |
 | Maven `aiwaf-java` | `java/pom.xml` | `java-v1.4.0` | `java-publish.yml` |
@@ -2009,13 +2030,12 @@ Java publishing uses the protected `maven-publish` environment plus `GPG_PRIVATE
 
 Registry releases are immutable. Increment the relevant manifest version before publishing another release.
 
-This release is Python `aiwaf 1.3.2`, npm `aiwaf 1.3.2`, Java `aiwaf-java 1.4.0`,
-`aiwaf-rust 0.2.17` and `aiwaf-wasm 0.2.13`: `init` accuracy (measured against a benchmark),
-per-method input lists, and strict inputs for multipart forms, keys inside inputs and exempt
-paths. Python 1.3.1, npm 1.3.1, `aiwaf-rust 0.2.16` and `aiwaf-wasm 0.2.12` are published.
-Publish `aiwaf-rust 0.2.17` before Python 1.3.2, which requires `aiwaf-rust>=0.2.17`, and
-`aiwaf-wasm 0.2.13` before npm 1.3.2, then update `js/package-lock.json` to the published
-0.2.13 (`^0.2.11` already allows it). Java 1.4.0 isn't on Maven Central yet.
+This release is Python `aiwaf 1.3.3` and npm `aiwaf 1.3.3`: npm `aiwaf init`, which loads the
+app, no empty manifests from either CLI, handlers from source for `--routes` lists, Fastify
+routes from a live app, and nested Pydantic body fields. It needs no new engine: Python 1.3.2,
+npm 1.3.2, `aiwaf-rust 0.2.17` and `aiwaf-wasm 0.2.13` are published, Python 1.3.3 requires
+`aiwaf-rust>=0.2.17`, and npm 1.3.3 requires `aiwaf-wasm ^0.2.13` (1.3.2 allowed 0.2.11, which
+lacks the per-method lists and nested keys). Java 1.4.0 isn't on Maven Central yet.
 
 ## Security and limitations
 

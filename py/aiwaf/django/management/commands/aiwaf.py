@@ -17,10 +17,15 @@ class Command(BaseCommand):
         if options.get("subcommand") != "init":
             raise CommandError("Usage: python manage.py aiwaf init [--output .aiwaf/paths.json]")
 
+        from aiwaf.core.path_manifest import EmptyManifestError, write_found_manifest
         from aiwaf.django.path_manifest import generate_django_manifest
 
         output = options.get("output") or ".aiwaf/paths.json"
-        manifest = generate_django_manifest(output, audit_source=".")
+        manifest = generate_django_manifest(output, audit_source=".", write=False)
+        try:
+            write_found_manifest(manifest, output, "the Django URLconf")
+        except EmptyManifestError as exc:
+            raise CommandError(str(exc)) from None
         self.stdout.write(self.style.SUCCESS(f"Generated {output}"))
         self.stdout.write(f"Framework: {manifest['framework']}")
         self.stdout.write(f"Routes: {len(manifest.get('routes', {}))}")

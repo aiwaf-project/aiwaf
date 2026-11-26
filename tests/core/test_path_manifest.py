@@ -163,3 +163,19 @@ def test_compile_manifest_to_path_rules_maps_protections_to_existing_rules():
             "RATE_LIMIT": {"WINDOW": 60, "MAX": 120, "FLOOD": 200},
         }
     ]
+
+
+def test_write_found_manifest_refuses_one_with_no_routes(tmp_path):
+    import json
+
+    import pytest
+
+    from aiwaf.core.path_manifest import EmptyManifestError, write_found_manifest
+
+    output = tmp_path / "paths.json"
+    output.write_text('{"routes": {"/kept": {}}}', encoding="utf-8")
+    with pytest.raises(EmptyManifestError, match="No routes found in app:app, so .*paths.json was not written"):
+        write_found_manifest({"routes": {}}, output, "app:app")
+    assert json.loads(output.read_text(encoding="utf-8")) == {"routes": {"/kept": {}}}
+    write_found_manifest({"routes": {"/a": {}}}, output, "app:app")
+    assert json.loads(output.read_text(encoding="utf-8")) == {"routes": {"/a": {}}}

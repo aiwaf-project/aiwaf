@@ -33,6 +33,15 @@ def test_init_and_migrate_commands(tmp_path, monkeypatch, capsys):
     cli._migrate_blocklist(["--backend", "memory"])
     assert "blocklist upgraded" in capsys.readouterr().out
 
+    monkeypatch.setattr(
+        "aiwaf.fast.path_manifest.generate_fastapi_manifest",
+        lambda *_args, **_kwargs: {"framework": "fastapi", "routes": {}, "context_hash": "abc"},
+    )
+    with pytest.raises(SystemExit):
+        cli._init(["--app", "sample:app", "--output", str(tmp_path / "empty.json")])
+    assert "No routes found in sample:app (fastapi)" in capsys.readouterr().err
+    assert not (tmp_path / "empty.json").exists()
+
 
 def test_main_dispatches_all_modes(monkeypatch):
     calls = []

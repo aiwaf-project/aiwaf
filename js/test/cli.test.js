@@ -170,32 +170,27 @@ describe('aiwaf CLI routing', () => {
     expect(mocks.modelStore.load).toHaveBeenCalled();
   });
 
-  it('routes manifest generation', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aiwaf-cli-test-'));
-    const routesFile = path.join(tempDir, 'routes.json');
-    const output = path.join(tempDir, 'paths.json');
-    fs.writeFileSync(routesFile, JSON.stringify([{ method: 'GET', path: '/api/test' }]));
-
+  it('routes init and manifest to their commands', async () => {
     const mocks = setupMocks();
-    runWithArgv([
-      'node',
-      path.join('bin', 'aiwaf.js'),
-      'manifest',
-      '--framework',
-      'fastify',
-      '--routes',
-      routesFile,
-      '--output',
-      output
-    ]);
-
-    await new Promise(resolve => setTimeout(resolve, 0));
-    expect(mocks.pathManifest.generateFrameworkManifest).toHaveBeenCalledWith(
-      'fastify',
-      null,
-      output,
-      { routes: [{ method: 'GET', path: '/api/test' }], auditSource: '.' }
-    );
+    const initCommand = { runInit: jest.fn(async () => 0), runManifest: jest.fn(async () => 1) };
+    jest.doMock('../lib/initCommand', () => initCommand);
+    const exit = jest.spyOn(process, 'exit').mockImplementation(() => {});
+    try {
+      runWithArgv(['node', path.join('bin', 'aiwaf.js'), 'manifest', '--framework', 'fastify', '--routes', 'routes.json']);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(initCommand.runManifest).toHaveBeenCalledWith(['--framework', 'fastify', '--routes', 'routes.json']);
+      expect(exit).toHaveBeenCalledWith(1);
+      exit.mockClear();
+      runWithArgv(['node', path.join('bin', 'aiwaf.js'), 'init', '--app', 'src/app.js']);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(initCommand.runInit).toHaveBeenCalledWith(['--app', 'src/app.js']);
+      expect(exit).toHaveBeenCalledWith(0);
+      expect(mocks.pathManifest.generateFrameworkManifest).not.toHaveBeenCalled();
+    } finally {
+      exit.mockRestore();
+      process.exitCode = undefined;
+      jest.dontMock('../lib/initCommand');
+    }
   });
 
   it('routes status, statistics, cleanup, and blocklist migration', async () => {

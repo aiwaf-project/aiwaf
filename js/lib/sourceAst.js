@@ -8,9 +8,11 @@ try {
   parser = null;
 }
 
+const { handlerText } = require('./sourceRoutes');
+
 function parseFunctionSource(handler) {
-  if (!parser || typeof handler !== 'function') return null;
-  const source = Function.prototype.toString.call(handler);
+  const source = handlerText(handler);
+  if (!parser || source === null) return null;
   const candidates = [
     `(${source})`,
     source
@@ -121,6 +123,19 @@ function analyzeHandlerAst(handler) {
   let requestBody = false;
   let payloadType = '';
   let sawRenderOrRedirect = false;
+  // The handler itself: an arrow whose body is an object, as async () => ({ ok: true }), returns
+  // it as the response in Fastify, Hapi and Nest. Inner callbacks like items.map(x => ({})) don't.
+  let handlerNode = null;
+  walk(tree, node => {
+    if (!handlerNode && ['ArrowFunctionExpression', 'FunctionExpression', 'FunctionDeclaration', 'ObjectMethod', 'ClassMethod'].includes(node.type)) {
+      handlerNode = node;
+    }
+  });
+  if (handlerNode && handlerNode.type === 'ArrowFunctionExpression' && handlerNode.body
+    && ['ObjectExpression', 'ArrayExpression'].includes(handlerNode.body.type)) {
+    apiScore += 50;
+    apiSignals.add('return:json_literal');
+  }
 
   walk(tree, node => {
     if (node.type === 'StringLiteral' || node.type === 'TemplateLiteral') {

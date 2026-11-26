@@ -1781,4 +1781,4 @@ function runAuditCommand(args, write = text => console.log(text)) {
   return options.failOnFindings && report.findings.length ? 1 : 0;
 }
 
-module.exports = { analyzePath, analyzeSource, applyBaseline, fingerprint, formatReport, runAuditCommand, toSarif };
+module.exports = { analyzePath, analyzeSource, applyBaseline, collectFiles, fingerprint, formatReport, parseSource, runAuditCommand, toSarif };

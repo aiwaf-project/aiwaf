@@ -34,10 +34,16 @@ def _init(argv) -> None:
     parser.add_argument("--output", default=".aiwaf/paths.json", help="Output manifest path")
     args = parser.parse_args(argv)
 
+    from aiwaf.core.path_manifest import EmptyManifestError, write_found_manifest
     from aiwaf.fast.path_manifest import generate_fastapi_manifest
 
     app = _load_fastapi_app(args.app)
-    manifest = generate_fastapi_manifest(app, args.output, audit_source=".")
+    manifest = generate_fastapi_manifest(app, args.output, audit_source=".", write=False)
+    try:
+        write_found_manifest(manifest, args.output, f"{args.app} (fastapi)")
+    except EmptyManifestError as exc:
+        sys.stderr.write(f"{exc}\n")
+        raise SystemExit(1) from None
     print(f"Generated {args.output}")
     print(f"Framework: {manifest['framework']}")
     print(f"Routes: {len(manifest.get('routes', {}))}")
