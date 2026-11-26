@@ -440,7 +440,7 @@ held in a constant, as in `request.GET[PAGE_PARAM]` or `getParameter(PAGE)`, is 
 | `model_fields` | A ModelForm, ModelSerializer or `@JsonAnySetter` class takes fields from elsewhere. |
 | `middleware` | Node.js route middleware that isn't a body parser may read the body. |
 | `observed` | A recording saw the code read a name the analysis didn't find. |
-| `unread_view` | Several handlers serve the path, and one's code wasn't found. |
+| `unread_view` | The audit didn't read the code of a handler serving the path, so its risks aren't known. |
 | `not_audited` | `init` ran without the injection audit, so the route's risks aren't known. |
 
 Then `init` fills in what reading the code can't see:

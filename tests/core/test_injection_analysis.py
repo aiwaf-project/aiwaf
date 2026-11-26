@@ -216,7 +216,8 @@ def test_missing_path_raises():
 def test_reports_have_the_shared_shape_and_readable_output(tmp_path):
     (tmp_path / "view.py").write_text(DJANGO_VIEW, encoding="utf-8")
     report = analyze_path(str(tmp_path))
-    assert set(report) == {"schema_version", "language", "files_scanned", "findings", "errors", "inputs"}
+    assert set(report) == {"schema_version", "language", "files_scanned", "findings", "errors", "inputs", "definitions"}
+    assert "definitions" not in json.loads(to_json(report))
     assert report["inputs"] == [{"function": "search", "file": report["findings"][0]["file"], "inputs": {"q": "text"}, "complete": True}]
     # entry_file is added only for an operation in another module than the view.
     assert set(report["findings"][0]) == {"file", "line", "function", "sink", "call", "source", "confidence"}

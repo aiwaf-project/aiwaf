@@ -132,7 +132,8 @@ async function runInit(args, io = { out: console.log, err: console.error }) {
       const loaded = await require('./appLoader').loadApp({ app: options.app, exportName: options.exportName, waitMs: options.waitMs });
       const framework = options.framework || loaded.framework;
       const file = path.relative(process.cwd(), loaded.file) || loaded.file;
-      manifest = pathManifest.buildFrameworkManifest(framework, loaded.app, { auditSource });
+      // Handlers and schemas Fastify doesn't hand back come from the source, audited or not.
+      manifest = pathManifest.buildFrameworkManifest(framework, loaded.app, { auditSource, handlerSource: options.source });
       where = `${file} (${framework})`;
       extra.push(`App: ${file}${loaded.exportName ? ` (export ${loaded.exportName})` : ''}`);
       if (framework === 'koa' && !Object.keys(manifest.routes || {}).length) {

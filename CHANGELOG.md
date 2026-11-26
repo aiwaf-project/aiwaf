@@ -23,6 +23,24 @@
   calls) reading `body.constructor` or `body.toString` crashed the audit with "is not
   iterable". The audit used to log that as skipped and save no findings or inputs; now that a
   failed scan stops `init`, it surfaced, and those names are ordinary keys.
+- **Complete only when the audit read the route:** a route whose handler code the audit never
+  read was still marked complete when its framework's list was complete on its own (FastAPI's
+  parameters, a declaration), as when `--source` pointed at a folder of unrelated files. It now
+  keeps its inputs and types but isn't complete (`unread_view`), in Python, npm and Java. A
+  framework list that isn't complete on its own, as a Fastify schema, is now kept for such a
+  route too, where it was dropped. A handler counts as read when it's defined in the audited
+  source, even when it reads nothing itself (a generic Django class-based view, a Nest
+  controller method taking only a DTO): the audit report now carries the functions, classes
+  and methods each file defines (`definitions`), which `aiwaf audit`'s own output leaves out.
+- **Fastify routes before the plugin keep their schemas:** their schemas now come from the
+  source, statically, from `app.post('/x', { schema }, handler)` and `app.route({ url, method,
+  schema, handler })`, including a schema held in a constant in the same file. A route
+  registered before the plugin lost its declared integer, which became `text`.
+- **Fastify routes sharing a prefix:** reading a live Fastify app's route table dropped routes
+  whose paths share a prefix (`/early` and `/early-order`), because Fastify prints those as a
+  tree even with `commonPrefix: false`. Paths are now rebuilt from the tree.
+- **Fastify `route({ url, handler })` handlers are audited:** the npm audit only linked route
+  objects with Hapi's `path`, so these handlers' reads and risks weren't tied to their routes.
 - **Route-inventory tests** compare `init`'s routes with what each framework reports or serves:
   FastAPI's OpenAPI paths for each mounted app, a real request to every Express route, and
   Fastify's `hasRoute()`.

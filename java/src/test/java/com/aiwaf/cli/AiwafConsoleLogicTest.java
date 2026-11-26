@@ -319,4 +319,17 @@ class AiwafConsoleLogicTest {
         String text = java.nio.file.Files.readString(manifest);
         assertTrue(text.contains("not_audited") && !text.contains("injection_audit"), text);
     }
+
+    @Test
+    void a_route_whose_handler_the_audit_never_read_is_not_complete(@org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+        java.nio.file.Path manifest = directory.resolve("paths.json");
+        java.nio.file.Path unrelated = java.nio.file.Files.createDirectory(directory.resolve("unrelated"));
+        java.nio.file.Files.writeString(unrelated.resolve("Other.java"), "class Other { int x() { return 1; } }\n");
+        int[] status = new int[1];
+        stderrOf(() -> status[0] = AiwafConsole.handleGenerateManifest(new String[]{
+                "init", "--class", PagedController.class.getName(), "--output", manifest.toString(), "--audit-source", unrelated.toString()}));
+        assertEquals(0, status[0]);
+        String text = java.nio.file.Files.readString(manifest);
+        assertTrue(text.contains("unread_view") && text.contains("\"inputs_complete\" : false"), text);
+    }
 }

@@ -124,8 +124,11 @@ describe('route inventory: init lists what the framework serves', () => {
     const app = fixture('fastify-before', 'app.js');
     expect(await runInit(['--app', app, '--output', output, '--source', fixture('fastify-before')], io)).toBe(0);
     const routes = readRoutes(output);
-    expect(Object.keys(routes).sort()).toEqual(['/early', '/late']);
+    expect(Object.keys(routes).sort()).toEqual(['/early', '/early-order', '/early-route', '/late']);
     expect(routes['/late'].inputs).toEqual({ n: 'int' });
+    // The schemas of routes registered before the plugin come from the source.
+    expect(routes['/early-order']).toMatchObject({ inputs: { quantity: 'int' }, inputs_complete: true });
+    expect(routes['/early-route']).toMatchObject({ inputs: { sku: 'text', quantity: 'int' }, inputs_complete: true });
     const fastify = require(app);
     await fastify.ready();
     try {
@@ -139,6 +142,18 @@ describe('route inventory: init lists what the framework serves', () => {
 });
 
 describe('the audit', () => {
+  test('a route whose handler the audit never read is not complete', async () => {
+    const output = path.join(dir, 'paths.json');
+    const unrelated = path.join(dir, 'unrelated');
+    fs.mkdirSync(unrelated);
+    fs.writeFileSync(path.join(unrelated, 'other.js'), 'module.exports = () => 1;\n');
+    const { io } = capture();
+    expect(await runInit(['--app', fixture('fastify-schema', 'app.js'), '--output', output, '--source', unrelated], io)).toBe(0);
+    const route = readRoutes(output)['/orders'];
+    expect(route).toMatchObject({ inputs: { quantity: 'int', sku: 'text' }, inputs_complete: false });
+    expect(route.inputs_incomplete.map(item => item.code)).toEqual(['unread_view']);
+  });
+
   test('a missing audit source fails init and keeps the old manifest', async () => {
     const output = path.join(dir, 'paths.json');
     fs.writeFileSync(output, '{"routes": {"/kept": {}}}');

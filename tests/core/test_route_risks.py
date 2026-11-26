@@ -644,3 +644,24 @@ def test_audit_into_manifest_without_source_keeps_framework_inputs():
     assert route["inputs"] == {"quantity": "int"} and route["inputs_complete"] is False
     assert "declared_inputs" not in route and "input_declaration" not in route
     assert "injection_audit" not in manifest
+
+
+def test_a_framework_list_for_an_unread_view_is_kept_but_not_complete():
+    from aiwaf.core.route_risks import apply_report
+
+    report = {"findings": [], "files_scanned": 1, "inputs": [{"function": "views.read", "file": "views.py", "inputs": {"q": "text"}, "complete": True}]}
+    manifest = {"routes": {
+        "/read": {"view": "views.read", "methods": ["GET"]},
+        "/open": {"view": "views.open", "methods": ["POST"],
+                  "declared_inputs": {"inputs": {"n": "int"}, "covers": [], "reasons": [], "standalone": False}},
+        "/whole": {"view": "views.whole", "methods": ["POST"],
+                   "declared_inputs": {"inputs": {"m": "int"}, "covers": [], "reasons": [], "standalone": True}},
+    }}
+    apply_report(report, manifest)
+    routes = manifest["routes"]
+    assert routes["/read"]["inputs_complete"] is True
+    for path, name in (("/open", "n"), ("/whole", "m")):
+        assert routes[path]["inputs"] == {name: "int"} and routes[path]["inputs_complete"] is False
+        assert [reason["code"] for reason in routes[path]["inputs_incomplete"]] == ["unread_view"]
+    assert manifest["injection_audit"]["routes_with_complete_inputs"] == 1
+    assert manifest["injection_audit"]["incomplete_input_reasons"] == {"unread_view": 2}

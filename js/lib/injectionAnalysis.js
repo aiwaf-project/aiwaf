@@ -416,7 +416,8 @@ class FileAnalyzer {
 
   collectRouteLabel(node) {
     const value = name => node.properties.find(item => item.key && (item.key.name || item.key.value) === name);
-    const route = value('path');
+    // Hapi's { path, handler } and Fastify's route({ url, handler }).
+    const route = value('path') || value('url');
     const handler = value('handler');
     if (route && handler && route.value.type === 'StringLiteral' && handler.value && isFunction(handler.value)) {
       this.routeLabels.set(handler.value, `route ${route.value.value}`);
@@ -1661,7 +1662,29 @@ function analyzePath(target = '.', options = {}) {
     const label = (node, parent) => analyzer.routeLabels.get(node) || functionName(node, parent);
     for (const entry of fileInputs(item.ast, item.display, item.text, label, scopes.get(item.full))) inputs.push(entry);
   }
-  const report = { schema_version: SCHEMA_VERSION, language: 'javascript', files_scanned: filesScanned, findings, errors, inputs };
+  // The functions and class methods each file defines, so a handler the audit read but that
+  // reads nothing itself (a Nest controller method taking only a DTO) still counts as read.
+  const definitions = [];
+  for (const item of parsed) {
+    const visit = (node, owner) => {
+      if (!node || typeof node.type !== 'string') return;
+      let inside = owner;
+      if (node.type === 'FunctionDeclaration' && node.id) definitions.push({ function: node.id.name, file: item.display });
+      else if (node.type === 'VariableDeclarator' && node.id && node.id.type === 'Identifier' && node.init
+        && ['FunctionExpression', 'ArrowFunctionExpression'].includes(node.init.type)) definitions.push({ function: node.id.name, file: item.display });
+      else if ((node.type === 'ClassDeclaration' || node.type === 'ClassExpression') && node.id) inside = node.id.name;
+      else if ((node.type === 'ClassMethod' || node.type === 'ClassPrivateMethod') && owner && node.key && node.key.type === 'Identifier'
+        && node.kind === 'method') definitions.push({ function: `${owner}.${node.key.name}`, file: item.display });
+      for (const key of Object.keys(node)) {
+        if (key === 'loc' || key === 'start' || key === 'end' || key === 'extra') continue;
+        const value = node[key];
+        if (Array.isArray(value)) value.forEach(child => visit(child, inside));
+        else if (value && typeof value.type === 'string') visit(value, inside);
+      }
+    };
+    visit(item.ast.program, null);
+  }
+  const report = { schema_version: SCHEMA_VERSION, language: 'javascript', files_scanned: filesScanned, findings, errors, inputs, definitions };
   if (suppressed) report.suppressed = suppressed;
   return report;
 }
@@ -1765,7 +1788,9 @@ function runAuditCommand(args, write = text => console.log(text)) {
     write(String(error.message || error));
     return 2;
   }
-  const content = options.format === 'json' ? JSON.stringify(report, null, 2)
+  // definitions only tell init which handlers were read; the printed report leaves them out.
+  const { definitions, ...printed } = report;
+  const content = options.format === 'json' ? JSON.stringify(printed, null, 2)
     : options.format === 'sarif' ? toSarif(report) : formatReport(report);
   if (options.output) fs.writeFileSync(options.output, `${content}\n`);
   else write(content);

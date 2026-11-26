@@ -110,7 +110,58 @@ describe('handlers from source in manifests', () => {
   });
 });
 
+describe('schemas in the source', () => {
+  test('literal schemas, from route options, route() objects and constants', () => {
+    write('app.js', `
+      const bodySchema = { type: 'object', properties: { n: { type: 'integer' } } };
+      const shared = { body: bodySchema };
+      fastify.post('/inline', { schema: { querystring: { type: 'object', properties: { q: { type: 'string' } } } } }, async () => ({}));
+      fastify.post('/named', { schema: shared }, async () => ({}));
+      fastify.route({ method: ['PUT', 'PATCH'], url: '/route', schema: shared, handler: async () => ({}) });
+      fastify.route({ method: 'GET', path: '/plain', handler: list });
+      function list() { return []; }
+      fastify.post('/dynamic', { schema: makeSchema() }, async () => ({}));
+      fastify.post('/computed', { schema: { [key]: {} } }, async () => ({}));
+      fastify.post('/spread', { schema: { ...shared } }, async () => ({}));
+      fastify.post('/template', { schema: { body: { description: \`x\${y}\` } } }, async () => ({}));
+      fastify.route({ method: 'GET', url: '/nohandler' });
+    `);
+    const found = routeHandlers(dir);
+    expect(found.get('POST /inline').schema).toEqual({ querystring: { type: 'object', properties: { q: { type: 'string' } } } });
+    expect(found.get('POST /named').schema).toEqual({ body: { type: 'object', properties: { n: { type: 'integer' } } } });
+    expect(found.get('PUT /route').schema).toEqual(found.get('PATCH /route').schema);
+    expect(found.get('GET /plain').schema).toBeNull();
+    for (const key of ['POST /dynamic', 'POST /computed', 'POST /spread', 'POST /template']) expect([key, found.get(key).schema]).toEqual([key, null]);
+    expect(found.has('GET /nohandler')).toBe(false);
+  });
+
+  test('a listed route without a schema takes the source\'s, and keeps its own', () => {
+    write('app.js', "fastify.post('/a', { schema: { body: { type: 'object', properties: { n: { type: 'integer' } } } } }, async request => ({ n: request.body.n }));");
+    const own = { body: { type: 'object', properties: { n: { type: 'string' } } } };
+    const manifest = pathManifest.buildFrameworkManifest('fastify', null, {
+      routes: [{ path: '/a', method: 'POST' }, { path: '/b', method: 'POST', schema: own, handler: () => ({}) }], handlerSource: dir
+    });
+    expect(manifest.routes['/a'].inputs).toEqual({ n: 'int' });
+    expect(manifest.routes['/b'].inputs).toEqual({ n: 'text' });
+  });
+});
+
 describe('live route reading', () => {
+  test('a Fastify route table with shared prefixes gives every full path', async () => {
+    const fastify = require('fastify')();
+    for (const route of ['/', '/early', '/early-order', '/api', '/api/items/:id', '/api/items/:id/notes']) fastify.get(route, async () => ({}));
+    fastify.post('/early-order', async () => ({}));
+    await fastify.ready();
+    try {
+      const listed = pathManifest.fastifyRouteList(fastify);
+      expect(listed.map(route => route.path)).toEqual(['/', '/early', '/early-order', '/api', '/api/items/:id', '/api/items/:id/notes']);
+      expect(listed.find(route => route.path === '/early-order').methods).toEqual(['GET', 'POST']);
+      for (const route of listed) for (const method of route.methods) expect(fastify.hasRoute({ url: route.path, method })).toBe(true);
+    } finally {
+      await fastify.close();
+    }
+  });
+
   test('a ready Fastify app lists every route with its methods', async () => {
     const fastify = require('fastify')();
     fastify.get('/health', async () => ({ ok: true }));
@@ -139,4 +190,27 @@ describe('live route reading', () => {
     expect(pathManifest.extractKoaRoutes({ middleware: [] })).toEqual({});
     expect(pathManifest.extractKoaRoutes(null)).toEqual({});
   });
+});
+
+test('a handler defined in the audited source counts as read even when it reads nothing', () => {
+  write('orders.controller.ts', `
+    export class OrdersController {
+      list() { return []; }
+      create(body) { return this.svc.create(body); }
+    }
+    export function health() { return 'ok'; }
+    export const ping = () => 'pong';
+  `);
+  const { analyzePath } = require('../lib/injectionAnalysis');
+  const { applyReport } = require('../lib/routeRisks');
+  const report = analyzePath(dir);
+  expect(report.definitions.map(item => item.function).sort()).toEqual(['OrdersController.create', 'OrdersController.list', 'health', 'ping']);
+  const framework = standalone => ({ inputs: { sku: 'text' }, covers: [], reasons: [], standalone });
+  const manifest = { routes: {
+    '/orders': { view: 'create', methods: ['POST'], declared_inputs: framework(true) },
+    '/elsewhere': { view: 'other', methods: ['POST'], declared_inputs: framework(true) }
+  } };
+  applyReport(report, manifest);
+  expect(manifest.routes['/orders']).toMatchObject({ inputs: { sku: 'text' }, inputs_complete: true });
+  expect(manifest.routes['/elsewhere']).toMatchObject({ inputs: { sku: 'text' }, inputs_complete: false });
 });

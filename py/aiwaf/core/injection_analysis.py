@@ -1493,9 +1493,15 @@ def analyze_path(path: str = ".", *, include_tests: bool = False) -> dict:
         summaries.clear()
     scanned = len(analyzers) - len(failed)
     inputs: List[dict] = []
+    # The functions and classes each file defines, so a view the audit read but that reads
+    # nothing itself (a generic class-based view) still counts as read.
+    definitions: List[dict] = []
     for analyzer in analyzers:
         findings.extend(analyzer.findings.values())
         if analyzer.filename not in failed:
+            for node in getattr(analyzer.tree, "body", ()):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    definitions.append({"function": node.name, "file": analyzer.filename})
             try:
                 inputs.extend(module_inputs(analyzer.tree, analyzer.filename, input_modules.get(analyzer.filename)))
             except RecursionError:
@@ -1508,6 +1514,7 @@ def analyze_path(path: str = ".", *, include_tests: bool = False) -> dict:
         "findings": [_as_dict(finding) for finding in sorted(kept, key=lambda item: (item.file, item.line, item.sink, item.function))],
         "errors": errors,
         "inputs": inputs,
+        "definitions": definitions,
     }
     if suppressed:
         report["suppressed"] = suppressed
@@ -1613,4 +1620,5 @@ def format_report(report: dict) -> str:
 
 
 def to_json(report: dict) -> str:
-    return json.dumps(report, indent=2, sort_keys=True)
+    # definitions only tell init which views were read; the printed report leaves them out.
+    return json.dumps({key: value for key, value in report.items() if key != "definitions"}, indent=2, sort_keys=True)

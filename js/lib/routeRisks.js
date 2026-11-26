@@ -259,10 +259,12 @@ function applyReport(report, manifest, sources = {}) {
     routes[path].injection_risks = [...risks.keys()].sort().map(key => risks.get(key));
   }
   // What each route reads, with types. A route whose handlers weren't all found gets none.
+  const read = new Set();
   for (const entry of report.inputs || []) {
     // The method a handler serves, from its label, as app.get /items; unknown for a named one.
     const labelled = (/^(?:\S+\.)?(get|post|put|patch|delete|head|options) \//i.exec(String(entry.function || '')) || [])[1];
     for (const path of routesFor(entry, routes)) {
+      read.add(path);
       mergeInto(routes, path, entry);
       const route = routes[path];
       // Or, for a handler passed by name, the methods the app routed it for.
@@ -279,7 +281,31 @@ function applyReport(report, manifest, sources = {}) {
       }
     }
   }
+  // A handler defined in the audited source was read even when it reads nothing itself.
+  for (const definition of report.definitions || []) {
+    for (const path of routesFor(definition, routes)) read.add(path);
+  }
+  // A framework list for a handler the audit didn't read still goes in, as incomplete
+  // (finalize skips a route it can't tell was read otherwise).
+  for (const [path, entry] of Object.entries(routes)) {
+    const framework = entry && typeof entry === 'object' ? entry.declared_inputs : null;
+    if (read.has(path) || !framework || typeof framework !== 'object' || framework.standalone) continue;
+    entry.inputs_complete = false;
+    entry.inputs_incomplete = [{ code: 'unread_view', detail: `the audit didn't read ${entry.view || 'its handler'}` }];
+  }
   const completeness = inputSources.finalize(routes, sources || {});
+  // A route none of whose handlers the audit read has inputs only from the framework or a
+  // declaration: complete as a list, but its risks weren't looked for. So it isn't complete.
+  for (const [path, entry] of Object.entries(routes)) {
+    if (!entry || typeof entry !== 'object' || read.has(path) || !entry.inputs || entry.inputs_complete !== true) continue;
+    entry.inputs_complete = false;
+    entry.inputs_incomplete = [{ code: 'unread_view', detail: `the audit didn't read ${entry.view || 'its handler'}` }];
+    delete entry.inputs_by_method;
+    delete entry.inputs_nested;
+    completeness.complete -= 1;
+    completeness.incomplete += 1;
+    completeness.reasons.unread_view = (completeness.reasons.unread_view || 0) + 1;
+  }
   const typed = Object.values(routes).filter(entry => entry && typeof entry === 'object' && entry.inputs).length;
   manifest.injection_audit = {
     generated_at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),

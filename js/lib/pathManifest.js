@@ -569,9 +569,11 @@ function normalizeRouteList(routesInput = []) {
     .filter(route => route.routePath);
 }
 
-// A ready Fastify app's routes, as a route list, from printRoutes({ commonPrefix: false }), which
-// prints one full path per line with its methods: "├── /api/items/:id (GET, HEAD)". Fastify
-// doesn't hand back its handlers, so the source supplies them (withSourceHandlers).
+// A ready Fastify app's routes, as a route list, from printRoutes({ commonPrefix: false }). It
+// prints a tree whose nodes share prefixes, each line one node's part of the path with the
+// methods ending there: "└── /", "    ├── early (GET, HEAD)", "    │   ├── -order (POST)". A
+// route's path is its line's part after its ancestors'. Fastify doesn't hand back its handlers,
+// so the source supplies them (withSourceHandlers).
 function fastifyRouteList(fastify) {
   if (typeof fastify?.printRoutes !== 'function') return [];
   let printed = '';
@@ -581,11 +583,16 @@ function fastifyRouteList(fastify) {
     return [];
   }
   const list = [];
+  const parts = [];
   for (const line of printed.split('\n')) {
-    const match = /(\/\S*)\s+\(([A-Z, ]+)\)\s*$/.exec(line);
+    const match = /^((?:[│ ] {3})*)[├└]── (.+?)(?: \(([A-Z, ]+)\))?\s*$/.exec(line);
     if (!match) continue;
-    const methods = match[2].split(',').map(method => method.trim()).filter(method => method && method !== 'HEAD');
-    if (methods.length) list.push({ path: match[1], methods });
+    const depth = match[1].length / 4;
+    parts.length = depth;
+    parts.push(match[2]);
+    const methods = (match[3] || '').split(',').map(method => method.trim()).filter(method => method && method !== 'HEAD');
+    const routePath = parts.join('');
+    if (methods.length && routePath.startsWith('/')) list.push({ path: routePath, methods });
   }
   return list;
 }
@@ -789,12 +796,17 @@ function withSourceHandlers(routesInput, source) {
   if (!handlers.size) return routesInput;
   const { handlerFor } = require('./sourceRoutes');
   return routesInput.map(route => {
-    if (!route || route.handler || route.handle || route.endpoint) return route;
+    if (!route || ((route.handler || route.handle || route.endpoint) && route.schema)) return route;
     const routePath = route.path || route.url || route.routePath || route.pattern;
     if (!routePath) return route;
     const methods = [].concat(route.methods || route.method || []).map(method => String(method).toUpperCase());
-    const handler = handlerFor(handlers, routePath, methods);
-    return handler ? { ...route, handler } : route;
+    const found = handlerFor(handlers, routePath, methods);
+    if (!found) return route;
+    const filled = { ...route };
+    if (!(route.handler || route.handle || route.endpoint)) filled.handler = found;
+    // A schema written in the source, for a route Fastify didn't hand over with its options.
+    if (!route.schema && found.schema) filled.schema = found.schema;
+    return filled;
   });
 }
 

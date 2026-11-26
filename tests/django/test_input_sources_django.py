@@ -186,8 +186,22 @@ class ManifestTests(SimpleTestCase):
             loaded = types.ModuleType("shop.views")
             loaded.AddressForm = UserForm
             sys.modules["shop.views"] = loaded
-            routes = generate_django_manifest(str(Path(folder) / "paths.json"), audit_source=str(source))["routes"]
+            # Contact and Notes are generic views: they read nothing themselves, and the audit
+            # counts them read once their module is in the audited source.
+            unread = generate_django_manifest(str(Path(folder) / "paths.json"), audit_source=str(source))["routes"]
+            (source / "shop" / "generic.py").write_text("class Contact:\n    pass\nclass Notes:\n    pass\n", encoding="utf-8")
+            modules = {view: view.__module__ for view in (Contact, Notes)}
+            try:
+                for view in modules:
+                    view.__module__ = "shop.generic"
+                routes = generate_django_manifest(str(Path(folder) / "paths.json"), audit_source=str(source))["routes"]
+            finally:
+                for view, module in modules.items():
+                    view.__module__ = module
             del sys.modules["shop.views"]
+        self.assertEqual(unread["/contact/"]["inputs"], {"name": "text", "age": "int", "subscribe": "bool"})
+        self.assertFalse(unread["/contact/"]["inputs_complete"])
+        self.assertEqual([reason["code"] for reason in unread["/contact/"]["inputs_incomplete"]], ["unread_view"])
         self.assertEqual(routes["/contact/"]["inputs"], {"name": "text", "age": "int", "subscribe": "bool"})
         self.assertTrue(routes["/contact/"]["inputs_complete"])
         self.assertTrue(routes["/notes/"]["inputs_complete"])

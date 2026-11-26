@@ -280,6 +280,10 @@ def apply_report(report: Mapping[str, Any], manifest: dict, sources: Optional[Ma
                     claims.setdefault(path, {}).setdefault(str(method).upper(), set()).update(entry["inputs"])
     for path, methods in claims.items():
         routes[path]["_input_methods"] = {method: sorted(names) for method, names in methods.items()}
+    # A view defined in the audited source was read even when it reads nothing itself.
+    for definition in report.get("definitions", ()):
+        for path in _routes_for(definition, routes):
+            read.setdefault(path, set()).update(_matching_views(definition, routes[path]))
     # A path several views serve is only complete when every one's code was read.
     for path, seen in read.items():
         data = routes[path]
@@ -289,7 +293,29 @@ def apply_report(report: Mapping[str, Any], manifest: dict, sources: Optional[Ma
             reason = {"code": "unread_view", "detail": f"{view} also serves this path, and its code wasn't found"}
             if reason not in reasons:
                 reasons.append(reason)
+    # A framework list for a view the audit didn't read still goes in, as incomplete (finalize
+    # skips a route it can't tell was read otherwise).
+    for path, data in routes.items():
+        framework = data.get("declared_inputs") if isinstance(data, dict) else None
+        if path in read or not isinstance(framework, dict) or framework.get("standalone"):
+            continue
+        views = sorted(_views(data)) or ["its handler"]
+        data["inputs_complete"] = False
+        data["inputs_incomplete"] = [{"code": "unread_view", "detail": f"the audit didn't read {', '.join(views)}"}]
     completeness = input_sources.finalize(routes, **dict(sources or {}))
+    # A route none of whose views the audit read has inputs only from the framework or a
+    # declaration: complete as a list, but its risks weren't looked for. So it isn't complete.
+    for path, data in routes.items():
+        if not isinstance(data, dict) or path in read or "inputs" not in data or not data.get("inputs_complete"):
+            continue
+        views = sorted(_views(data)) or ["its handler"]
+        data["inputs_complete"] = False
+        data["inputs_incomplete"] = [{"code": "unread_view", "detail": f"the audit didn't read {', '.join(views)}"}]
+        data.pop("inputs_by_method", None)
+        data.pop("inputs_nested", None)
+        completeness["complete"] -= 1
+        completeness["incomplete"] += 1
+        completeness["reasons"]["unread_view"] = completeness["reasons"].get("unread_view", 0) + 1
     for data in routes.values():
         if isinstance(data, dict) and "inputs" in data:
             typed += 1

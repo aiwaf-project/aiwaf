@@ -475,7 +475,34 @@ public final class RouteRiskCore {
                 target.put("inputs_incomplete", reasons);
             }
         });
-        InputSourcesCore.Counts completeness = InputSourcesCore.finalize(routes, sources == null ? InputSourcesCore.Sources.none() : sources);
+        InputSourcesCore.Sources given = sources == null ? InputSourcesCore.Sources.none() : sources;
+        // A framework list for a handler the audit didn't read still goes in, as incomplete
+        // (finalize skips a route it can't tell was read otherwise).
+        for (Map.Entry<String, Object> route : routes.entrySet()) {
+            Map<String, Object> framework = given.framework().get(route.getKey());
+            if (read.containsKey(route.getKey()) || framework == null || Boolean.TRUE.equals(framework.get("standalone"))
+                    || !(route.getValue() instanceof Map<?, ?> raw)) continue;
+            ((Map<String, Object>) raw).put("inputs_complete", false);
+            ((Map<String, Object>) raw).put("inputs_incomplete", List.of(unreadReason((Map<String, Object>) raw)));
+        }
+        InputSourcesCore.Counts finalized = InputSourcesCore.finalize(routes, given);
+        // A route none of whose handlers the audit read has inputs only from the framework or a
+        // declaration: complete as a list, but its risks weren't looked for. So it isn't complete.
+        int unread = 0;
+        for (Map.Entry<String, Object> route : routes.entrySet()) {
+            if (read.containsKey(route.getKey()) || !(route.getValue() instanceof Map<?, ?> raw)
+                    || !raw.containsKey("inputs") || !Boolean.TRUE.equals(raw.get("inputs_complete"))) continue;
+            Map<String, Object> data = (Map<String, Object>) raw;
+            data.put("inputs_complete", false);
+            data.put("inputs_incomplete", List.of(unreadReason(data)));
+            data.remove("inputs_by_method");
+            data.remove("inputs_nested");
+            unread++;
+        }
+        Map<String, Integer> reasonCounts = new java.util.TreeMap<>(finalized.reasons());
+        if (unread > 0) reasonCounts.merge("unread_view", unread, Integer::sum);
+        InputSourcesCore.Counts completeness = new InputSourcesCore.Counts(
+                finalized.complete() - unread, finalized.incomplete() + unread, reasonCounts);
         int typed = (int) routes.values().stream().filter(data -> data instanceof Map<?, ?> map && map.containsKey("inputs")).count();
         Map<String, Object> audit = new LinkedHashMap<>();
         audit.put("generated_at", Instant.now().truncatedTo(ChronoUnit.SECONDS).toString());
@@ -487,6 +514,14 @@ public final class RouteRiskCore {
         if (!completeness.reasons().isEmpty()) audit.put("incomplete_input_reasons", completeness.reasons());
         manifest.put("injection_audit", audit);
         return new Counts(collected.size(), linked, unlinked, typed);
+    }
+
+    private static Map<String, Object> unreadReason(Map<String, Object> data) {
+        List<String> views = new ArrayList<>(new TreeSet<>(PathManifestCore.views(data)));
+        Map<String, Object> reason = new LinkedHashMap<>();
+        reason.put("code", "unread_view");
+        reason.put("detail", "the audit didn't read " + (views.isEmpty() ? "its handler" : String.join(", ", views)));
+        return reason;
     }
 
     /** Saves a report's findings into an existing manifest file. */

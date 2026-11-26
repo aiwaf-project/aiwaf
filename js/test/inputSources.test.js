@@ -159,7 +159,10 @@ test('init applies declarations and reports completeness', () => {
   }
   expect(manifest.routes['/search']).toMatchObject({ inputs: { q: 'text' }, inputs_complete: true });
   expect(manifest.routes['/search'].input_declaration).toBeUndefined();
-  expect(manifest.injection_audit.routes_with_complete_inputs).toBe(2);
+  // /other's handler isn't in the audited source, so its risks weren't looked for.
+  expect(manifest.injection_audit.routes_with_complete_inputs).toBe(1);
+  expect(manifest.routes['/other']).toMatchObject({ inputs: {}, inputs_complete: false });
+  expect(manifest.routes['/other'].inputs_incomplete.map(item => item.code)).toEqual(['unread_view']);
   const skipped = { routes: { '/x': { input_declaration: {} } } };
   expect(auditIntoManifest(skipped, null)).toBeNull();
   expect(skipped.routes['/x'].input_declaration).toBeUndefined();

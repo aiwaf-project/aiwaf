@@ -385,7 +385,7 @@ app.get('/harmless', (req, res) => { sql.harmless(req.query.q); });`);
     test('reports use the shared format and are readable', () => {
       write('a.js', FRAMEWORKS.express);
       const report = analyzePath(directory);
-      expect(Object.keys(report).sort()).toEqual(['errors', 'files_scanned', 'findings', 'inputs', 'language', 'schema_version']);
+      expect(Object.keys(report).sort()).toEqual(['definitions', 'errors', 'files_scanned', 'findings', 'inputs', 'language', 'schema_version']);
       expect(Object.keys(report.findings[0]).sort()).toEqual(['call', 'confidence', 'file', 'function', 'line', 'sink', 'source']);
       expect(formatReport(report)).toContain('req.query.id reaches db.query in app.get /x');
     });

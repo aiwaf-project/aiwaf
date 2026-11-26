@@ -265,3 +265,25 @@ def test_init_keeps_the_old_manifest_when_the_audit_source_is_missing(monkeypatc
     assert exited.value.code == 1
     assert "The audit source nowhere doesn't exist" in capsys.readouterr().err
     assert output.read_text(encoding="utf-8") == '{"routes": {"/kept": {}}}'
+
+
+def test_init_marks_a_route_the_audit_never_read_incomplete(monkeypatch, tmp_path):
+    pytest.importorskip("fastapi")
+    _drop_app_module()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "app.py").write_text(
+        "from fastapi import FastAPI\nfrom pydantic import BaseModel\n"
+        "class Order(BaseModel):\n    sku: str\n    quantity: int\n"
+        "app = FastAPI()\n@app.post('/orders')\ndef create(order: Order):\n    return {'sku': order.sku}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "unrelated").mkdir()
+    (tmp_path / "unrelated" / "other.py").write_text("def other():\n    return 1\n", encoding="utf-8")
+    _handle_init(["--framework", "fastapi", "--app", "app:app", "--source", "unrelated", "--no-native"])
+    route = json.loads((tmp_path / ".aiwaf" / "paths.json").read_text(encoding="utf-8"))["routes"]["/orders"]
+    assert route["inputs"] == {"quantity": "int", "sku": "text"} and route["inputs_complete"] is False
+    assert [reason["code"] for reason in route["inputs_incomplete"]] == ["unread_view"]
+    _drop_app_module()
+    _handle_init(["--framework", "fastapi", "--app", "app:app", "--source", ".", "--no-native"])
+    route = json.loads((tmp_path / ".aiwaf" / "paths.json").read_text(encoding="utf-8"))["routes"]["/orders"]
+    assert route["inputs_complete"] is True
