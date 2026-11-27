@@ -240,6 +240,7 @@ function applyReport(report, manifest, sources = {}) {
       delete entry.inputs_incomplete;
       delete entry.inputs_by_method;
       delete entry.inputs_nested;
+      delete entry.inputs_types_by_method;
     }
   }
   let linked = 0;

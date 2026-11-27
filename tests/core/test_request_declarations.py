@@ -130,3 +130,17 @@ with override_settings(DATA_UPLOAD_MAX_MEMORY_SIZE=1234, FILE_UPLOAD_MAX_MEMORY_
     env['PYTHONPATH'] = str(Path(__file__).resolve().parents[2] / 'py') + os.pathsep + env.get('PYTHONPATH', '')
     result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=60, env=env)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_merging_handlers_keeps_each_methods_own_types():
+    from aiwaf.core.request_declarations import merge_entries
+
+    def entry(method, inputs):
+        return {"methods": [method], "view": f"v.{method.lower()}", "request_constraints": [],
+                "declared_inputs": {"inputs": inputs, "covers": [], "reasons": [], "standalone": True}}
+
+    merged = merge_entries(entry("GET", {"mode": "text"}), entry("POST", {"mode": "int", "weeks": "int"}))
+    assert merged["declared_types"] == {"POST": {"mode": "int", "weeks": "int"}}
+    twice = merge_entries(merged, entry("POST", {"mode": "float"}))
+    assert twice["declared_types"]["POST"] == {"mode": "text", "weeks": "int"}
+

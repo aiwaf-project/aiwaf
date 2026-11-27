@@ -224,9 +224,22 @@ struct RiskRoute {
     /// The keys read inside object-valued inputs, as {"user": ["email", "name"]}
     /// (`inputs_nested`), for inputs whose every use reads a constant key.
     nested: HashMap<String, HashSet<String>>,
+    /// A method's own type for a name, where methods on the path differ, as POST's integer mode
+    /// next to GET's text mode (`inputs_types_by_method`). `inputs` keeps the type every method
+    /// agrees on, which is what an engine without this reads.
+    method_types: HashMap<String, HashMap<String, String>>,
 }
 
 impl RiskRoute {
+    /// The type a request with this method checks a name against: the method's own, else the route's.
+    fn kind(&self, method: &str, name: &str) -> Option<&str> {
+        let method = method.to_ascii_uppercase();
+        let own = self.method_types.get(&method).or_else(|| if method == "HEAD" { self.method_types.get("GET") } else { None });
+        own.and_then(|types| types.get(name))
+            .or_else(|| self.inputs.as_ref().and_then(|inputs| inputs.get(name)))
+            .map(String::as_str)
+    }
+
     /// The names a request with this method may send under strict inputs.
     fn reads(&self, method: &str, name: &str) -> bool {
         let method = method.to_ascii_uppercase();
@@ -493,6 +506,26 @@ impl RouteRisks {
                                 .collect()
                         })
                         .unwrap_or_default();
+                    let method_types = entry
+                        .get("inputs_types_by_method")
+                        .and_then(Value::as_object)
+                        .map(|methods| {
+                            methods
+                                .iter()
+                                .filter_map(|(method, types)| {
+                                    let types = types
+                                        .as_object()?
+                                        .iter()
+                                        .filter_map(|(name, kind)| {
+                                            let kind = kind.as_str().filter(|kind| INPUT_TYPES.contains(kind))?;
+                                            Some((name.clone(), kind.to_owned()))
+                                        })
+                                        .collect();
+                                    Some((method.to_ascii_uppercase(), types))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     routes.push(RiskRoute {
                         path: path.clone(),
                         compiled: compile_route(path),
@@ -502,6 +535,7 @@ impl RouteRisks {
                         path_types,
                         by_method,
                         nested,
+                        method_types,
                     });
                 }
             }
@@ -633,11 +667,15 @@ impl RouteRisks {
             _ => (),
         }
         for (name, value) in &all {
-            if let Some(kind) = inputs.get(*name).filter(|kind| kind.as_str() != "text") {
+            if let Some(kind) = route.kind(method, name).filter(|kind| *kind != "text") {
                 if !fits(kind, value) {
                     // The name comes from the manifest, because request names are untrusted.
-                    let input = inputs.get_key_value(*name).map(|(key, _)| key.clone()).unwrap_or_default();
-                    return Some(Review::Mismatch { route: route.path.clone(), input, kind: kind.clone() });
+                    let input = inputs
+                        .get_key_value(*name)
+                        .or_else(|| route.method_types.values().find_map(|types| types.get_key_value(*name)))
+                        .map(|(key, _)| key.clone())
+                        .unwrap_or_default();
+                    return Some(Review::Mismatch { route: route.path.clone(), input, kind: kind.to_owned() });
                 }
             }
         }
@@ -868,6 +906,29 @@ mod tests {
     }
 
     /// What a request comes to: the general check, then the route's schema review.
+    #[test]
+    fn a_method_checks_its_own_type_where_methods_differ() {
+        let risks = RouteRisks::new(&json!({"routes": {
+            "/plans": {"view": "p", "inputs": {"mode": "text", "weeks": "int"}, "inputs_complete": true,
+                       "inputs_types_by_method": {"post": {"mode": "int"}, "GET": {"weeks": "text", "bad": "nonsense"}}}
+        }}));
+        let mismatch = |method: &str, query: &str, body: &str| match risks.review_method(method, "/plans", query, body.as_bytes(), 4096, None) {
+            Some(Review::Mismatch { input, kind, .. }) => Some((input, kind)),
+            _ => None,
+        };
+        // POST's own integer; GET keeps the route's text, and its own text for weeks.
+        assert_eq!(mismatch("POST", "", r#"{"mode": "fast"}"#), Some(("mode".into(), "int".into())));
+        assert_eq!(mismatch("POST", "", r#"{"mode": 3}"#), None);
+        assert_eq!(mismatch("GET", "mode=fast&weeks=two", ""), None);
+        // HEAD reads GET's; a method with no types of its own reads the route's.
+        assert_eq!(mismatch("HEAD", "weeks=two", ""), None);
+        assert_eq!(mismatch("DELETE", "weeks=two", ""), Some(("weeks".into(), "int".into())));
+        assert_eq!(mismatch("DELETE", "mode=fast", ""), None);
+        // Without the entry, as an older manifest, every method reads the route's types.
+        let plain = RouteRisks::new(&json!({"routes": {"/plans": {"view": "p", "inputs": {"mode": "text"}, "inputs_complete": true}}}));
+        assert!(plain.review_method("POST", "/plans", "", br#"{"mode": "fast"}"#, 4096, None).is_none());
+    }
+
     #[test]
     fn strict_inputs_flags_names_a_complete_route_never_reads() {
         let routes = json!({

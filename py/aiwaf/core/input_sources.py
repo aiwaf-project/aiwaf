@@ -839,6 +839,7 @@ def finalize(
         declaration = data.pop("input_declaration", None)
         # Which method reads what: the code reading's and the framework's, per method. Names
         # from anywhere else are shared by every method.
+        declared_types = data.pop("declared_types", None) or {}
         code_methods = {str(method).upper(): set(names) for method, names in (data.pop("_input_methods", None) or {}).items()}
         declared_methods = {str(method).upper(): set(names) for method, names in (data.pop("declared_methods", None) or {}).items()}
         claims = {method: set(names) for method, names in code_methods.items()}
@@ -942,6 +943,17 @@ def finalize(
             data["inputs_nested"] = inner
         else:
             data.pop("inputs_nested", None)
+        # A method's own type for a name, where it isn't the route's (a POST's integer next to a
+        # GET's text): engines that read inputs_types_by_method check it for that method alone.
+        own_types: Dict[str, Dict[str, str]] = {}
+        for method, types in declared_types.items():
+            for name, kind in types.items():
+                if kind != "text" and name in found and found[name] != kind:
+                    own_types.setdefault(str(method).upper(), {})[name] = kind
+        if own_types:
+            data["inputs_types_by_method"] = own_types
+        else:
+            data.pop("inputs_types_by_method", None)
         by_method = _by_method(found, data.get("methods") or (), claims, shared) if not reasons else None
         if by_method:
             data["inputs_by_method"] = by_method

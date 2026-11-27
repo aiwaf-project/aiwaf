@@ -73,7 +73,19 @@ public final class RouteSchemaCore {
      */
     private record Route(String path, RouteRiskCore.CompiledRoute compiled, Map<String, String> inputs, boolean complete,
                          Set<String> reached, boolean unnamedRisk, List<String> pathTypes, Map<String, Set<String>> byMethod,
-                         Map<String, Set<String>> nested) {
+                         Map<String, Set<String>> nested, Map<String, Map<String, String>> methodTypes) {
+        /**
+         * The type a request with this method checks a name against: the method's own
+         * (inputs_types_by_method, where methods on the path differ), else the route's.
+         */
+        String kind(String method, String name) {
+            String upper = method == null ? "" : method.toUpperCase(Locale.ROOT);
+            Map<String, String> own = methodTypes.get(upper);
+            if (own == null && upper.equals("HEAD")) own = methodTypes.get("GET");
+            String kind = own == null ? null : own.get(name);
+            return kind != null ? kind : inputs.get(name);
+        }
+
         boolean reads(String method, String name) {
             String upper = method == null ? "" : method.toUpperCase(Locale.ROOT);
             Set<String> own = byMethod.get(upper);
@@ -235,8 +247,20 @@ public final class RouteSchemaCore {
                             nested.put(String.valueOf(key.getKey()), listed);
                         }
                     }
+                    Map<String, Map<String, String>> methodTypes = new HashMap<>();
+                    if (entry.get("inputs_types_by_method") instanceof Map<?, ?> methods) {
+                        for (Map.Entry<?, ?> method : methods.entrySet()) {
+                            if (!(method.getValue() instanceof Map<?, ?> types)) continue;
+                            Map<String, String> own = new HashMap<>();
+                            for (Map.Entry<?, ?> type : types.entrySet()) {
+                                if (type.getValue() instanceof String kind && INPUT_TYPES.contains(kind)) own.put(String.valueOf(type.getKey()), kind);
+                            }
+                            methodTypes.put(String.valueOf(method.getKey()).toUpperCase(Locale.ROOT), own);
+                        }
+                    }
                     routes.add(new Route(path, RouteRiskCore.compileRoute(path), inputs,
-                            inputs != null && Boolean.TRUE.equals(entry.get("inputs_complete")), reached, unnamed, pathTypes, byMethod, nested));
+                            inputs != null && Boolean.TRUE.equals(entry.get("inputs_complete")), reached, unnamed, pathTypes, byMethod, nested,
+                            methodTypes));
                 }
             }
             // Exact routes win over routes with parameters, as in RouteRiskCore.
@@ -302,7 +326,7 @@ public final class RouteSchemaCore {
             List<Field> all = new ArrayList<>(queryFields);
             if (bodyFields != null) all.addAll(bodyFields);
             for (Field field : all) {
-                String kind = route.inputs().get(field.name());
+                String kind = route.kind(method, field.name());
                 if (kind != null && !kind.equals("text") && !fits(kind, field.value())) {
                     return new Review("mismatch", route.path(), field.name(), kind, null);
                 }

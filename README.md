@@ -39,14 +39,14 @@ the supported Redis backends when sharing limits across workers.
 
 Each package is versioned and released independently.
 
-Python 1.3.3, Rust/Python 0.2.17, Node.js 1.3.3, WASM 0.2.13, and Java 1.4.0 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
+Python 1.3.4, Rust/Python 0.2.18, Node.js 1.3.4, WASM 0.2.14, and Java 1.4.0 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
 
 | Runtime | Package | Repository version | Primary use |
 | --- | --- | ---: | --- |
-| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.3.3` | Django, Flask, and FastAPI protection |
-| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.3.3` | Express and Node framework middleware |
-| Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.17` | Native Python acceleration and JSON model inference |
-| WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.13` | Rust detection and model primitives for JavaScript |
+| Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.3.4` | Django, Flask, and FastAPI protection |
+| Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.3.4` | Express and Node framework middleware |
+| Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.18` | Native Python acceleration and JSON model inference |
+| WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.14` | Rust detection and model primitives for JavaScript |
 | Java | `io.github.aiwaf-project:aiwaf-java` | `1.4.0` | Spring MVC and Jakarta Servlet protection |
 
 Supported framework integrations include Django, Flask, FastAPI, Express, Fastify, Hapi, Koa, NestJS, Next.js API routes, AdonisJS, Sails.js, Spring MVC, and Jakarta Servlet.
@@ -425,9 +425,19 @@ into the project's other files through imports: `from .forms import ContactForm`
 Body } from './schemas'`, `require('./helpers')`, or a static `Paging.page(request)` in Java. A key
 held in a constant, as in `request.GET[PAGE_PARAM]` or `getParameter(PAGE)`, is known.
 
-A name read with different types by different methods on one path (a GET's text `ref`, a
-POST's integer `ref`) is saved as text: a type applies to every method, so it holds only where
-every method agrees. Each method still has its own list of names.
+A name read with different types by different methods on one path (a GET's text `mode`, a
+POST's integer `mode`) is saved as text in `inputs`, the type every method agrees on, and each
+method's own type in `inputs_types_by_method`, which aiwaf-rust 0.2.18, aiwaf-wasm 0.2.14 and
+Java 1.4.0 check for that method alone:
+
+```json
+"/plans": {"inputs": {"mode": "text", "weeks": "int"},
+           "inputs_types_by_method": {"POST": {"mode": "int"}},
+           "inputs_by_method": {"GET": ["mode"], "POST": ["mode", "weeks"]}}
+```
+
+An older engine reads only `inputs`, so it keeps checking the agreed type. Each method also has
+its own list of names.
 
 `inputs_complete` is true only when every read was understood. When it isn't, the route's
 `inputs_incomplete` says why, with the file and line, and `init`'s summary counts the reasons:
@@ -638,7 +648,7 @@ Java 1.4.0, after it is published to Maven Central:
 
 The Python package requires Python 3.10 or newer. Framework dependencies are optional, so install only the extra needed by the application.
 
-Python 1.3.3 requires `aiwaf-rust>=0.2.17`; the `rust` extra remains an installation
+Python 1.3.4 requires `aiwaf-rust>=0.2.18`; the `rust` extra remains an installation
 alias. Publish the matching Rust wheel with `NativeCSVPipeline` support before
 the Python release. The Rust release workflow builds Linux x86_64/aarch64,
 musl x86_64, macOS x86_64/arm64 and Windows x86_64 wheels and checks the native
@@ -2044,10 +2054,10 @@ Release versions and tags must match the relevant manifest.
 
 | Package | Manifest | Tag | Workflow |
 | --- | --- | --- | --- |
-| Python `aiwaf` | `pyproject.toml` | `python-v1.3.3` | `python-publish.yml` |
-| npm `aiwaf` | `js/package.json` | `js-v1.3.3` | `npm-publish.yml` |
-| PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.17` | `rust-publish.yml` |
-| npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.13` | `wasm-publish.yml` |
+| Python `aiwaf` | `pyproject.toml` | `python-v1.3.4` | `python-publish.yml` |
+| npm `aiwaf` | `js/package.json` | `js-v1.3.4` | `npm-publish.yml` |
+| PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.18` | `rust-publish.yml` |
+| npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.14` | `wasm-publish.yml` |
 | Maven `aiwaf-java` | `java/pom.xml` | `java-v1.4.0` | `java-publish.yml` |
 
 Python and Rust publish to PyPI with trusted publishing. The npm workflows use npm trusted publishing and stage packages for approval. Configure the trusted publisher with organization `aiwaf-project`, repository `aiwaf`, the exact workflow filename, and the environment used by that workflow.
@@ -2056,12 +2066,13 @@ Java publishing uses the protected `maven-publish` environment plus `GPG_PRIVATE
 
 Registry releases are immutable. Increment the relevant manifest version before publishing another release.
 
-This release is Python `aiwaf 1.3.3` and npm `aiwaf 1.3.3`: npm `aiwaf init`, which loads the
-app, no empty manifests from either CLI, handlers from source for `--routes` lists, Fastify
-routes from a live app, and nested Pydantic body fields. It needs no new engine: Python 1.3.2,
-npm 1.3.2, `aiwaf-rust 0.2.17` and `aiwaf-wasm 0.2.13` are published, Python 1.3.3 requires
-`aiwaf-rust>=0.2.17`, and npm 1.3.3 requires `aiwaf-wasm ^0.2.13` (1.3.2 allowed 0.2.11, which
-lacks the per-method lists and nested keys). Java 1.4.0 isn't on Maven Central yet.
+This release is Python `aiwaf 1.3.4`, npm `aiwaf 1.3.4`, `aiwaf-rust 0.2.18` and
+`aiwaf-wasm 0.2.14`: per-method input types, input rules that hold per method and handler,
+Fastify `$ref` schemas and nested keys, and routes `init` used to miss. Python 1.3.3, npm 1.3.3,
+`aiwaf-rust 0.2.17` and `aiwaf-wasm 0.2.13` are published. Publish `aiwaf-rust 0.2.18` before
+Python 1.3.4, which requires it. npm 1.3.4 still declares `aiwaf-wasm ^0.2.13`, because the
+lockfile can't name an unpublished version; once 0.2.14 is published, raise it to `^0.2.14`
+and refresh the lockfile before tagging `js-v1.3.4`. Java 1.4.0 isn't on Maven Central yet.
 
 ## Security and limitations
 

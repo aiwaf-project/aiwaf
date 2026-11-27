@@ -488,6 +488,13 @@ public final class InputSourcesCore {
                         .addAll(((Map<String, String>) found.get("inputs")).keySet());
             }
             found.put("methods", claims);
+            // And each method's own types, kept apart from another method's on the same path.
+            Map<String, Map<String, String>> types = new TreeMap<>();
+            ((Map<String, String>) found.get("inputs")).forEach((name, kind) -> {
+                if (kind == null || kind.equals("text")) return;
+                for (String verb : claims.keySet()) types.computeIfAbsent(verb, key -> new TreeMap<>()).put(name, kind);
+            });
+            found.put("types", types);
             framework.merge(path, found, (old, now) -> {
                 Map<String, Object> combined = new LinkedHashMap<>(old);
                 Map<String, String> inputs = new LinkedHashMap<>((Map<String, String>) old.get("inputs"));
@@ -498,9 +505,18 @@ public final class InputSourcesCore {
                 for (Object side : List.of(old.getOrDefault("methods", Map.of()), now.getOrDefault("methods", Map.of()))) {
                     ((Map<String, Set<String>>) side).forEach((verb, names) -> methods.computeIfAbsent(verb, key -> new TreeSet<>()).addAll(names));
                 }
+                // Two handlers for one method that type a name differently leave it untyped for it.
+                Map<String, Map<String, String>> typed = new TreeMap<>();
+                for (Object side : List.of(old.getOrDefault("types", Map.of()), now.getOrDefault("types", Map.of()))) {
+                    ((Map<String, Map<String, String>>) side).forEach((verb, own) -> {
+                        Map<String, String> into = typed.computeIfAbsent(verb, key -> new TreeMap<>());
+                        own.forEach((name, kind) -> into.merge(name, kind, (a, b) -> a.equals(b) ? a : "text"));
+                    });
+                }
                 combined.put("inputs", inputs);
                 combined.put("reasons", reasons);
                 combined.put("methods", methods);
+                combined.put("types", typed);
                 combined.put("standalone", Boolean.TRUE.equals(old.get("standalone")) && Boolean.TRUE.equals(now.get("standalone")));
                 return combined;
             });
@@ -712,6 +728,18 @@ public final class InputSourcesCore {
             Map<String, Object> byMethod = reasons.isEmpty() ? byMethod(found, data.get("methods"), claims, shared) : null;
             if (byMethod != null) data.put("inputs_by_method", byMethod);
             else data.remove("inputs_by_method");
+            // A method's own type for a name, where it isn't the route's (a POST's integer next to
+            // a GET's text): engines that read inputs_types_by_method check it for that method alone.
+            Map<String, Map<String, String>> ownTypes = new TreeMap<>();
+            if (framework != null && framework.get("types") instanceof Map<?, ?> typed) {
+                ((Map<String, Map<String, String>>) typed).forEach((verb, types) -> types.forEach((name, kind) -> {
+                    if (!kind.equals("text") && found.containsKey(name) && !kind.equals(found.get(name))) {
+                        ownTypes.computeIfAbsent(verb, item -> new TreeMap<>()).put(name, kind);
+                    }
+                }));
+            }
+            if (!ownTypes.isEmpty()) data.put("inputs_types_by_method", ownTypes);
+            else data.remove("inputs_types_by_method");
             if (reasons.isEmpty()) {
                 data.remove("inputs_incomplete");
                 complete++;

@@ -305,3 +305,5 @@ def test_init_keeps_a_post_type_from_a_get_on_the_same_path(monkeypatch, tmp_pat
     route = json.loads((tmp_path / ".aiwaf" / "paths.json").read_text(encoding="utf-8"))["routes"]["/orders"]
     assert route["inputs"] == {"note": "text", "ref": "text"}
     assert route["inputs_by_method"] == {"GET": ["ref"], "POST": ["note", "ref"]}
+    # POST's own integer ref, for engines that check a method's own type.
+    assert route["inputs_types_by_method"] == {"POST": {"ref": "int"}}

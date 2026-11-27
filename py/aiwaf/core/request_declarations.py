@@ -74,6 +74,7 @@ def merge_entries(previous, current):
     # to it and to its methods.
     view_methods = {}
     declared_methods = {}
+    declared_types = {}
     for entry in (previous, current):
         for view, methods in (entry.get('view_methods') or {entry.get('view'): entry.get('methods') or []}).items():
             if view:
@@ -84,11 +85,23 @@ def merge_entries(previous, current):
             known = {method: names for method in entry.get('methods') or []}
         for method, names in (known or {}).items():
             declared_methods[method] = sorted(set(declared_methods.get(method, [])) | set(names))
+        # Each method's own types, kept apart from another method's on the same path; two
+        # handlers for one method that type a name differently leave it untyped for it.
+        types = entry.get('declared_types')
+        if types is None and isinstance(entry.get('declared_inputs'), dict):
+            typed = {name: kind for name, kind in (entry['declared_inputs'].get('inputs') or {}).items() if kind and kind != 'text'}
+            types = {str(method).upper(): dict(typed) for method in entry.get('methods') or []} if typed else {}
+        for method, own in (types or {}).items():
+            merged = declared_types.setdefault(method, {})
+            for name, kind in own.items():
+                merged[name] = kind if merged.get(name, kind) == kind else 'text'
     if len(view_methods) > 1:
         result['views'] = sorted(view_methods)
         result['view_methods'] = view_methods
     if declared_methods:
         result['declared_methods'] = declared_methods
+    if declared_types:
+        result['declared_types'] = declared_types
     if previous.get('declared_inputs') or current.get('declared_inputs'):
         from aiwaf.core.input_sources import combine
 

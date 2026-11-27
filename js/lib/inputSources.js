@@ -267,7 +267,8 @@ function finalize(routes, sources = {}) {
     const shared = new Set(data._input_shared || []);
     const nested = data._nested || {};
     const flat = new Set(data._flat || []);
-    for (const key of ['declared_inputs', 'input_declaration', 'declared_methods', '_input_methods', '_input_shared', '_nested', '_flat']) delete data[key];
+    const declaredTypes = data.declared_types || {};
+    for (const key of ['declared_inputs', 'input_declaration', 'declared_methods', 'declared_types', '_input_methods', '_input_shared', '_nested', '_flat']) delete data[key];
     let read = 'inputs_complete' in data;
     const found = { ...(data.inputs || {}) };
     let reasons = [...(data.inputs_incomplete || [])];
@@ -350,6 +351,17 @@ function finalize(routes, sources = {}) {
     const methods = byMethod(found, data.methods || [], claims, shared);
     if (methods && !reasons.length) data.inputs_by_method = methods;
     else delete data.inputs_by_method;
+    // A method's own type for a name, where it isn't the route's (a POST's integer next to a GET's
+    // text): engines that read inputs_types_by_method check it for that method alone.
+    const ownTypes = {};
+    for (const [method, types] of Object.entries(declaredTypes)) {
+      for (const [name, kind] of Object.entries(types)) {
+        if (kind === 'text' || !(name in found) || found[name] === kind) continue;
+        (ownTypes[method] = ownTypes[method] || {})[name] = kind;
+      }
+    }
+    if (Object.keys(ownTypes).length) data.inputs_types_by_method = ownTypes;
+    else delete data.inputs_types_by_method;
   }
   return counts;
 }

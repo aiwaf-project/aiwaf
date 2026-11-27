@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased (after Python 1.3.3 / Node.js 1.3.3; Java 1.4.0 prepared)
+## Python 1.3.4 / aiwaf-rust 0.2.18 / Node.js 1.3.4 / WASM 0.2.14 / Java 1.4.0 — prepared release
+
+- **Release note:** publish aiwaf-rust 0.2.18 (`rust-v0.2.18`) before Python 1.3.4, which
+  requires `aiwaf-rust>=0.2.18`, and aiwaf-wasm 0.2.14 (`wasm-v0.2.14`) before npm 1.3.4. npm
+  1.3.4 declares `aiwaf-wasm ^0.2.13`, since the lockfile can't name an unpublished version: once
+  0.2.14 is published, raise it to `^0.2.14` and refresh the lockfile before tagging `js-v1.3.4`.
+  With 0.2.13 the per-method types below are ignored, and the agreed type is checked instead.
+- **Per-method input types:** where methods on one path type a name differently (GET's text
+  `mode`, POST's integer `mode`), the manifest keeps the type they agree on in `inputs` (text)
+  and each method's own in the new `inputs_types_by_method` (`{"POST": {"mode": "int"}}`).
+  aiwaf-rust, aiwaf-wasm and Java check a method's own type for its requests, so POST keeps its
+  integer check while GET's text passes; HEAD reads GET's. Engines before aiwaf-rust 0.2.18 and
+  aiwaf-wasm 0.2.14 ignore the entry. All three `init`s write it from the framework's types for
+  each handler (FastAPI and Pydantic, Fastify and Hapi schemas, Nest pipes and DTOs, Spring).
 
 - **Routes `init` missed:**
   - FastAPI routes added with `include_router()`, which FastAPI keeps as one entry and resolves
@@ -65,6 +78,12 @@
 - **Nested keys from Fastify, Hapi and other JSON Schemas:** an object property that lists its
   own properties and allows no others saves them as `inputs_nested`, as FastAPI's Pydantic
   models and the code reading already did. Keys are checked one level down, not inside lists.
+- **Named Fastify handlers keep their method:** the audit links a named handler
+  (`fastify.delete('/plans', removePlan)`) to its route by name, and took its method from the
+  route's record of which method each named handler serves, which only Express routes had. A
+  route list's named handler now records its methods too (Fastify, Koa, Hapi, Next and
+  `--routes` lists), so a DELETE-only boolean `force`, or POST-only `dryRun` and `weeks`, keep
+  their types and each method its own names.
 - **Route-inventory tests** compare `init`'s routes with what each framework reports or serves:
   FastAPI's OpenAPI paths for each mounted app, a real request to every Express route, and
   Fastify's `hasRoute()`.

@@ -158,6 +158,20 @@ describe('Fastify input rules', () => {
   });
 });
 
+describe('Fastify named handlers', () => {
+  test('each named handler\'s reading belongs to its own method', async () => {
+    const output = path.join(dir, 'paths.json');
+    const { io } = capture();
+    expect(await runInit(['--app', fixture('fastify-named', 'app.js'), '--output', output, '--source', fixture('fastify-named')], io)).toBe(0);
+    const route = readRoutes(output)['/plans'];
+    expect(route.inputs).toEqual({ dryRun: 'bool', force: 'bool', mode: 'text', weeks: 'int' });
+    expect(route.inputs_by_method).toEqual({ DELETE: ['force'], GET: ['mode'], POST: ['dryRun', 'mode', 'weeks'] });
+    // POST's own integer mode, for engines that check a method's own type.
+    expect(route.inputs_types_by_method).toEqual({ POST: { mode: 'int' } });
+    expect(route.inputs_complete).toBe(true);
+  });
+});
+
 describe('the audit', () => {
   test('a route whose handler the audit never read is not complete', async () => {
     const output = path.join(dir, 'paths.json');

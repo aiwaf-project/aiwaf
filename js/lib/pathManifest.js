@@ -405,6 +405,11 @@ function addRoute(routes, routeInfo) {
     // Which methods the framework's names are for, so each method's list can be told apart.
     const names = Object.keys(known.inputs || {}).sort();
     entry.declared_methods = Object.fromEntries((entry.methods || []).map(method => [String(method).toUpperCase(), names]));
+    // And each method's own types, kept apart from another method's on the same path.
+    const typed = Object.fromEntries(Object.entries(known.inputs || {}).filter(([, kind]) => kind && kind !== 'text'));
+    if (Object.keys(typed).length) {
+      entry.declared_types = Object.fromEntries((entry.methods || []).map(method => [String(method).toUpperCase(), { ...typed }]));
+    }
   }
   if (routes[normalized]) {
     const mergedMethods = Array.from(new Set([...(routes[normalized].methods || []), ...(entry.methods || [])])).sort();
@@ -417,6 +422,14 @@ function addRoute(routes, routeInfo) {
     for (const [method, names] of Object.entries(entry.declared_methods || {})) {
       declaredMethods[method] = [...new Set([...(declaredMethods[method] || []), ...names])].sort();
     }
+    // Two handlers for one method that type a name differently leave it untyped for that method.
+    const declaredTypes = {};
+    for (const side of [routes[normalized].declared_types, entry.declared_types]) {
+      for (const [method, types] of Object.entries(side || {})) {
+        const own = (declaredTypes[method] = declaredTypes[method] || {});
+        for (const [name, kind] of Object.entries(types)) own[name] = own[name] === undefined || own[name] === kind ? kind : 'text';
+      }
+    }
     routes[normalized] = {
       ...routes[normalized],
       ...entry,
@@ -424,6 +437,7 @@ function addRoute(routes, routeInfo) {
     };
     if (combined) routes[normalized].declared_inputs = combined;
     if (Object.keys(declaredMethods).length) routes[normalized].declared_methods = declaredMethods;
+    if (Object.keys(declaredTypes).length) routes[normalized].declared_types = declaredTypes;
     if (Object.keys(handlerMethods).length) routes[normalized].handler_methods = handlerMethods;
   } else {
     routes[normalized] = entry;
@@ -553,6 +567,13 @@ function extractExpressRoutes(app) {
   return routes;
 }
 
+function handlerMethodsOf(route) {
+  const handler = route.handler || route.handle || route.endpoint;
+  const name = handler && typeof handler.name === 'string' ? handler.name.replace(/^bound /, '') : '';
+  const methods = [].concat(route.methods || route.method || []).map(method => String(method).toUpperCase()).filter(method => method !== 'HEAD');
+  return name && methods.length ? [[name, methods]] : undefined;
+}
+
 function normalizeRouteList(routesInput = []) {
   return (Array.isArray(routesInput) ? routesInput : [])
     .filter(route => route && typeof route === 'object')
@@ -564,7 +585,10 @@ function normalizeRouteList(routesInput = []) {
       validate: route.validate,
       name: route.name || route.id || route.path || route.url || '',
       view: route.view || '',
-      responseType: route.responseType || route.response_type || null
+      responseType: route.responseType || route.response_type || null,
+      // The method a named handler serves, so the audit's reading of it (linked by name) is
+      // that method's: fastify.delete('/plans', removePlan) reads force for DELETE alone.
+      handlerMethods: route.handlerMethods || handlerMethodsOf(route)
     }))
     .filter(route => route.routePath);
 }
@@ -757,6 +781,7 @@ function auditIntoManifest(manifest, source) {
         delete entry.input_declaration;
         delete entry.declared_inputs;
         delete entry.declared_methods;
+        delete entry.declared_types;
         delete entry._input_methods;
         delete entry._input_shared;
         delete entry._nested;

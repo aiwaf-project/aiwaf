@@ -350,4 +350,26 @@ class InputSourcesCoreTest {
         InputSourcesCore.finalize(routes, sources);
         assertEquals(Map.of("ref", "text"), ((Map<?, ?>) routes.get("/orders")).get("inputs"));
     }
+
+    public static class Plans {
+        @org.springframework.web.bind.annotation.GetMapping
+        public String list(@org.springframework.web.bind.annotation.RequestParam("mode") String mode) { return mode; }
+
+        @org.springframework.web.bind.annotation.PostMapping
+        public String create(@org.springframework.web.bind.annotation.RequestParam("mode") int mode) { return ""; }
+    }
+
+    @Test
+    void eachMethodKeepsItsOwnTypeWhereMethodsDiffer() throws Exception {
+        List<PathManifestCore.RouteInfo> live = List.of(
+                new PathManifestCore.RouteInfo("/plans", List.of("GET"), Plans.class, method(Plans.class, "list")),
+                new PathManifestCore.RouteInfo("/plans", List.of("POST"), Plans.class, method(Plans.class, "create")));
+        InputSourcesCore.Sources sources = InputSourcesCore.forRoutes(live, InputSourcesCore.Sources.none());
+        Map<String, Object> entry = new LinkedHashMap<>();
+        entry.put("methods", List.of("GET", "POST"));
+        Map<String, Object> routes = new TreeMap<>(Map.of("/plans", entry));
+        InputSourcesCore.finalize(routes, sources);
+        assertEquals(Map.of("mode", "text"), entry.get("inputs"));
+        assertEquals(Map.of("POST", Map.of("mode", "int")), entry.get("inputs_types_by_method"));
+    }
 }

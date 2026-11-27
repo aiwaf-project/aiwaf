@@ -377,7 +377,8 @@ public final class RouteRiskCore {
         Map<String, Object> routes = (Map<String, Object>) rawRoutes;
         for (Object entry : routes.values()) {
             if (entry instanceof Map<?, ?> data) {
-                for (String key : List.of("injection_risks", "inputs", "inputs_complete", "inputs_incomplete", "inputs_by_method", "inputs_nested")) ((Map<String, Object>) data).remove(key);
+                for (String key : List.of("injection_risks", "inputs", "inputs_complete", "inputs_incomplete", "inputs_by_method", "inputs_nested",
+                        "inputs_types_by_method")) ((Map<String, Object>) data).remove(key);
             }
         }
         int linked = 0;

@@ -251,7 +251,8 @@ def apply_report(report: Mapping[str, Any], manifest: dict, sources: Optional[Ma
         raise ValueError("The manifest has no routes")
     for data in routes.values():
         if isinstance(data, dict):
-            for key in ("injection_risks", "inputs", "inputs_complete", "inputs_incomplete", "inputs_by_method", "inputs_nested"):
+            for key in ("injection_risks", "inputs", "inputs_complete", "inputs_incomplete", "inputs_by_method", "inputs_nested",
+                        "inputs_types_by_method"):
                 data.pop(key, None)
     linked, unlinked = 0, 0
     collected: dict[str, dict[tuple, dict[str, str]]] = {}
@@ -379,6 +380,7 @@ def audit_into_manifest(manifest: dict, source: Optional[str]) -> Optional[dict[
             if isinstance(data, dict):
                 data.pop("declared_inputs", None)
                 data.pop("input_declaration", None)
+                data.pop("declared_types", None)
 
 
 def describe_audit(manifest: Mapping[str, Any]) -> str:

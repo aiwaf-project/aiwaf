@@ -141,6 +141,23 @@
           "x": "text"
         },
         "inputs_complete": true
+      },
+      "/plans": {
+        "view": "plans",
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "inputs": {
+          "mode": "text",
+          "weeks": "int"
+        },
+        "inputs_complete": true,
+        "inputs_types_by_method": {
+          "POST": {
+            "mode": "int"
+          }
+        }
       }
     }
   },
@@ -510,6 +527,36 @@
         "query": "x=1&anything=2",
         "body": "",
         "expect": "pass"
+      },
+      {
+        "method": "POST",
+        "query": "",
+        "body": "{\"mode\": \"fast\"}",
+        "path": "/plans",
+        "expect": "mismatch",
+        "input": "mode"
+      },
+      {
+        "method": "POST",
+        "query": "",
+        "body": "{\"mode\": 2}",
+        "path": "/plans",
+        "expect": "pass"
+      },
+      {
+        "method": "GET",
+        "query": "mode=fast",
+        "body": "",
+        "path": "/plans",
+        "expect": "pass"
+      },
+      {
+        "method": "GET",
+        "query": "weeks=two",
+        "body": "",
+        "path": "/plans",
+        "expect": "mismatch",
+        "input": "weeks"
       }
     ],
     "exempt": [
