@@ -629,15 +629,18 @@ function fileInputs(ast, filename, source, label, scope = null) {
     return null;
   };
   // Whether name is declared deeper inside a function's or the program's own code, in a block that
-  // doesn't hold the route: a var there is the function's binding, and in sloppy code a function
-  // declared in a block leaks out too, so which one runs isn't certain.
+  // doesn't hold the route, in a way that leaks out of it: a var there is the function's binding,
+  // and in sloppy code a function declared in a block leaks out too, so which one runs isn't certain.
   const declaredDeeper = (node, name, onPath) => {
     const top = isFunction(node) ? node.body : node;
     const own = new Set(isFunction(node) ? (top && top.type === 'BlockStatement' ? top.body : []) : (Array.isArray(top && top.body) ? top.body : []));
     let found = false;
     const walkDeeper = item => {
       if (found || !item || typeof item.type !== 'string') return;
-      if (!own.has(item) && !onPath.has(item) && declared(item, name, true)) {
+      // Only what leaks out of its block: a var, or (in sloppy code) a function declared there.
+      // A const, let or class in another block can't be what this name means here.
+      const leaks = (item.type === 'VariableDeclaration' && item.kind === 'var') || item.type === 'FunctionDeclaration';
+      if (leaks && !own.has(item) && !onPath.has(item) && declared(item, name, true)) {
         found = true;
         return;
       }

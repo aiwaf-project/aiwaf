@@ -407,7 +407,8 @@ test('block scopes, var, catch, switch and leaking block functions resolve as Ja
   expect(found['/var'][1]).toBe(false);
   expect(found['/leaky'][1]).toBe(false);
   expect(found['/case-block']).toEqual([{ tenant: 'text' }, true]);
-  expect(found['/default'][1]).toBe(false);
+  // Another case's own block const isn't visible here: the module-level outer is.
+  expect(found['/default']).toEqual([{ region: 'text' }, true]);
   // A let can be reassigned before the route runs.
   expect(found['/let'][1]).toBe(false);
   expect(found['/module-block'][1]).toBe(false);

@@ -310,6 +310,13 @@ describe('scoped schemas, route hooks and factory handlers', () => {
     expect(routes['/loop']).toMatchObject({ inputs: {}, inputs_complete: false });
   });
 
+  test('an unrelated block\'s const doesn\'t hide a module-level hook', async () => {
+    const routes = await runAt('fastify-module-block');
+    expect(routes['/inside']).toMatchObject({ inputs: { tenant: 'text' }, inputs_complete: true });
+    expect(routes['/outside']).toMatchObject({ inputs: { region: 'text' }, inputs_complete: true });
+    expect(routes['/block-route']).toMatchObject({ inputs: { other: 'text' }, inputs_complete: true });
+  });
+
   test('handlers a factory makes are linked to their source', async () => {
     const routes = await runAt('fastify-export');
     for (const route of ['/exports/csv', '/exports/pdf']) {
