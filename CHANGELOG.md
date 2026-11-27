@@ -13,6 +13,14 @@
   AIWAF plugin's `onRoute` hook both record `this`), and its `$ref`s resolve against that scope's
   `getSchemas()`, its own and its parents'. A route whose scope isn't known only takes an `$id`
   the source defines once; otherwise the reference stays unresolved and the route incomplete.
+- **FastAPI aliases in `Annotated`:** the static reader takes a parameter's wire key from
+  `Annotated[str, Body(embed=True, alias="limit")]` (and `Query`, `Form`, `Path`), as it already
+  did from a default `= Body(alias=...)`, so the argument name `body` no longer joins `limit` in
+  a complete list.
+- **Fastify named hooks in a plugin's scope:** a route's `preHandler: readTenant` (or route
+  middleware) defined inside the plugin callback, as a function or a `const` arrow, is now found
+  and read for that route alone; a sibling route doesn't inherit its reads. A route whose
+  schema still allows other keys stays incomplete.
 - **FastAPI optional body models:** `body: Optional[Filters] = None` saved the argument name
   `body` as a request key and lost the model's own fields; the model is read through
   `Optional` and `Annotated` now.

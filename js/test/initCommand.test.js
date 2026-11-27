@@ -278,6 +278,16 @@ describe('scoped schemas, route hooks and factory handlers', () => {
     expect(routes['/plain'].inputs).toEqual({ page: 'float' });
   });
 
+  test('a named hook defined in the plugin callback is read for its own routes', async () => {
+    const routes = await runAt('fastify-plugin-hooks');
+    expect(routes['/invoices']).toMatchObject({ inputs: { page: 'int', tenant: 'text' }, inputs_complete: true });
+    expect(routes['/regions']).toMatchObject({ inputs: { region: 'text' }, inputs_complete: true });
+    // The sibling doesn't inherit tenant; finding it doesn't make an open schema complete.
+    expect(routes['/sibling'].inputs).toEqual({ page: 'int' });
+    expect(routes['/open']).toMatchObject({ inputs: { page: 'int', tenant: 'text' }, inputs_complete: false });
+    expect(routes['/open'].inputs_incomplete.map(item => item.code)).toEqual(['container_whole']);
+  });
+
   test('handlers a factory makes are linked to their source', async () => {
     const routes = await runAt('fastify-export');
     for (const route of ['/exports/csv', '/exports/pdf']) {

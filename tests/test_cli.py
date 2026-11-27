@@ -397,3 +397,14 @@ def test_init_links_handlers_a_factory_makes(monkeypatch, tmp_path):
     for path in ("/exports/csv", "/exports/pdf"):
         assert routes[path]["inputs"] == {"since": "text"} and routes[path]["inputs_complete"] is True
     assert [reason["code"] for reason in routes["/opaque"]["inputs_incomplete"]] == ["unread_view"]
+
+
+def test_init_takes_an_annotated_body_alias_as_the_wire_key(monkeypatch, tmp_path):
+    routes = _init_fastapi(monkeypatch, tmp_path,
+                           "from typing import Annotated\nfrom fastapi import Body, FastAPI, Query\napp = FastAPI()\n"
+                           "@app.post('/reports')\n"
+                           "def run(body: Annotated[str, Body(embed=True, alias='limit')], limit: Annotated[int, Query()] = 10):\n"
+                           "    return {}\n")
+    route = routes["/reports"]
+    assert route["inputs"] == {"limit": "text"} and route["inputs_complete"] is True
+    assert route["inputs_types_by_location"] == {"POST": {"query": {"limit": "int"}}}

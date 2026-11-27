@@ -575,7 +575,39 @@ function fileInputs(ast, filename, source, label, scope = null) {
   const routeHandler = (node, parent) => isCall(parent) && isMember(parent.callee) && ROUTE_METHODS.has(parent.callee.property.name)
     && parent.arguments.length > 1 && parent.arguments[parent.arguments.length - 1] === node
     && parent.arguments[0] && ['StringLiteral', 'TemplateLiteral'].includes(parent.arguments[0].type);
+  // The functions around the node being visited, innermost last: a hook or middleware named in a
+  // route call may be defined in one of them, as inside a Fastify plugin's callback.
+  const enclosing = [];
+  const localFunction = name => {
+    for (let index = enclosing.length - 1; index >= 0; index -= 1) {
+      const body = enclosing[index].body;
+      for (const statement of (body && body.type === 'BlockStatement' ? body.body : [])) {
+        if (statement.type === 'FunctionDeclaration' && statement.id && statement.id.name === name) return statement;
+        if (statement.type !== 'VariableDeclaration') continue;
+        for (const declaration of statement.declarations) {
+          if (declaration.id.type === 'Identifier' && declaration.id.name === name && isFunction(declaration.init)) return declaration.init;
+        }
+      }
+    }
+    return null;
+  };
+  // A named hook or middleware: one of the project's module functions, else one in an enclosing scope.
+  const named = reference => {
+    if (!reference || !(reference.type === 'Identifier' || isMember(reference))) return null;
+    const own = lookup(scope, 'function', dotted(reference));
+    if (own) return own;
+    const local = reference.type === 'Identifier' ? localFunction(reference.name) : null;
+    return local ? { node: local, scope } : null;
+  };
   const visit = (node, parent) => {
+    if (isFunction(node)) enclosing.push(node);
+    try {
+      visitNode(node, parent);
+    } finally {
+      if (isFunction(node)) enclosing.pop();
+    }
+  };
+  const visitNode = (node, parent) => {
     if (isFunction(node) && (routeHandler(node, parent) || (node.params || []).some(parameter => {
       const target = parameter.type === 'AssignmentPattern' ? parameter.left : parameter;
       return target.type === 'Identifier' && (REQUEST_NAMES.has(target.name) || CONTEXT_NAMES.has(target.name));
@@ -601,8 +633,7 @@ function fileInputs(ast, filename, source, label, scope = null) {
               if (!ROUTE_HOOKS.has(property.key.name || property.key.value)) continue;
               const hooks = property.value.type === 'ArrayExpression' ? property.value.elements : [property.value];
               for (const hook of hooks) {
-                const own = hook && isFunction(hook) ? { node: hook, scope }
-                  : hook && (hook.type === 'Identifier' || isMember(hook)) ? lookup(scope, 'function', dotted(hook)) : null;
+                const own = hook && isFunction(hook) ? { node: hook, scope } : named(hook);
                 if (own && isFunction(own.node) && takesRequest(own.node) && !own.scope.active.has(own.node)) {
                   own.scope.active.add(own.node);
                   const read = handlerInputs(own.node, own.scope.schemas, own.scope);
@@ -634,7 +665,7 @@ function fileInputs(ast, filename, source, label, scope = null) {
           if (isCall(argument) && SAFE_MIDDLEWARE.test(dotted(argument.callee))) continue;
           if (routeValidator(argument, validated)) continue;
           // Middleware of the project's own is read like the handler: what it reads is the route's.
-          const own = (argument.type === 'Identifier' || isMember(argument)) ? lookup(scope, 'function', dotted(argument)) : null;
+          const own = named(argument);
           if (own && isFunction(own.node) && takesRequest(own.node) && !own.scope.active.has(own.node)) {
             own.scope.active.add(own.node);
             const read = handlerInputs(own.node, own.scope.schemas, own.scope);

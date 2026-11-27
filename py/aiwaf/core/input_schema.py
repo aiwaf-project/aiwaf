@@ -750,9 +750,17 @@ class _Reads:
                 self.incomplete("dependency", f"parameter {parameter.arg} is a dependency, which may read anything", parameter)
                 continue
             name = parameter.arg
-            if isinstance(default, ast.Call):
-                alias = next((k.value.value for k in default.keywords if k.arg == "alias" and isinstance(k.value, ast.Constant)), None)
-                name = alias if isinstance(alias, str) else name
+            # The wire key: an alias on the default (= Body(alias="limit")) or in Annotated's
+            # metadata (Annotated[str, Body(embed=True, alias="limit")]), not the argument's name.
+            markers = [default] if isinstance(default, ast.Call) else []
+            if isinstance(annotation, ast.Subscript) and _last(annotation.value) == "Annotated" and isinstance(annotation.slice, ast.Tuple):
+                markers.extend(item for item in annotation.slice.elts[1:] if isinstance(item, ast.Call))
+            for marker in markers:
+                alias = next((k.value.value for k in marker.keywords if k.arg in {"alias", "validation_alias"}
+                              and isinstance(k.value, ast.Constant)), None)
+                if isinstance(alias, str):
+                    name = alias
+                    break
             model = self.module.model(annotation)
             if _last(annotation) in _OPEN_ANNOTATIONS or (isinstance(annotation, ast.Subscript) and _last(annotation.value) in _OPEN_ANNOTATIONS):
                 # A dict or Any body takes whatever names the client sends.

@@ -321,3 +321,13 @@ def test_pydantic_models_read_from_source_use_their_request_keys():
                   "NAME = 'x'\nclass D(BaseModel):\n    event_id: str = Field(alias=NAME)\n",
                   "class D(BaseModel):\n    class Config:\n        alias_generator = str.upper\n    event_id: str\n"):
         assert inputs(head + model + tail)["v"] == ({}, False)
+
+
+def test_fastapi_parameter_aliases_in_defaults_and_annotated_metadata():
+    found = inputs(
+        "from typing import Annotated\nfrom fastapi import Body, FastAPI, Query\napp = FastAPI()\n"
+        "@app.post('/a')\ndef a(body: Annotated[str, Body(embed=True, alias='limit')], n: Annotated[int, Query(alias='count')] = 1):\n"
+        "    return {}\n"
+        "@app.post('/b')\ndef b(note: str = Body(embed=True, alias='memo'), plain: Annotated[int, 'doc'] = 1):\n    return {}\n")
+    assert found["a"][0] == {"limit": "text", "count": "int"}
+    assert found["b"][0] == {"memo": "text", "plain": "int"}
