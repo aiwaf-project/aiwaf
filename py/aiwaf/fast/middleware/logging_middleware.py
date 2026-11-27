@@ -85,7 +85,7 @@ class AIWAFLoggingMiddleware(BaseHTTPMiddleware):
             "block_reason",
         ]
         row = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             **extract_logging_context_from_fastapi_request(request, ip=get_ip(request)),
             "status_code": response.status_code,
             "content_length": response.headers.get("content-length", 0),
@@ -104,7 +104,7 @@ class AIWAFLoggingMiddleware(BaseHTTPMiddleware):
 
     def _log_access_json(self, request, response, start_time):
         log_data = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             **extract_logging_context_from_fastapi_request(request, ip=get_ip(request)),
             "status_code": response.status_code,
             "content_length": response.headers.get("content-length", 0),
@@ -117,7 +117,7 @@ class AIWAFLoggingMiddleware(BaseHTTPMiddleware):
             f.write(json.dumps(log_data) + "\n")
 
     def _log_error(self, request, response):
-        timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+        timestamp = datetime.now(timezone.utc).strftime("[%Y-%m-%d %H:%M:%S]")
         ctx = extract_logging_context_from_fastapi_request(request, ip=get_ip(request))
         line = (
             f"{timestamp} [error] {response.status_code} from {ctx['ip']}: "
@@ -127,7 +127,7 @@ class AIWAFLoggingMiddleware(BaseHTTPMiddleware):
             f.write(line + "\n")
 
     def _log_aiwaf_event(self, request):
-        timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+        timestamp = datetime.now(timezone.utc).strftime("[%Y-%m-%d %H:%M:%S]")
         reason = getattr(request.state, "aiwaf_block_reason", "unknown")
         ctx = extract_logging_context_from_fastapi_request(request, ip=get_ip(request))
         line = (

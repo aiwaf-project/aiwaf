@@ -2113,3 +2113,7 @@ Initial ELv2 release boundaries are Python/Node.js `1.1.2`, Rust/Python and WASM
 Retained MIT contributions keep their rights and notices in [licenses/MIT.txt](licenses/MIT.txt). The bundled IPinfo Lite database is provided by [IPinfo](https://ipinfo.io/) under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/); ELv2 restrictions do not apply to that data. Package metadata uses an `AND` expression where separately licensed components are included; this does not offer a choice to license the entire package under MIT. Dependencies retain their respective terms.
 
 Redistributions must include the applicable LICENSE, NOTICE, and licenses/ files. See [NOTICE](NOTICE) for historical rights, contributor notices, and attribution.
+
+### Access-log timestamp compatibility
+
+Access logs emitted by the middleware now use UTC timestamps. Logs written before this change may use the host's local timezone on non-UTC servers, so consumers that parse or compare timestamps should account for that format and timezone transition.
