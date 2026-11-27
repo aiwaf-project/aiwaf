@@ -132,9 +132,29 @@ public final class PathManifestCore {
         if (outputPath == null) throw new IllegalArgumentException("outputPath must not be null");
         try {
             Path absolute = outputPath.toAbsolutePath().normalize();
-            if (absolute.getParent() != null) Files.createDirectories(absolute.getParent());
+            Path folder = absolute.getParent() != null ? absolute.getParent() : Path.of(".").toAbsolutePath();
+            Files.createDirectories(folder);
+            // Serialized first, then written beside the manifest and moved over it, so a failed
+            // write leaves the old manifest intact.
             String json = MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(manifest) + "\n";
-            Files.writeString(absolute, json, StandardCharsets.UTF_8);
+            Path temporary = Files.createTempFile(folder, "." + absolute.getFileName() + ".", ".tmp");
+            try {
+                Files.writeString(temporary, json, StandardCharsets.UTF_8);
+                // A temporary file is private; the manifest keeps the old one's permissions, or rw-r--r--.
+                try {
+                    Files.setPosixFilePermissions(temporary, Files.exists(absolute) ? Files.getPosixFilePermissions(absolute)
+                            : java.nio.file.attribute.PosixFilePermissions.fromString("rw-r--r--"));
+                } catch (UnsupportedOperationException ignored) {
+                    // Not a POSIX file system.
+                }
+                try {
+                    Files.move(temporary, absolute, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+                } catch (java.nio.file.AtomicMoveNotSupportedException ex) {
+                    Files.move(temporary, absolute, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                }
+            } finally {
+                Files.deleteIfExists(temporary);
+            }
             return absolute;
         } catch (IOException ex) {
             throw new IllegalStateException("Failed to write manifest to " + outputPath + ": " + ex.getMessage(), ex);

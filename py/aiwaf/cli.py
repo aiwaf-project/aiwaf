@@ -235,6 +235,12 @@ def _handle_init(argv) -> None:
     print(f"Routes: {len(manifest.get('routes', {}))}")
     print(f"Context hash: {manifest['context_hash']}")
     print(describe_audit(manifest))
+    from aiwaf.core.route_risks import engine_gaps
+
+    gaps = engine_gaps(manifest)
+    if gaps:
+        sys.stderr.write("The installed aiwaf-rust can't check " + ", ".join(gaps) + "; it checks the type every method "
+                         "agrees on instead. Run: pip install -U aiwaf-rust\n")
     if not args.no_native:
         print(_native_setup(framework, app))
 

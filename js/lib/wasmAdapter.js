@@ -66,7 +66,8 @@ async function loadWasmFromDisk() {
     sql_inspect: bg.sql_inspect,
     sql_inspect_headers: bg.sql_inspect_headers,
     sql_inspect_path: bg.sql_inspect_path,
-    sql_tokenizer: bg.sql_tokenizer
+    sql_tokenizer: bg.sql_tokenizer,
+    supports_feature: bg.supports_feature
   };
 }
 

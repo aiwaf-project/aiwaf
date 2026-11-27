@@ -212,6 +212,12 @@ public final class InputSourcesCore {
         Map<String, String> found = new LinkedHashMap<>();
         List<Map<String, Object>> reasons = new ArrayList<>();
         boolean standalone = true;
+        // Each location's own types: a @RequestBody's fields are the body's, and a @RequestParam's
+        // value is the query's when a JSON body is taken too (otherwise it may be a form field).
+        Map<String, String> queryTypes = new LinkedHashMap<>();
+        Map<String, String> bodyTypes = new LinkedHashMap<>();
+        boolean jsonBody = java.util.Arrays.stream(method.getParameters())
+                .anyMatch(parameter -> parameter.isAnnotationPresent(org.springframework.web.bind.annotation.RequestBody.class));
         for (Parameter parameter : method.getParameters()) {
             Annotation[] marks = parameter.getAnnotations();
             Set<String> names = new HashSet<>();
@@ -246,14 +252,22 @@ public final class InputSourcesCore {
                     continue;
                 }
                 merge(found, named != null ? named : parameter.getName(), kind);
+                if (jsonBody) merge(queryTypes, named != null ? named : parameter.getName(), kind);
                 continue;
             }
             String[] why = new String[2];
             Map<String, String> fields = beanFields(type, why);
             if (fields == null) reasons.add(reason(why[0], why[1]));
-            else fields.forEach((name, fieldKind) -> merge(found, name, fieldKind));
+            else {
+                fields.forEach((name, fieldKind) -> merge(found, name, fieldKind));
+                if (names.contains("RequestBody")) fields.forEach((name, fieldKind) -> merge(bodyTypes, name, fieldKind));
+            }
         }
         Map<String, Object> out = new LinkedHashMap<>();
+        Map<String, Object> locations = new LinkedHashMap<>();
+        if (!queryTypes.isEmpty()) locations.put("query", queryTypes);
+        if (!bodyTypes.isEmpty()) locations.put("body", bodyTypes);
+        if (!locations.isEmpty()) out.put("locations", locations);
         out.put("inputs", found);
         out.put("covers", List.of("external_class", "model_fields"));
         out.put("reasons", reasons);
@@ -495,6 +509,11 @@ public final class InputSourcesCore {
                 for (String verb : claims.keySet()) types.computeIfAbsent(verb, key -> new TreeMap<>()).put(name, kind);
             });
             found.put("types", types);
+            Map<String, Map<String, Map<String, String>>> byLocation = new TreeMap<>();
+            if (found.get("locations") instanceof Map<?, ?> locations) {
+                for (String verb : claims.keySet()) byLocation.put(verb, new TreeMap<>((Map<String, Map<String, String>>) locations));
+            }
+            found.put("byLocation", byLocation);
             framework.merge(path, found, (old, now) -> {
                 Map<String, Object> combined = new LinkedHashMap<>(old);
                 Map<String, String> inputs = new LinkedHashMap<>((Map<String, String>) old.get("inputs"));
@@ -517,6 +536,14 @@ public final class InputSourcesCore {
                 combined.put("reasons", reasons);
                 combined.put("methods", methods);
                 combined.put("types", typed);
+                Map<String, Map<String, Map<String, String>>> located = new TreeMap<>();
+                for (Object side : List.of(old.getOrDefault("byLocation", Map.of()), now.getOrDefault("byLocation", Map.of()))) {
+                    ((Map<String, Map<String, Map<String, String>>>) side).forEach((verb, where) -> where.forEach((place, own) -> {
+                        Map<String, String> into = located.computeIfAbsent(verb, item -> new TreeMap<>()).computeIfAbsent(place, item -> new TreeMap<>());
+                        own.forEach((name, kind) -> into.merge(name, kind, (a, b) -> a.equals(b) ? a : "text"));
+                    }));
+                }
+                combined.put("byLocation", located);
                 combined.put("standalone", Boolean.TRUE.equals(old.get("standalone")) && Boolean.TRUE.equals(now.get("standalone")));
                 return combined;
             });
@@ -740,6 +767,18 @@ public final class InputSourcesCore {
             }
             if (!ownTypes.isEmpty()) data.put("inputs_types_by_method", ownTypes);
             else data.remove("inputs_types_by_method");
+            // A location's type for a name, where it isn't what the method checks otherwise.
+            Map<String, Map<String, Map<String, String>>> byLocation = new TreeMap<>();
+            if (framework != null && framework.get("byLocation") instanceof Map<?, ?> located) {
+                ((Map<String, Map<String, Map<String, String>>>) located).forEach((verb, where) -> where.forEach((place, types) -> types.forEach((name, kind) -> {
+                    String otherwise = ownTypes.getOrDefault(verb, Map.of()).getOrDefault(name, found.get(name));
+                    if (found.containsKey(name) && !kind.equals(otherwise)) {
+                        byLocation.computeIfAbsent(verb, item -> new TreeMap<>()).computeIfAbsent(place, item -> new TreeMap<>()).put(name, kind);
+                    }
+                })));
+            }
+            if (!byLocation.isEmpty()) data.put("inputs_types_by_location", byLocation);
+            else data.remove("inputs_types_by_location");
             if (reasons.isEmpty()) {
                 data.remove("inputs_incomplete");
                 complete++;

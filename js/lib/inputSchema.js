@@ -15,6 +15,12 @@
 const REQUEST_NAMES = new Set(['req', 'request']);
 const CONTEXT_NAMES = new Set(['ctx', 'context']);
 const CONTAINERS = new Set(['query', 'body']);
+// Array methods: called on an input, they use it whole.
+const ARRAY_METHODS = new Set(['map', 'forEach', 'filter', 'reduce', 'some', 'every', 'find', 'findIndex', 'flatMap', 'join', 'sort', 'reverse', 'push', 'entries', 'keys', 'values']);
+
+// Fastify's hooks that run before a route's handler, with the request.
+const REQUEST_HOOKS = new Set(['onRequest', 'preParsing', 'preValidation', 'preHandler']);
+
 // String and array methods: called on a container, they read a raw text body whole.
 const TEXT_METHODS = new Set([
   'trim', 'trimStart', 'trimEnd', 'split', 'slice', 'substring', 'substr', 'toLowerCase', 'toUpperCase', 'includes',
@@ -139,7 +145,12 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
   const inner = (read, key) => {
     const parent = parents.get(read);
     const sub = isMember(parent) && parent.object === read ? memberKey(parent, scope.constants) : null;
-    if (sub === null || sub === undefined) flat.add(key);
+    // lines.length, or a string or array method called on it: the value used whole, not a key.
+    const call = parent ? parents.get(parent) : null;
+    const builtIn = sub !== null && sub !== undefined && !parent.computed
+      && (sub === 'length' || (TEXT_METHODS.has(sub) && isCall(call) && call.callee === parent)
+        || (ARRAY_METHODS.has(sub) && isCall(call) && call.callee === parent));
+    if (sub === null || sub === undefined || builtIn) flat.add(key);
     else (nested[key] = nested[key] || new Set()).add(sub);
   };
   const incomplete = (code, detail, at) => {
@@ -619,6 +630,11 @@ function fileInputs(ast, filename, source, label, scope = null) {
       }
       const nested = Object.fromEntries(Object.entries(found.nested || {}).filter(([key]) => !(key in middlewareNames)));
       const entry = { function: label(node, parent), file: filename, inputs: found.inputs, complete: found.reasons.length === 0 };
+      // fastify.addHook('preHandler', fn): it runs before the handlers of the routes in its
+      // scope, so what it reads is theirs.
+      if (isCall(parent) && isMember(parent.callee) && (parent.callee.property.name || parent.callee.property.value) === 'addHook'
+        && parent.arguments[parent.arguments.length - 1] === node && parent.arguments[0]
+        && parent.arguments[0].type === 'StringLiteral' && REQUEST_HOOKS.has(parent.arguments[0].value)) entry.hook = parent.arguments[0].value;
       if (Object.keys(nested).length) entry.nested = nested;
       if (found.reasons.length) entry.reasons = found.reasons;
       results.push(entry);

@@ -268,7 +268,9 @@ function finalize(routes, sources = {}) {
     const nested = data._nested || {};
     const flat = new Set(data._flat || []);
     const declaredTypes = data.declared_types || {};
-    for (const key of ['declared_inputs', 'input_declaration', 'declared_methods', 'declared_types', '_input_methods', '_input_shared', '_nested', '_flat']) delete data[key];
+    const declaredLocations = data.declared_locations || null;
+    for (const key of ['declared_inputs', 'input_declaration', 'declared_methods', 'declared_types', 'declared_locations', '_input_methods',
+      '_input_shared', '_nested', '_flat']) delete data[key];
     let read = 'inputs_complete' in data;
     const found = { ...(data.inputs || {}) };
     let reasons = [...(data.inputs_incomplete || [])];
@@ -281,13 +283,13 @@ function finalize(routes, sources = {}) {
         // handler's own read says: the value reaching it has been checked, or coerced, already.
         if (kind && kind !== 'text' && typeHolds(name)) found[name] = kind;
         else merge(found, name, kind);
-        if (!(name in frameworkNested)) flat.add(name);
+        if (!Object.keys(frameworkNested).some(path => path.split('.')[0].replace(/\[\]$/, '') === name)) flat.add(name);
       }
       // The framework validates these objects' keys (a closed schema), so they stand even where
       // reading the code found only the whole field.
       for (const [name, keys] of Object.entries(frameworkNested)) {
         nested[name] = [...new Set([...(nested[name] || []), ...keys])];
-        flat.delete(name);
+        flat.delete(name.split('.')[0].replace(/\[\]$/, ''));
       }
       read = read || Boolean(framework.standalone);
     }
@@ -345,7 +347,9 @@ function finalize(routes, sources = {}) {
       counts.complete += 1;
     }
     // Keys inside an input, when every reading of it reads constant keys.
-    const inner = Object.fromEntries(Object.entries(nested).filter(([name]) => name in found && !flat.has(name)));
+    // A key path's first name, as customer in customer.address or lines in lines[], is the input.
+    const topOf = name => name.split('.')[0].replace(/\[\]$/, '');
+    const inner = Object.fromEntries(Object.entries(nested).filter(([name]) => topOf(name) in found && !flat.has(topOf(name))));
     if (Object.keys(inner).length && !reasons.length) data.inputs_nested = inner;
     else delete data.inputs_nested;
     const methods = byMethod(found, data.methods || [], claims, shared);
@@ -362,6 +366,22 @@ function finalize(routes, sources = {}) {
     }
     if (Object.keys(ownTypes).length) data.inputs_types_by_method = ownTypes;
     else delete data.inputs_types_by_method;
+    // A location's type for a name, where it isn't what the method checks otherwise (a query
+    // limit that's an integer next to a JSON limit that's text): checked for values sent there.
+    const locations = declaredLocations || (framework && framework.locations
+      ? Object.fromEntries((data.methods || []).map(method => [String(method).toUpperCase(), framework.locations])) : {});
+    const byLocation = {};
+    for (const [method, byWhere] of Object.entries(locations)) {
+      for (const [where, types] of Object.entries(byWhere)) {
+        for (const [name, kind] of Object.entries(types)) {
+          const otherwise = (ownTypes[method] && ownTypes[method][name]) || found[name];
+          if (!(name in found) || kind === otherwise) continue;
+          ((byLocation[method] = byLocation[method] || {})[where] = byLocation[method][where] || {})[name] = kind;
+        }
+      }
+    }
+    if (Object.keys(byLocation).length) data.inputs_types_by_location = byLocation;
+    else delete data.inputs_types_by_location;
   }
   return counts;
 }

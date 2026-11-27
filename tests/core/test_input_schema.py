@@ -304,3 +304,20 @@ def test_a_read_assigned_to_a_variable_takes_the_type_of_its_later_casts():
     assert found["none"][0] == {"n": "float"}
     for name in ("under_if", "before", "two", "other"):
         assert found[name][0] == {"n": "text"}, name
+
+
+def test_pydantic_models_read_from_source_use_their_request_keys():
+    head = ("from fastapi import FastAPI\nfrom pydantic import BaseModel, Field, ConfigDict, AliasChoices\n"
+            "app = FastAPI()\n")
+    tail = "@app.post('/x')\ndef v(d: D):\n    return d\n"
+    alias = inputs(head + "class D(BaseModel):\n    event_id: str = Field(alias='eventId')\n    ok: bool\n" + tail)
+    assert alias["v"] == ({"eventId": "text", "ok": "bool"}, True)
+    by_name = inputs(head + "class D(BaseModel):\n    model_config = ConfigDict(populate_by_name=True)\n"
+                     "    event_id: str = Field(alias='eventId')\n" + tail)
+    assert by_name["v"][0] == {"eventId": "text", "event_id": "text"}
+    choices = inputs(head + "class D(BaseModel):\n    ref: int = Field(validation_alias=AliasChoices('ref', 'reference'))\n" + tail)
+    assert choices["v"][0] == {"ref": "int", "reference": "int"}
+    for model in ("class D(BaseModel):\n    model_config = ConfigDict(alias_generator=str.upper)\n    event_id: str\n",
+                  "NAME = 'x'\nclass D(BaseModel):\n    event_id: str = Field(alias=NAME)\n",
+                  "class D(BaseModel):\n    class Config:\n        alias_generator = str.upper\n    event_id: str\n"):
+        assert inputs(head + model + tail)["v"] == ({}, False)

@@ -28,7 +28,7 @@ Reason codes (stable; other tools and the docs refer to them):
 from __future__ import annotations
 
 import ast
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 # Request attributes that hold the query or body. Called ones, as get_json(), are read by calling.
 _CONTAINERS = {"GET", "POST", "args", "form", "json", "values", "data", "query_params", "body", "get_json", "get_data",
@@ -75,6 +75,57 @@ REASON_CODES = (
     "helper", "container_whole", "dynamic_key", "raw_body", "class_view", "dependency", "external_class", "model_fields",
     "unread_view",
 )
+
+
+def _pydantic_config(node: ast.ClassDef) -> Dict[str, Any]:
+    """What a Pydantic model's model_config = ConfigDict(...) (or a class Config) says about names."""
+    found: Dict[str, Any] = {}
+    for item in node.body:
+        if isinstance(item, ast.Assign) and any(_dotted(target) == "model_config" for target in item.targets):
+            call = item.value
+            if isinstance(call, ast.Call):
+                for keyword in call.keywords:
+                    if keyword.arg in {"populate_by_name", "validate_by_name", "alias_generator"}:
+                        found[keyword.arg] = keyword.value.value if isinstance(keyword.value, ast.Constant) else True
+            elif isinstance(call, ast.Dict):
+                for key, value in zip(call.keys, call.values):
+                    if isinstance(key, ast.Constant) and key.value in {"populate_by_name", "validate_by_name", "alias_generator"}:
+                        found[key.value] = value.value if isinstance(value, ast.Constant) else True
+        elif isinstance(item, ast.ClassDef) and item.name == "Config":
+            for entry in item.body:
+                if isinstance(entry, ast.Assign):
+                    for target in entry.targets:
+                        if _dotted(target) in {"populate_by_name", "allow_population_by_field_name", "alias_generator"}:
+                            name = "populate_by_name" if _dotted(target) != "alias_generator" else "alias_generator"
+                            found[name] = entry.value.value if isinstance(entry.value, ast.Constant) else True
+    return found
+
+
+def _pydantic_keys(attribute: str, value: Optional[ast.AST], config: Mapping[str, Any]) -> Optional[List[str]]:
+    """The request keys a Pydantic field takes, from its Field(alias=...), or None when the
+    source doesn't spell them out (an alias held in a variable, AliasPath, AliasChoices of paths)."""
+    names: List[str] = []
+    if isinstance(value, ast.Call) and _last(value.func) == "Field":
+        options = {keyword.arg: keyword.value for keyword in value.keywords if keyword.arg}
+        validation = options.get("validation_alias")
+        alias = options.get("alias")
+        if validation is not None:
+            if isinstance(validation, ast.Constant) and isinstance(validation.value, str):
+                names.append(validation.value)
+            elif isinstance(validation, ast.Call) and _last(validation.func) == "AliasChoices" and all(
+                    isinstance(arg, ast.Constant) and isinstance(arg.value, str) for arg in validation.args):
+                names.extend(arg.value for arg in validation.args)
+            else:
+                return None
+        elif alias is not None:
+            if not (isinstance(alias, ast.Constant) and isinstance(alias.value, str)):
+                return None
+            names.append(alias.value)
+    if not names:
+        return [attribute]
+    if config.get("populate_by_name") or config.get("validate_by_name"):
+        names.append(attribute)
+    return list(dict.fromkeys(names))
 
 
 def _dotted(node: Optional[ast.AST]) -> str:
@@ -232,9 +283,19 @@ class _Module:
             if inherited is None:
                 return None, reason
             fields.update(inherited)
+        # A Pydantic model takes each field under its alias, not its attribute name, unless it
+        # populates by name; an alias generator renames them in ways the source doesn't show.
+        config = _pydantic_config(node)
+        if config.get("alias_generator"):
+            return None, ("model_fields", node.name)
         for item in node.body:
             if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
-                fields[item.target.id] = _annotation_type(item.annotation)
+                kind = _annotation_type(item.annotation)
+                names = _pydantic_keys(item.target.id, item.value, config)
+                if names is None:
+                    return None, ("model_fields", node.name)
+                for accepted in names:
+                    fields[accepted] = kind
             elif isinstance(item, ast.Assign) and isinstance(item.value, ast.Call) and _last(item.value.func).endswith("Field"):
                 for target in item.targets:
                     if isinstance(target, ast.Name):

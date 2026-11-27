@@ -1194,6 +1194,11 @@ impl NativeCSVPipeline {
             "extra_user_agents",
             "learn_context",
             "blocked_stage",
+            // Manifest entries the route schema check reads: inputs_types_by_method,
+            // inputs_types_by_location, and inputs_nested keys deeper than the first level.
+            "method_types",
+            "location_types",
+            "nested_paths",
         ]
         .contains(&feature)
     }

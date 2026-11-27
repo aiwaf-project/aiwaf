@@ -280,9 +280,26 @@ function buildManifest({ framework, routes, appContext = {} }) {
   };
 }
 
+// Writes the manifest atomically: to a temporary file beside it, then renaming it over the old
+// one, so a write that fails (a full disk, a value JSON can't hold) leaves the old one intact.
 function writeManifest(manifest, outputPath = DEFAULT_MANIFEST_PATH) {
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-  fs.writeFileSync(outputPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  const text = `${JSON.stringify(manifest, null, 2)}\n`;
+  const temporary = path.join(path.dirname(outputPath), `.${path.basename(outputPath)}.${process.pid}.${Date.now()}.tmp`);
+  try {
+    const handle = fs.openSync(temporary, 'wx', 0o644);
+    try {
+      fs.writeFileSync(handle, text, 'utf8');
+      fs.fsyncSync(handle);
+    } finally {
+      fs.closeSync(handle);
+    }
+    try { fs.chmodSync(temporary, fs.statSync(outputPath).mode & 0o777); } catch (_) { /* a new manifest */ }
+    fs.renameSync(temporary, outputPath);
+  } catch (error) {
+    try { fs.unlinkSync(temporary); } catch (_) { /* already gone */ }
+    throw error;
+  }
   return outputPath;
 }
 
@@ -393,8 +410,16 @@ function addRoute(routes, routeInfo) {
   const declared = require('./inputSources').declaredOn(routeInfo.handlers || [], routeInfo.handler);
   if (declared) entry.input_declaration = declared;
   const framework = require('./frameworkInputs');
-  const known = routeInfo.declared || framework.fastifyInputs(routeInfo.schema) || framework.hapiInputs(routeInfo.validate)
+  let known = routeInfo.declared || framework.fastifyInputs(routeInfo.schema) || framework.hapiInputs(routeInfo.validate)
     || framework.expressInputs(routeInfo.handlers);
+  // A schema the route has but that couldn't be read (imported, built at runtime): its inputs
+  // are unknown, so the route's list isn't complete.
+  if (!known && routeInfo.schemaUnreadable) {
+    known = {
+      inputs: {}, covers: [], standalone: false,
+      reasons: [{ code: 'external_class', detail: "the route's schema isn't available: init didn't load it, and the source doesn't spell it out" }]
+    };
+  }
   for (const [name, methods] of routeInfo.handlerMethods || []) {
     entry.handler_methods = entry.handler_methods || {};
     entry.handler_methods[name] = methods.length && entry.handler_methods[name] !== null
@@ -409,6 +434,10 @@ function addRoute(routes, routeInfo) {
     const typed = Object.fromEntries(Object.entries(known.inputs || {}).filter(([, kind]) => kind && kind !== 'text'));
     if (Object.keys(typed).length) {
       entry.declared_types = Object.fromEntries((entry.methods || []).map(method => [String(method).toUpperCase(), { ...typed }]));
+    }
+    // And each method's types per location.
+    if (known.locations) {
+      entry.declared_locations = Object.fromEntries((entry.methods || []).map(method => [String(method).toUpperCase(), known.locations]));
     }
   }
   if (routes[normalized]) {
@@ -438,6 +467,17 @@ function addRoute(routes, routeInfo) {
     if (combined) routes[normalized].declared_inputs = combined;
     if (Object.keys(declaredMethods).length) routes[normalized].declared_methods = declaredMethods;
     if (Object.keys(declaredTypes).length) routes[normalized].declared_types = declaredTypes;
+    const declaredLocations = {};
+    for (const side of [routes[normalized].declared_locations, entry.declared_locations]) {
+      for (const [method, byWhere] of Object.entries(side || {})) {
+        const intoMethod = (declaredLocations[method] = declaredLocations[method] || {});
+        for (const [where, types] of Object.entries(byWhere)) {
+          const into = (intoMethod[where] = intoMethod[where] || {});
+          for (const [name, kind] of Object.entries(types)) into[name] = into[name] === undefined || into[name] === kind ? kind : 'text';
+        }
+      }
+    }
+    if (Object.keys(declaredLocations).length) routes[normalized].declared_locations = declaredLocations;
     if (Object.keys(handlerMethods).length) routes[normalized].handler_methods = handlerMethods;
   } else {
     routes[normalized] = entry;
@@ -588,7 +628,8 @@ function normalizeRouteList(routesInput = []) {
       responseType: route.responseType || route.response_type || null,
       // The method a named handler serves, so the audit's reading of it (linked by name) is
       // that method's: fastify.delete('/plans', removePlan) reads force for DELETE alone.
-      handlerMethods: route.handlerMethods || handlerMethodsOf(route)
+      handlerMethods: route.handlerMethods || handlerMethodsOf(route),
+      schemaUnreadable: Boolean(route.schemaUnreadable)
     }))
     .filter(route => route.routePath);
 }
@@ -628,7 +669,12 @@ function fastifyRouteList(fastify) {
  * route table.
  */
 function fastifyRoutes(fastify) {
-  const recorded = Array.isArray(fastify?.aiwafRoutes) ? fastify.aiwafRoutes.filter(route => route && typeof route === 'object') : [];
+  // init's own capture, from before any route was added, when the app was loaded by init; else
+  // the AIWAF plugin's, which misses routes added before it.
+  const captured = fastify ? fastify[Symbol.for('aiwaf.init.fastifyRoutes')] : null;
+  const source = Array.isArray(captured) && captured.length ? captured : fastify?.aiwafRoutes;
+  const recorded = Array.isArray(source) ? source.filter(route => route && typeof route === 'object' && String(route.method).toUpperCase() !== 'HEAD'
+    && !(Array.isArray(route.method) && route.method.every(method => String(method).toUpperCase() === 'HEAD'))) : [];
   const seen = new Set();
   for (const route of recorded) {
     const routePath = route.url || route.path;
@@ -782,6 +828,7 @@ function auditIntoManifest(manifest, source) {
         delete entry.declared_inputs;
         delete entry.declared_methods;
         delete entry.declared_types;
+        delete entry.declared_locations;
         delete entry._input_methods;
         delete entry._input_shared;
         delete entry._nested;
@@ -826,8 +873,10 @@ function withSourceHandlers(routesInput, source) {
     if (!found) return route;
     const filled = { ...route };
     if (!(route.handler || route.handle || route.endpoint)) filled.handler = found;
-    // A schema written in the source, for a route Fastify didn't hand over with its options.
+    // A schema written in the source, for a route Fastify didn't hand over with its options; or
+    // the word that it has one that can't be read here.
     if (!route.schema && found.schema) filled.schema = found.schema;
+    else if (!route.schema && found.schemaUnreadable) filled.schemaUnreadable = true;
     return filled;
   });
 }

@@ -321,3 +321,12 @@ test('a text body read whole is no field', () => {
   expect(found['/indexed']).toEqual([{ length: 'text' }, true]);
 });
 
+test('an input used whole through a built-in is no nested key; a hook is marked', () => {
+  const found = inputs(`
+    app.post('/a', (req, res) => res.json({ n: req.body.lines.length, s: req.body.tags.map(t => t), k: req.body.user.name }));
+  `);
+  expect(found['/a'][0]).toEqual({ lines: 'text', tags: 'text', user: 'text' });
+  const ast = parser.parse("fastify.addHook('preHandler', async request => { request.t = request.query.tenant; });\nfastify.addHook('onSend', async request => request.query.x);", { sourceType: 'unambiguous' });
+  const entries = fileInputs(ast, 'app.js', '', () => 'hook');
+  expect(entries.map(entry => entry.hook)).toEqual(['preHandler', undefined]);
+});

@@ -228,9 +228,22 @@ struct RiskRoute {
     /// next to GET's text mode (`inputs_types_by_method`). `inputs` keeps the type every method
     /// agrees on, which is what an engine without this reads.
     method_types: HashMap<String, HashMap<String, String>>,
+    /// A method's type for a name in one location, where the query and body differ, as a query
+    /// limit that's an integer next to a JSON limit that's text (`inputs_types_by_location`,
+    /// method to "query" or "body" to name to type).
+    location_types: HashMap<String, HashMap<String, HashMap<String, String>>>,
 }
 
 impl RiskRoute {
+    /// The type a value sent in this location ("query" or "body") checks against: the method's
+    /// type for that location, else the method's own, else the route's.
+    fn kind_at(&self, method: &str, location: &str, name: &str) -> Option<&str> {
+        let upper = method.to_ascii_uppercase();
+        let own = self.location_types.get(&upper).or_else(|| if upper == "HEAD" { self.location_types.get("GET") } else { None });
+        own.and_then(|locations| locations.get(location)).and_then(|types| types.get(name)).map(String::as_str)
+            .or_else(|| self.kind(method, name))
+    }
+
     /// The type a request with this method checks a name against: the method's own, else the route's.
     fn kind(&self, method: &str, name: &str) -> Option<&str> {
         let method = method.to_ascii_uppercase();
@@ -341,6 +354,55 @@ fn segment_type(segment: &str) -> Option<&'static str> {
 pub const INPUT_TYPES: &[&str] = &["int", "float", "bool", "uuid", "text"];
 
 /// True when a value fits a type. Values that can't carry text, as JSON numbers, always fit.
+/// How deep strict inputs follow keys inside a JSON body.
+const MAX_NESTED_DEPTH: usize = 6;
+
+/// The first key below path that init knows the keys around and that isn't one of them: an
+/// object's keys at "customer.address", each array item's at "lines[]". The first level ("user")
+/// is checked by the caller; this goes deeper. Only paths init saved are checked.
+fn deep_unexpected(nested: &HashMap<String, HashSet<String>>, allow: &[String], path: &str, value: &Value, depth: usize) -> Option<String> {
+    if depth >= MAX_NESTED_DEPTH {
+        return None;
+    }
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                let child_path = format!("{path}.{key}");
+                if depth > 0 {
+                    if let Some(keys) = nested.get(path) {
+                        if !keys.contains(key) && !allowed(allow, &child_path) {
+                            return Some(child_path);
+                        }
+                    }
+                }
+                if let Some(found) = deep_unexpected(nested, allow, &child_path, child, depth + 1) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(items) => {
+            let item_path = format!("{path}[]");
+            for item in items.iter().take(256) {
+                if let (Some(keys), Some(object)) = (nested.get(&item_path), item.as_object()) {
+                    if let Some(key) = object.keys().find(|key| !keys.contains(*key) && !allowed(allow, &format!("{item_path}.{key}"))) {
+                        return Some(format!("{item_path}.{key}"));
+                    }
+                }
+                if let Some(object) = item.as_object() {
+                    for (key, child) in object {
+                        if let Some(found) = deep_unexpected(nested, allow, &format!("{item_path}.{key}"), child, depth + 1) {
+                            return Some(found);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 fn fits(kind: &str, value: &Value) -> bool {
     static INT: OnceLock<Regex> = OnceLock::new();
     static FLOAT: OnceLock<Regex> = OnceLock::new();
@@ -526,6 +588,26 @@ impl RouteRisks {
                                 .collect()
                         })
                         .unwrap_or_default();
+                    let types_of = |value: &Value| -> HashMap<String, String> {
+                        value.as_object().map(|types| {
+                            types.iter().filter_map(|(name, kind)| {
+                                Some((name.clone(), kind.as_str().filter(|kind| INPUT_TYPES.contains(kind))?.to_owned()))
+                            }).collect()
+                        }).unwrap_or_default()
+                    };
+                    let location_types = entry
+                        .get("inputs_types_by_location")
+                        .and_then(Value::as_object)
+                        .map(|methods| {
+                            methods.iter().filter_map(|(method, locations)| {
+                                let locations = locations.as_object()?.iter()
+                                    .filter(|(location, _)| ["query", "body"].contains(&location.as_str()))
+                                    .map(|(location, types)| (location.clone(), types_of(types)))
+                                    .collect();
+                                Some((method.to_ascii_uppercase(), locations))
+                            }).collect()
+                        })
+                        .unwrap_or_default();
                     routes.push(RiskRoute {
                         path: path.clone(),
                         compiled: compile_route(path),
@@ -536,6 +618,7 @@ impl RouteRisks {
                         by_method,
                         nested,
                         method_types,
+                        location_types,
                     });
                 }
             }
@@ -661,18 +744,22 @@ impl RouteRisks {
         let inputs = route.inputs.as_ref()?;
         let fields = fields(query, body);
         let mut all: Vec<(&String, &Value)> = fields.query.iter().map(|(name, value, _)| (name, value)).collect();
+        let in_query = all.len();
         match &fields.body {
             Some(BodyFields::Form(items) | BodyFields::Multipart(items)) => all.extend(items.iter().map(|(name, value, _)| (name, value))),
             Some(BodyFields::Json(map)) => all.extend(map.iter()),
             _ => (),
         }
-        for (name, value) in &all {
-            if let Some(kind) = route.kind(method, name).filter(|kind| *kind != "text") {
+        for (index, (name, value)) in all.iter().enumerate() {
+            // Each value against its own location's type: the query's, or the body's.
+            let location = if index < in_query { "query" } else { "body" };
+            if let Some(kind) = route.kind_at(method, location, name).filter(|kind| *kind != "text") {
                 if !fits(kind, value) {
                     // The name comes from the manifest, because request names are untrusted.
                     let input = inputs
                         .get_key_value(*name)
                         .or_else(|| route.method_types.values().find_map(|types| types.get_key_value(*name)))
+                        .or_else(|| route.location_types.values().flat_map(HashMap::values).find_map(|types| types.get_key_value(*name)))
                         .map(|(key, _)| key.clone())
                         .unwrap_or_default();
                     return Some(Review::Mismatch { route: route.path.clone(), input, kind: kind.to_owned() });
@@ -699,6 +786,10 @@ impl RouteRisks {
                 for (top, value) in map {
                     if let Some(key) = value.as_object().and_then(|object| object.keys().find(|key| inner(top, key))) {
                         return Some(Review::Unexpected { route: route.path.clone(), input: format!("{top}.{key}") });
+                    }
+                    // Deeper keys init knows, as customer.address.city, or lines[].sku in each item.
+                    if let Some(input) = deep_unexpected(&route.nested, allow, top, value, 0) {
+                        return Some(Review::Unexpected { route: route.path.clone(), input });
                     }
                 }
             }
@@ -927,6 +1018,48 @@ mod tests {
         // Without the entry, as an older manifest, every method reads the route's types.
         let plain = RouteRisks::new(&json!({"routes": {"/plans": {"view": "p", "inputs": {"mode": "text"}, "inputs_complete": true}}}));
         assert!(plain.review_method("POST", "/plans", "", br#"{"mode": "fast"}"#, 4096, None).is_none());
+    }
+
+    #[test]
+    fn each_value_checks_its_own_locations_type() {
+        let risks = RouteRisks::new(&json!({"routes": {
+            "/reports": {"view": "r", "inputs": {"limit": "text", "since": "int"}, "inputs_complete": true,
+                         "inputs_types_by_location": {"POST": {"query": {"limit": "int"}, "body": {"limit": "text"}, "cookie": {"limit": "int"}}}}
+        }}));
+        let mismatch = |query: &str, body: &str| match risks.review_method("POST", "/reports", query, body.as_bytes(), 4096, None) {
+            Some(Review::Mismatch { input, kind, .. }) => Some((input, kind)),
+            _ => None,
+        };
+        // The valid pair: an integer query limit and a text JSON limit.
+        assert_eq!(mismatch("limit=5", r#"{"limit": "all"}"#), None);
+        // Each changed alone: only its own check fires.
+        assert_eq!(mismatch("limit=all", r#"{"limit": "all"}"#), Some(("limit".into(), "int".into())));
+        assert_eq!(mismatch("limit=5", r#"{"limit": 7}"#), None);
+        // A name with no location type falls back to the route's; another method to the route's.
+        assert_eq!(mismatch("since=soon", ""), Some(("since".into(), "int".into())));
+        assert!(risks.review_method("GET", "/reports", "limit=all", b"", 4096, None).is_none());
+        // A form body is the body location too.
+        assert!(risks.review_method("POST", "/reports", "limit=5", b"limit=all", 4096, None).is_none());
+    }
+
+    #[test]
+    fn strict_inputs_follow_keys_deeper_where_init_knows_them() {
+        let risks = RouteRisks::new(&json!({
+            "strict_inputs": {"allow": ["customer.address.note"]},
+            "routes": {"/orders": {"view": "o", "inputs": {"customer": "text", "lines": "text"}, "inputs_complete": true,
+                "inputs_nested": {"customer": ["address", "email"], "customer.address": ["city", "zip"], "lines[]": ["qty", "sku"]}}}
+        }));
+        let unexpected = |body: &str| match risks.review_method("POST", "/orders", "", body.as_bytes(), 4096, None) {
+            Some(Review::Unexpected { input, .. }) => Some(input),
+            _ => None,
+        };
+        let valid = r#"{"customer": {"email": "a@b.c", "address": {"city": "X", "zip": "1"}}, "lines": [{"sku": "s", "qty": 1}, {"sku": "t", "qty": 2}]}"#;
+        assert_eq!(unexpected(valid), None);
+        assert_eq!(unexpected(r#"{"customer": {"address": {"city": "X", "role": "admin"}}}"#), Some("customer.address.role".into()));
+        assert_eq!(unexpected(r#"{"lines": [{"sku": "s"}, {"sku": "t", "price": 0}]}"#), Some("lines[].price".into()));
+        assert_eq!(unexpected(r#"{"customer": {"address": {"note": "allowed by name"}}}"#), None);
+        // A level init knows nothing about isn't checked: lines items' own objects, a string address.
+        assert_eq!(unexpected(r#"{"lines": [{"sku": {"any": "thing"}}], "customer": {"address": "text"}}"#), None);
     }
 
     #[test]

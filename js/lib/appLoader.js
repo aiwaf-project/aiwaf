@@ -84,6 +84,49 @@ function appFromServer(server) {
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+// Where init's capture of a Fastify instance's routes lives: every route's options, as
+// registered, from an onRoute hook added before the app's own code adds any route. The AIWAF
+// plugin's hook only sees routes added after it, and Fastify's route table has no schemas.
+const ROUTES = Symbol.for('aiwaf.init.fastifyRoutes');
+
+/**
+ * Wraps the app's own Fastify factory while it loads, so each instance it creates records its
+ * routes' options from the start. ES modules importing Fastify get the same wrapped exports, as
+ * Node shares a CommonJS package's exports with them. Returns the function that undoes it.
+ */
+const NOTHING = () => {};
+
+function captureFastifyRoutes(file, cache = require.cache, load = require) {
+  let resolved;
+  try {
+    resolved = require('module').createRequire(file).resolve('fastify');
+  } catch (_) {
+    return NOTHING;
+  }
+  let original;
+  try {
+    original = load(resolved);
+  } catch (_) {
+    return NOTHING;
+  }
+  const cached = cache[resolved];
+  if (typeof original !== 'function' || !cached) return NOTHING;
+  const wrapped = function aiwafCapturingFastify(...args) {
+    const instance = original.apply(this, args);
+    try {
+      const routes = [];
+      Object.defineProperty(instance, ROUTES, { value: routes, enumerable: false });
+      instance.addHook('onRoute', options => { routes.push(options); });
+    } catch (_) { /* a Fastify without onRoute: the route table is used instead */ }
+    return instance;
+  };
+  Object.assign(wrapped, original);
+  wrapped.default = wrapped;
+  wrapped.fastify = wrapped;
+  cached.exports = wrapped;
+  return () => { cached.exports = original; };
+}
+
 /**
  * Loads the app, as {app, framework, file, exportName}.
  *
@@ -96,6 +139,7 @@ async function loadApp(options = {}) {
   const file = resolveAppFile(options.app, cwd);
   const waitMs = Number.isFinite(options.waitMs) ? options.waitMs : 3000;
   const servers = [];
+  const restoreFastify = captureFastifyRoutes(file);
   const listen = net.Server.prototype.listen;
   // Records the server instead of binding a port. Its callback isn't run: the app isn't serving.
   net.Server.prototype.listen = function recordListen() {
@@ -145,8 +189,9 @@ async function loadApp(options = {}) {
     if (framework === 'fastify' && typeof app.ready === 'function') await app.ready();
     return { app, framework, file, exportName: options.exportName || null };
   } finally {
+    restoreFastify();
     net.Server.prototype.listen = listen;
   }
 }
 
-module.exports = { loadApp, frameworkOf, resolveAppFile, AppLoadError };
+module.exports = { loadApp, frameworkOf, resolveAppFile, AppLoadError, ROUTES, captureFastifyRoutes };

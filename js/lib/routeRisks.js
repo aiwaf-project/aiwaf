@@ -241,6 +241,7 @@ function applyReport(report, manifest, sources = {}) {
       delete entry.inputs_by_method;
       delete entry.inputs_nested;
       delete entry.inputs_types_by_method;
+      delete entry.inputs_types_by_location;
     }
   }
   let linked = 0;
@@ -261,7 +262,17 @@ function applyReport(report, manifest, sources = {}) {
   }
   // What each route reads, with types. A route whose handlers weren't all found gets none.
   const read = new Set();
-  for (const entry of report.inputs || []) {
+  // A request hook's reads (fastify.addHook('preHandler', ...)) are every route's: the app
+  // doesn't say which routes a hook's scope holds, so each route allows its names, with their
+  // types. Its own handler still has to be read for the route to count as audited.
+  for (const entry of (report.inputs || []).filter(item => item && item.hook)) {
+    for (const path of Object.keys(routes)) {
+      if (!routes[path] || typeof routes[path] !== 'object') continue;
+      mergeInto(routes, path, entry);
+      routes[path]._input_shared = [...new Set([...(routes[path]._input_shared || []), ...Object.keys(entry.inputs || {})])].sort();
+    }
+  }
+  for (const entry of (report.inputs || []).filter(item => item && !item.hook)) {
     // The method a handler serves, from its label, as app.get /items; unknown for a named one.
     const labelled = (/^(?:\S+\.)?(get|post|put|patch|delete|head|options) \//i.exec(String(entry.function || '')) || [])[1];
     for (const path of routesFor(entry, routes)) {

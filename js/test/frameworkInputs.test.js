@@ -87,7 +87,10 @@ describe('framework inputs', () => {
     expect(framework.fastifyInputs(null)).toBeNull();
     expect(framework.fastifyInputs({ response: {} })).toBeNull();
     const declared = framework.fastifyInputs({ querystring: { type: 'object', properties: { q: { type: 'string' } } }, body: { type: 'object', properties: { n: { type: 'integer' } } } });
-    expect(declared).toEqual({ inputs: { q: 'text', n: 'int' }, covers: expect.arrayContaining(['container_whole']), reasons: [], standalone: false });
+    expect(declared).toEqual({
+      inputs: { q: 'text', n: 'int' }, covers: expect.arrayContaining(['container_whole']), reasons: [], standalone: false,
+      locations: { query: { q: 'text' }, body: { n: 'int' } }
+    });
     expect(framework.hapiInputs(undefined)).toBeNull();
     expect(framework.hapiInputs({ query: false, payload: true })).toEqual(expect.objectContaining({ inputs: {} }));
 
@@ -95,7 +98,8 @@ describe('framework inputs', () => {
     expect(framework.combine(declared, null)).toBe(declared);
     const other = { inputs: { x: 'bool' }, covers: ['dependency'], reasons: [{ code: 'helper' }], standalone: true };
     expect(framework.combine({ ...declared, standalone: true }, other)).toEqual({
-      inputs: { q: 'text', n: 'int', x: 'bool' }, covers: ['dependency'], reasons: [{ code: 'helper' }], standalone: true
+      inputs: { q: 'text', n: 'int', x: 'bool' }, covers: ['dependency'], reasons: [{ code: 'helper' }], standalone: true,
+      locations: { query: { q: 'text' }, body: { n: 'int' } }
     });
   });
 

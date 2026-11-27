@@ -665,3 +665,20 @@ def test_a_framework_list_for_an_unread_view_is_kept_but_not_complete():
         assert [reason["code"] for reason in routes[path]["inputs_incomplete"]] == ["unread_view"]
     assert manifest["injection_audit"]["routes_with_complete_inputs"] == 1
     assert manifest["injection_audit"]["incomplete_input_reasons"] == {"unread_view": 2}
+
+
+def test_engine_gaps_names_the_checks_an_engine_cant_make():
+    from aiwaf.core.route_risks import engine_gaps
+
+    manifest = {"routes": {
+        "/a": {"inputs_types_by_method": {"POST": {"x": "int"}}, "inputs_types_by_location": {"POST": {"query": {"x": "int"}}},
+               "inputs_nested": {"a.b": ["c"], "lines[]": ["d"]}},
+        "/b": {"inputs_nested": {"top": ["x"]}}, "/c": None,
+    }}
+    assert engine_gaps(manifest, supports=lambda feature: False) == [
+        "query and body types (inputs_types_by_location)", "per-method types (inputs_types_by_method)",
+        "nested keys below the first level (inputs_nested)"]
+    assert engine_gaps(manifest, supports=lambda feature: True) == []
+    assert engine_gaps({"routes": {"/b": {"inputs_nested": {"top": ["x"]}}}}) == []
+    # The installed aiwaf-rust, built from this checkout, supports them all.
+    assert engine_gaps(manifest) == []

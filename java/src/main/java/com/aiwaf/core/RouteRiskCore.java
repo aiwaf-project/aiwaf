@@ -378,7 +378,7 @@ public final class RouteRiskCore {
         for (Object entry : routes.values()) {
             if (entry instanceof Map<?, ?> data) {
                 for (String key : List.of("injection_risks", "inputs", "inputs_complete", "inputs_incomplete", "inputs_by_method", "inputs_nested",
-                        "inputs_types_by_method")) ((Map<String, Object>) data).remove(key);
+                        "inputs_types_by_method", "inputs_types_by_location")) ((Map<String, Object>) data).remove(key);
             }
         }
         int linked = 0;

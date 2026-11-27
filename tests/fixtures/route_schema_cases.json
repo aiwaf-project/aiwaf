@@ -158,6 +158,52 @@
             "mode": "int"
           }
         }
+      },
+      "/reports": {
+        "view": "reports",
+        "methods": [
+          "POST"
+        ],
+        "inputs": {
+          "limit": "text",
+          "since": "int"
+        },
+        "inputs_complete": true,
+        "inputs_types_by_location": {
+          "POST": {
+            "query": {
+              "limit": "int"
+            },
+            "body": {
+              "limit": "text"
+            }
+          }
+        }
+      },
+      "/deep-orders": {
+        "view": "deep_orders",
+        "methods": [
+          "POST"
+        ],
+        "inputs": {
+          "customer": "text",
+          "lines": "text"
+        },
+        "inputs_complete": true,
+        "inputs_nested": {
+          "customer": [
+            "address",
+            "email"
+          ],
+          "customer.address": [
+            "city",
+            "zip"
+          ],
+          "lines[]": [
+            "qty",
+            "sku"
+          ]
+        }
       }
     }
   },
@@ -557,6 +603,59 @@
         "path": "/plans",
         "expect": "mismatch",
         "input": "weeks"
+      },
+      {
+        "method": "POST",
+        "query": "limit=5",
+        "body": "{\"limit\": \"all\"}",
+        "path": "/reports",
+        "expect": "pass"
+      },
+      {
+        "method": "POST",
+        "query": "limit=all",
+        "body": "{\"limit\": \"all\"}",
+        "path": "/reports",
+        "expect": "mismatch",
+        "input": "limit"
+      },
+      {
+        "method": "POST",
+        "query": "limit=5",
+        "body": "{\"limit\": 7}",
+        "path": "/reports",
+        "expect": "pass"
+      },
+      {
+        "method": "POST",
+        "query": "since=soon",
+        "body": "",
+        "path": "/reports",
+        "expect": "mismatch",
+        "input": "since"
+      },
+      {
+        "method": "POST",
+        "query": "",
+        "body": "{\"customer\": {\"email\": \"a@b.c\", \"address\": {\"city\": \"X\", \"zip\": \"1\"}}, \"lines\": [{\"sku\": \"s\", \"qty\": 1}]}",
+        "path": "/deep-orders",
+        "expect": "pass"
+      },
+      {
+        "method": "POST",
+        "query": "",
+        "body": "{\"customer\": {\"address\": {\"city\": \"X\", \"role\": \"admin\"}}}",
+        "path": "/deep-orders",
+        "expect": "unexpected",
+        "input": "customer.address.role"
+      },
+      {
+        "method": "POST",
+        "query": "",
+        "body": "{\"lines\": [{\"sku\": \"s\"}, {\"sku\": \"t\", \"price\": 0}]}",
+        "path": "/deep-orders",
+        "expect": "unexpected",
+        "input": "lines[].price"
       }
     ],
     "exempt": [

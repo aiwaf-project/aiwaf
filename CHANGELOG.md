@@ -7,6 +7,38 @@
   1.3.4 declares `aiwaf-wasm ^0.2.13`, since the lockfile can't name an unpublished version: once
   0.2.14 is published, raise it to `^0.2.14` and refresh the lockfile before tagging `js-v1.3.4`.
   With 0.2.13 the per-method types below are ignored, and the agreed type is checked instead.
+- **Query and body types apart:** a name sent in both locations with different types (a
+  query `limit` that's an integer, a JSON `limit` that's text) keeps each location's type in the
+  new `inputs_types_by_location`, and the engines (aiwaf-rust, aiwaf-wasm, Java) check each value
+  against its own location's type, then its method's, then the route's. FastAPI's query and
+  body parameters, Fastify and Hapi `querystring`/`body` schemas, and Spring's `@RequestBody`
+  fields (and `@RequestParam` next to a JSON body) give the locations. A Fastify schema naming
+  a field in both parts kept the last part's type; it now merges.
+- **Deeper nested keys:** closed JSON Schemas and Pydantic models give nested keys by path,
+  `"customer.address": ["city", "zip"]` and `"lines[]": ["qty", "sku"]` for each item of a list,
+  up to four levels, and the engines check them (six levels, 256 items). Open objects are left
+  alone. An input used whole through a built-in (`lines.length`, `tags.map(...)`) is no longer
+  read as a nested key.
+- **Fastify routes before the plugin, by capture:** `init` adds an `onRoute` hook to each
+  Fastify instance as the app creates it, before its own routes, so every route's options,
+  schemas imported from other modules included, are read as registered. A schema the source
+  passes but can't spell out, with no capture (a `--routes` list), leaves the route incomplete
+  (`external_class`) rather than silently untyped.
+- **Exact request keys:** the static reader takes a Pydantic field's alias
+  (`Field(alias="eventId")`, `validation_alias`, string `AliasChoices`), and its attribute name
+  only under `populate_by_name`, so `event_id` no longer joins `eventId` in a complete list. An
+  alias generator, or an alias it can't read, leaves the model to the live app's list.
+- **Reads before the handler:** FastAPI routes added with `include_router(router,
+  dependencies=[...])` include what those dependencies read, as `tenant`; a Fastify request
+  hook (`addHook('preHandler', ...)` and `onRequest`, `preParsing`, `preValidation`) adds its
+  reads to every route, since the app doesn't say which routes a hook's scope holds.
+- **Atomic manifest writes:** Python, npm and Java write the manifest to a temporary file beside
+  it and replace the old one only after the write succeeds, keeping its permissions; a failed
+  write (a full disk, a value JSON can't hold) leaves the old manifest intact.
+- **Engine check:** `init` warns when the installed aiwaf-rust or aiwaf-wasm can't check an
+  entry it wrote (per-method or per-location types, deeper nested keys), by the engine's new
+  `method_types`, `location_types` and `nested_paths` features (`NativeCSVPipeline.supports`,
+  and aiwaf-wasm's new `supports_feature`).
 - **Per-method input types:** where methods on one path type a name differently (GET's text
   `mode`, POST's integer `mode`), the manifest keeps the type they agree on in `inputs` (text)
   and each method's own in the new `inputs_types_by_method` (`{"POST": {"mode": "int"}}`).

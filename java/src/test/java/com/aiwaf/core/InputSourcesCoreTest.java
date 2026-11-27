@@ -372,4 +372,31 @@ class InputSourcesCoreTest {
         assertEquals(Map.of("mode", "text"), entry.get("inputs"));
         assertEquals(Map.of("POST", Map.of("mode", "int")), entry.get("inputs_types_by_method"));
     }
+
+    public record Filters(String limit, int since) {}
+
+    public static class Reports {
+        @org.springframework.web.bind.annotation.PostMapping
+        public String run(@org.springframework.web.bind.annotation.RequestParam("limit") int limit,
+                          @org.springframework.web.bind.annotation.RequestBody Filters filters) { return ""; }
+
+        @org.springframework.web.bind.annotation.PostMapping
+        public String form(@org.springframework.web.bind.annotation.RequestParam("limit") int limit) { return ""; }
+    }
+
+    @Test
+    void aQueryAndABodyKeepTheirOwnTypesForOneName() throws Exception {
+        Map<String, Object> run = InputSourcesCore.frameworkInputs(method(Reports.class, "run"));
+        assertEquals(Map.of("query", Map.of("limit", "int"), "body", Map.of("limit", "text", "since", "int")), run.get("locations"));
+        // Without a JSON body, a @RequestParam may come from a form body: no location is claimed.
+        assertNull(InputSourcesCore.frameworkInputs(method(Reports.class, "form")).get("locations"));
+        InputSourcesCore.Sources sources = InputSourcesCore.forRoutes(
+                List.of(new PathManifestCore.RouteInfo("/reports", List.of("POST"), Reports.class, method(Reports.class, "run"))),
+                InputSourcesCore.Sources.none());
+        Map<String, Object> entry = new LinkedHashMap<>(Map.of("methods", List.of("POST")));
+        Map<String, Object> routes = new TreeMap<>(Map.of("/reports", entry));
+        InputSourcesCore.finalize(routes, sources);
+        assertEquals(Map.of("limit", "text", "since", "int"), entry.get("inputs"));
+        assertEquals(Map.of("POST", Map.of("query", Map.of("limit", "int"))), entry.get("inputs_types_by_location"));
+    }
 }

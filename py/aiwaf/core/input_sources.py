@@ -234,18 +234,43 @@ def nested_fields(cls: Any) -> Dict[str, List[str]]:
     and only one level down, as inputs_nested holds. A field typed as a list, a dict or a
     model that accepts undeclared fields is left out, so its whole value keeps being checked.
     """
+    return _nested_paths(cls, "", 0)
+
+
+_MAX_NESTED_DEPTH = 4
+
+
+def _list_item(annotation: Any) -> Any:
+    """The item class of a list field, as Item in List[Item] or Optional[list[Item]], or None."""
+    origin = typing.get_origin(annotation)
+    if origin is typing.Annotated:
+        return _list_item(typing.get_args(annotation)[0])
+    if origin is typing.Union or (origin is not None and getattr(origin, "__name__", "") == "UnionType"):
+        options = [arg for arg in typing.get_args(annotation) if arg is not type(None)]
+        return _list_item(options[0]) if len(options) == 1 else None
+    if origin in (list, set, tuple, frozenset):
+        args = typing.get_args(annotation)
+        return _object_class(args[0]) if args else None
+    return None
+
+
+def _nested_paths(cls: Any, prefix: str, depth: int) -> Dict[str, List[str]]:
+    """The keys inside a Pydantic model's object fields, by path: "customer", deeper
+    "customer.address", and "lines[]" for each item of a list of models. Bounded in depth."""
     model_fields = getattr(cls, "model_fields", None)
-    if not isinstance(model_fields, dict) or not hasattr(cls, "model_config"):
+    if not isinstance(model_fields, dict) or not hasattr(cls, "model_config") or depth >= _MAX_NESTED_DEPTH:
         return {}
     found: Dict[str, List[str]] = {}
     for name, field in model_fields.items():
-        inner = _object_class(field.annotation)
-        if inner is None or inner in (str, bytes, int, float, bool) or not hasattr(inner, "__mro__"):
-            continue
-        keys = class_fields(inner)
-        if keys:
-            for accepted in _pydantic_names(name, field, getattr(cls, "model_config", None) or {}):
-                found[accepted] = sorted(keys)
+        for accepted in _pydantic_names(name, field, getattr(cls, "model_config", None) or {}):
+            path = f"{prefix}{accepted}"
+            for inner, suffix in ((_object_class(field.annotation), ""), (_list_item(field.annotation), "[]")):
+                if inner is None or inner in (str, bytes, int, float, bool) or not hasattr(inner, "__mro__"):
+                    continue
+                keys = class_fields(inner)
+                if keys:
+                    found[f"{path}{suffix}"] = sorted(keys)
+                    found.update(_nested_paths(inner, f"{path}{suffix}.", depth + 1))
     return found
 
 
@@ -412,8 +437,12 @@ def fastapi_inputs(route: Any) -> Optional[dict]:
         info = getattr(param, "field_info", None)
         return getattr(info, "annotation", None) if info is not None else getattr(param, "type_", None)
 
+    # Each location's own types, as a query limit that's an integer next to a body limit that's
+    # text: found merges them, locations keeps them apart.
+    locations: Dict[str, Dict[str, str]] = {"query": {}, "body": {}}
     for param in queries:
         _merge(found, param.alias, _kind(annotation(param)))
+        _merge(locations["query"], param.alias, _kind(annotation(param)))
     for param in bodies:
         embedded = bool(getattr(getattr(param, "field_info", None), "embed", False))
         model = annotation(param)
@@ -426,12 +455,14 @@ def fastapi_inputs(route: Any) -> Optional[dict]:
         if fields is not None:
             for name, kind in fields.items():
                 _merge(found, name, kind)
+                _merge(locations["body"], name, kind)
             for name, keys in nested_fields(model).items():
                 nested.setdefault(name, set()).update(keys)
         elif len(bodies) == 1 and not embedded and isinstance(model, type) and hasattr(model, "model_fields"):
             reasons.append(_reason("model_fields", f"{model.__name__} accepts fields it doesn't declare"))
         else:
             _merge(found, param.alias, _kind(model))
+            _merge(locations["body"], param.alias, _kind(model))
 
     def walk(node: Any, top: bool) -> None:
         reads_request = any(getattr(node, attribute, None) for attribute in (
@@ -445,6 +476,9 @@ def fastapi_inputs(route: Any) -> Optional[dict]:
     walk(dependant, True)
     standalone = not getattr(dependant, "request_param_name", None)
     result = {"inputs": found, "covers": ["dependency", "external_class", "model_fields"], "reasons": reasons, "standalone": standalone}
+    kept = {where: types for where, types in locations.items() if types}
+    if kept:
+        result["locations"] = kept
     if nested:
         result["nested"] = {name: sorted(keys) for name, keys in nested.items()}
     return result
@@ -557,11 +591,20 @@ def combine(first: Optional[dict], second: Optional[dict]) -> Optional[dict]:
     nested: Dict[str, set] = {}
     for own, other in ((first, second), (second, first)):
         for name, keys in (own.get("nested") or {}).items():
-            if name in other["inputs"] and name not in (other.get("nested") or {}):
+            top = name.split(".")[0].removesuffix("[]")
+            if top in other["inputs"] and not any(path.split(".")[0].removesuffix("[]") == top for path in other.get("nested") or {}):
                 continue
             nested.setdefault(name, set()).update(keys)
     if nested:
         combined["nested"] = {name: sorted(keys) for name, keys in nested.items()}
+    locations: Dict[str, Dict[str, str]] = {}
+    for side in (first, second):
+        for where, types in (side.get("locations") or {}).items():
+            merged = locations.setdefault(where, {})
+            for name, kind in types.items():
+                _merge(merged, name, kind)
+    if locations:
+        combined["locations"] = locations
     return combined
 
 
@@ -794,6 +837,11 @@ def _declare(inputs: Dict[str, str], declared: Mapping[str, Any]) -> bool:
     return bool(declared.get("complete", True))
 
 
+def _method_kind(own_types: Mapping[str, Mapping[str, str]], method: str, name: str, found: Mapping[str, str]) -> str:
+    """The type a method checks a name against without a location type: its own, else the route's."""
+    return (own_types.get(str(method).upper()) or {}).get(name) or found.get(name, "text")
+
+
 def finalize_without_code(routes: Dict[str, Any], **sources: Any) -> Dict[str, Any]:
     """finalize without the injection audit (--no-audit, or a scan that failed).
 
@@ -840,6 +888,7 @@ def finalize(
         # Which method reads what: the code reading's and the framework's, per method. Names
         # from anywhere else are shared by every method.
         declared_types = data.pop("declared_types", None) or {}
+        declared_locations = data.pop("declared_locations", None)
         code_methods = {str(method).upper(): set(names) for method, names in (data.pop("_input_methods", None) or {}).items()}
         declared_methods = {str(method).upper(): set(names) for method, names in (data.pop("declared_methods", None) or {}).items()}
         claims = {method: set(names) for method, names in code_methods.items()}
@@ -868,6 +917,7 @@ def finalize(
             reasons = [reason for reason in reasons if reason.get("code") not in covered]
             reasons.extend(framework.get("reasons") or ())
             framework_nested = framework.get("nested") or {}
+            framework_tops = {path.split(".")[0].removesuffix("[]") for path in framework_nested}
             for name, kind in (framework.get("inputs") or {}).items():
                 # A type the framework validates (a Pydantic int, a schema's integer) holds whatever
                 # the handler's own read says: the value reaching it is checked, or coerced, already.
@@ -875,13 +925,13 @@ def finalize(
                     found[name] = kind
                 else:
                     _merge(found, name, kind)
-                if name not in framework_nested:
+                if name not in framework_tops:
                     flat.add(name)
             # The framework parses these fields into models that drop undeclared keys, so their
             # declared keys stand even where reading the code found only the whole field.
             for name, keys in framework_nested.items():
                 nested.setdefault(name, set()).update(keys)
-                flat.discard(name)
+                flat.discard(name.split(".")[0].removesuffix("[]"))
             read = read or bool(framework.get("standalone"))
         before = set(found)
         reasons = _resolve_classes(data, found, reasons)
@@ -938,7 +988,11 @@ def finalize(
             data.pop("inputs_incomplete", None)
             counts["complete"] += 1
         # Keys inside an input, when every reading of it reads constant keys.
-        inner = {name: sorted(keys) for name, keys in nested.items() if name in found and name not in flat}
+        # A key path's first name, as customer in customer.address or lines in lines[], is the input.
+        def top_of(path: str) -> str:
+            return path.split(".")[0].removesuffix("[]")
+
+        inner = {name: sorted(keys) for name, keys in nested.items() if top_of(name) in found and top_of(name) not in flat}
         if inner and not reasons:
             data["inputs_nested"] = inner
         else:
@@ -954,6 +1008,20 @@ def finalize(
             data["inputs_types_by_method"] = own_types
         else:
             data.pop("inputs_types_by_method", None)
+        # A location's type for a name, where it isn't the route's (a query limit that's an
+        # integer next to a JSON limit that's text): checked for values sent there alone.
+        if declared_locations is None and isinstance(framework, dict) and framework.get("locations"):
+            declared_locations = {str(method).upper(): framework["locations"] for method in data.get("methods") or ()}
+        by_location: Dict[str, Dict[str, Dict[str, str]]] = {}
+        for method, locations in (declared_locations or {}).items():
+            for where, types in locations.items():
+                for name, kind in types.items():
+                    if name in found and found[name] != kind and (kind != "text" or _method_kind(own_types, method, name, found) != "text"):
+                        by_location.setdefault(str(method).upper(), {}).setdefault(where, {})[name] = kind
+        if by_location:
+            data["inputs_types_by_location"] = by_location
+        else:
+            data.pop("inputs_types_by_location", None)
         by_method = _by_method(found, data.get("methods") or (), claims, shared) if not reasons else None
         if by_method:
             data["inputs_by_method"] = by_method

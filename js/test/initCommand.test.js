@@ -172,6 +172,74 @@ describe('Fastify named handlers', () => {
   });
 });
 
+describe('more exact input rules', () => {
+  const run = async (name, ...flags) => {
+    const output = path.join(dir, `${name}.json`);
+    const { io, lines } = capture();
+    expect(await runInit(['--app', fixture(name, 'app.js'), '--output', output, '--source', fixture(name), ...flags], io)).toBe(0);
+    return { routes: readRoutes(output), lines };
+  };
+
+  test('query and body keep their own types for one name', async () => {
+    const { routes } = await run('fastify-locations');
+    expect(routes['/reports'].inputs).toEqual({ limit: 'text', since: 'int' });
+    expect(routes['/reports'].inputs_types_by_location).toEqual({ POST: { query: { limit: 'int' } } });
+  });
+
+  test('an imported schema is the same before and after the plugin', async () => {
+    const { routes } = await run('fastify-imported');
+    expect(routes['/webhooks/payments'].inputs).toEqual({ attempt: 'int', eventId: 'uuid', successful: 'bool' });
+    expect(routes['/webhooks/payments']).toEqual(expect.objectContaining({ inputs: routes['/webhooks/after'].inputs, inputs_complete: true }));
+    // A route list can't load the schema: the route says so and isn't complete.
+    const list = path.join(dir, 'routes.json');
+    fs.writeFileSync(list, JSON.stringify([{ method: 'POST', path: '/webhooks/payments' }]));
+    const output = path.join(dir, 'listed.json');
+    const { io } = capture();
+    expect(await runManifest(['--framework', 'fastify', '--routes', list, '--source', fixture('fastify-imported'), '--output', output], io)).toBe(0);
+    const listed = readRoutes(output)['/webhooks/payments'];
+    expect(listed.inputs_complete).toBe(false);
+    expect(listed.inputs_incomplete.map(item => item.code)).toContain('external_class');
+  });
+
+  test('an app-level hook\'s reads are every route\'s', async () => {
+    const { routes } = await run('fastify-hooks');
+    expect(routes['/invoices']).toMatchObject({ inputs: { page: 'int', tenant: 'text' }, inputs_complete: true });
+    expect(routes['/scoped'].inputs.tenant).toBe('text');
+    expect(routes['/scoped'].inputs_complete).toBe(false);
+  });
+
+  test('closed schemas give nested keys by path, open ones none', async () => {
+    const { routes } = await run('fastify-deep');
+    expect(routes['/orders'].inputs_nested).toEqual({
+      customer: ['address', 'email'], 'customer.address': ['city', 'zip'], 'lines[]': ['qty', 'sku']
+    });
+  });
+
+  test('init says which checks the installed engine can\'t make', () => {
+    const { engineGaps } = require('../lib/initCommand');
+    const manifest = { routes: {
+      '/a': { inputs_types_by_method: { POST: { x: 'int' } }, inputs_types_by_location: { POST: { query: { x: 'int' } } }, inputs_nested: { 'a.b': ['c'] } },
+      '/b': { inputs_nested: { top: ['x'] } }, '/c': null
+    } };
+    expect(engineGaps(manifest, null)).toEqual([
+      'query and body types (inputs_types_by_location)', 'per-method types (inputs_types_by_method)', 'nested keys below the first level (inputs_nested)'
+    ]);
+    expect(engineGaps(manifest, () => true)).toEqual([]);
+    expect(engineGaps({ routes: { '/b': { inputs_nested: { top: ['x'] } } } }, null)).toEqual([]);
+  });
+
+  test('a failed write keeps the old manifest', () => {
+    const { writeManifest } = require('../lib/pathManifest');
+    const output = path.join(dir, 'kept.json');
+    writeManifest({ routes: { '/a': {} } }, output);
+    const loop = {};
+    loop.self = loop;
+    expect(() => writeManifest({ routes: { '/b': loop } }, output)).toThrow();
+    expect(JSON.parse(fs.readFileSync(output, 'utf8'))).toEqual({ routes: { '/a': {} } });
+    expect(fs.readdirSync(dir).filter(name => name.endsWith('.tmp'))).toEqual([]);
+  });
+});
+
 describe('the audit', () => {
   test('a route whose handler the audit never read is not complete', async () => {
     const output = path.join(dir, 'paths.json');

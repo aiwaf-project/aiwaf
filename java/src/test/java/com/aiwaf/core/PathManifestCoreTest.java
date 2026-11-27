@@ -111,4 +111,18 @@ class PathManifestCoreTest {
         assertEquals(99, selected.rateLimitMaxOverride);
         assertFalse(selected.disables("header_validation"));
     }
+
+    @org.junit.jupiter.api.Test
+    void aFailedWriteKeepsTheOldManifest(@org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+        java.nio.file.Path output = directory.resolve("paths.json");
+        PathManifestCore.writeManifest(java.util.Map.of("routes", java.util.Map.of("/a", java.util.Map.of())), output);
+        String before = java.nio.file.Files.readString(output);
+        java.util.Map<String, Object> bad = new java.util.LinkedHashMap<>();
+        bad.put("routes", new Object());
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class, () -> PathManifestCore.writeManifest(bad, output));
+        org.junit.jupiter.api.Assertions.assertEquals(before, java.nio.file.Files.readString(output));
+        try (var files = java.nio.file.Files.list(directory)) {
+            org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("paths.json"), files.map(path -> path.getFileName().toString()).toList());
+        }
+    }
 }

@@ -15,8 +15,10 @@ class HandlerSource {
   constructor(text, name = '', schema = null) {
     this.text = String(text || '');
     this.name = name;
-    // A Fastify route's schema option, read statically, or null.
-    this.schema = schema;
+    // A Fastify route's schema option, read statically, or null; schemaUnreadable when the
+    // route passes one the source doesn't spell out.
+    this.schemaUnreadable = schema === UNREADABLE;
+    this.schema = schema === UNREADABLE ? null : schema;
   }
 }
 
@@ -49,13 +51,17 @@ function staticValue(node, constants, depth = 0) {
   }
 }
 
-// The schema option on a route's options object, when every part of it is a literal.
+// The schema option on a route's options object, when every part of it is a literal; or
+// UNREADABLE when the route passes a schema the source doesn't spell out, as an imported one.
+const UNREADABLE = Symbol('unreadable schema');
+
 function schemaOf(options, constants) {
   if (!options || options.type !== 'ObjectExpression') return null;
   const property = options.properties.find(item => item.type === 'ObjectProperty' && !item.computed
     && (item.key.name || item.key.value) === 'schema');
-  const value = property ? staticValue(property.value, constants) : undefined;
-  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  if (!property) return null;
+  const value = staticValue(property.value, constants);
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : UNREADABLE;
 }
 
 /** A handler's source: a function's own, or a HandlerSource's text. Null for anything else. */

@@ -307,3 +307,59 @@ def test_init_keeps_a_post_type_from_a_get_on_the_same_path(monkeypatch, tmp_pat
     assert route["inputs_by_method"] == {"GET": ["ref"], "POST": ["note", "ref"]}
     # POST's own integer ref, for engines that check a method's own type.
     assert route["inputs_types_by_method"] == {"POST": {"ref": "int"}}
+
+
+def _init_fastapi(monkeypatch, tmp_path, source: str) -> dict:
+    pytest.importorskip("fastapi")
+    _drop_app_module()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "app.py").write_text(source, encoding="utf-8")
+    _handle_init(["--framework", "fastapi", "--app", "app:app", "--source", ".", "--no-native"])
+    return json.loads((tmp_path / ".aiwaf" / "paths.json").read_text(encoding="utf-8"))["routes"]
+
+
+def test_init_keeps_a_query_and_body_type_for_one_name_apart(monkeypatch, tmp_path):
+    routes = _init_fastapi(monkeypatch, tmp_path,
+                           "from fastapi import FastAPI\nfrom pydantic import BaseModel\n"
+                           "class Filters(BaseModel):\n    limit: str\n"
+                           "app = FastAPI()\n@app.post('/reports')\ndef run(filters: Filters, limit: int = 10):\n    return {}\n")
+    assert routes["/reports"]["inputs"] == {"limit": "text"}
+    assert routes["/reports"]["inputs_types_by_location"] == {"POST": {"query": {"limit": "int"}}}
+
+
+def test_init_lists_request_keys_not_attribute_names(monkeypatch, tmp_path):
+    routes = _init_fastapi(monkeypatch, tmp_path,
+                           "from fastapi import FastAPI\nfrom pydantic import BaseModel, Field\n"
+                           "class Delivery(BaseModel):\n    event_id: str = Field(alias='eventId')\n    successful: bool\n"
+                           "app = FastAPI()\n@app.post('/hooks')\ndef receive(event: Delivery):\n    return {'id': event.event_id}\n")
+    assert routes["/hooks"]["inputs"] == {"eventId": "text", "successful": "bool"}
+    assert routes["/hooks"]["inputs_complete"] is True
+
+
+def test_init_includes_what_include_router_dependencies_read(monkeypatch, tmp_path):
+    routes = _init_fastapi(monkeypatch, tmp_path,
+                           "from fastapi import APIRouter, Depends, FastAPI, Query\n"
+                           "def current_tenant(tenant: str = Query(...)):\n    return tenant\n"
+                           "router = APIRouter()\n@router.get('/invoices')\ndef invoices(page: int = 1):\n    return {}\n"
+                           "app = FastAPI()\napp.include_router(router, dependencies=[Depends(current_tenant)])\n")
+    assert routes["/invoices"]["inputs"] == {"page": "int", "tenant": "text"}
+
+
+def test_init_saves_nested_keys_by_path(monkeypatch, tmp_path):
+    routes = _init_fastapi(monkeypatch, tmp_path,
+                           "from typing import List, Optional\nfrom fastapi import FastAPI\nfrom pydantic import BaseModel\n"
+                           "class Address(BaseModel):\n    city: str\n    zip: str\n"
+                           "class Customer(BaseModel):\n    email: str\n    address: Address\n"
+                           "class Line(BaseModel):\n    sku: str\n    qty: int\n"
+                           "class Order(BaseModel):\n    customer: Customer\n    lines: List[Line]\n    gift: Optional[Line] = None\n"
+                           "app = FastAPI()\n@app.post('/orders')\ndef create(order: Order):\n    return {}\n")
+    assert routes["/orders"]["inputs_nested"] == {
+        "customer": ["address", "email"], "customer.address": ["city", "zip"], "gift": ["qty", "sku"], "lines[]": ["qty", "sku"]}
+
+
+def test_init_says_when_the_engine_cant_check_a_manifest(monkeypatch, tmp_path, capsys):
+    from aiwaf.core import route_risks
+
+    monkeypatch.setattr(route_risks, "engine_gaps", lambda manifest, supports=None: ["per-method types (inputs_types_by_method)"])
+    _init_fastapi(monkeypatch, tmp_path, "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/a')\ndef a():\n    return {}\n")
+    assert "can't check per-method types" in capsys.readouterr().err

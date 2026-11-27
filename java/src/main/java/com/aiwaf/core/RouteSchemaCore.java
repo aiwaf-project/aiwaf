@@ -73,7 +73,20 @@ public final class RouteSchemaCore {
      */
     private record Route(String path, RouteRiskCore.CompiledRoute compiled, Map<String, String> inputs, boolean complete,
                          Set<String> reached, boolean unnamedRisk, List<String> pathTypes, Map<String, Set<String>> byMethod,
-                         Map<String, Set<String>> nested, Map<String, Map<String, String>> methodTypes) {
+                         Map<String, Set<String>> nested, Map<String, Map<String, String>> methodTypes,
+                         Map<String, Map<String, Map<String, String>>> locationTypes) {
+        /**
+         * The type a value sent in this location ("query" or "body") checks against: the method's
+         * type for that location (inputs_types_by_location), else the method's own, else the route's.
+         */
+        String kindAt(String method, String location, String name) {
+            String upper = method == null ? "" : method.toUpperCase(Locale.ROOT);
+            Map<String, Map<String, String>> own = locationTypes.get(upper);
+            if (own == null && upper.equals("HEAD")) own = locationTypes.get("GET");
+            String kind = own == null || own.get(location) == null ? null : own.get(location).get(name);
+            return kind != null ? kind : kind(method, name);
+        }
+
         /**
          * The type a request with this method checks a name against: the method's own
          * (inputs_types_by_method, where methods on the path differ), else the route's.
@@ -92,6 +105,42 @@ public final class RouteSchemaCore {
             if (own == null && upper.equals("HEAD")) own = byMethod.get("GET");
             return own != null ? own.contains(name) : inputs.containsKey(name);
         }
+    }
+
+    /** How deep strict inputs follow keys inside a JSON body. */
+    private static final int MAX_NESTED_DEPTH = 6;
+
+    /**
+     * The first key below path that init knows the keys around and that isn't one of them: an
+     * object's keys at "customer.address", each array item's at "lines[]". The first level is
+     * checked by the caller; this goes deeper, as RouteRisks does.
+     */
+    private static String deepUnexpected(Map<String, Set<String>> nested, List<String> strict, String path, JsonNode value, int depth) {
+        if (depth >= MAX_NESTED_DEPTH || value == null) return null;
+        if (value.isObject()) {
+            for (Map.Entry<String, JsonNode> child : value.properties()) {
+                String childPath = path + "." + child.getKey();
+                Set<String> keys = depth > 0 ? nested.get(path) : null;
+                if (keys != null && !keys.contains(child.getKey()) && !allowed(strict, childPath)) return childPath;
+                String found = deepUnexpected(nested, strict, childPath, child.getValue(), depth + 1);
+                if (found != null) return found;
+            }
+        } else if (value.isArray()) {
+            String itemPath = path + "[]";
+            Set<String> keys = nested.get(itemPath);
+            int seen = 0;
+            for (JsonNode item : value) {
+                if (++seen > 256) break;
+                if (!item.isObject()) continue;
+                for (Map.Entry<String, JsonNode> child : item.properties()) {
+                    String childPath = itemPath + "." + child.getKey();
+                    if (keys != null && !keys.contains(child.getKey()) && !allowed(strict, childPath)) return childPath;
+                    String found = deepUnexpected(nested, strict, childPath, child.getValue(), depth + 1);
+                    if (found != null) return found;
+                }
+            }
+        }
+        return null;
     }
 
     /** The type a route segment's own syntax gives, as in <int:id> or {id:uuid}, or null. */
@@ -258,9 +307,26 @@ public final class RouteSchemaCore {
                             methodTypes.put(String.valueOf(method.getKey()).toUpperCase(Locale.ROOT), own);
                         }
                     }
+                    Map<String, Map<String, Map<String, String>>> locationTypes = new HashMap<>();
+                    if (entry.get("inputs_types_by_location") instanceof Map<?, ?> methods) {
+                        for (Map.Entry<?, ?> method : methods.entrySet()) {
+                            if (!(method.getValue() instanceof Map<?, ?> locations)) continue;
+                            Map<String, Map<String, String>> byLocation = new HashMap<>();
+                            for (Map.Entry<?, ?> location : locations.entrySet()) {
+                                String where = String.valueOf(location.getKey());
+                                if (!Set.of("query", "body").contains(where) || !(location.getValue() instanceof Map<?, ?> types)) continue;
+                                Map<String, String> own = new HashMap<>();
+                                for (Map.Entry<?, ?> type : types.entrySet()) {
+                                    if (type.getValue() instanceof String kind && INPUT_TYPES.contains(kind)) own.put(String.valueOf(type.getKey()), kind);
+                                }
+                                byLocation.put(where, own);
+                            }
+                            locationTypes.put(String.valueOf(method.getKey()).toUpperCase(Locale.ROOT), byLocation);
+                        }
+                    }
                     routes.add(new Route(path, RouteRiskCore.compileRoute(path), inputs,
                             inputs != null && Boolean.TRUE.equals(entry.get("inputs_complete")), reached, unnamed, pathTypes, byMethod, nested,
-                            methodTypes));
+                            methodTypes, locationTypes));
                 }
             }
             // Exact routes win over routes with parameters, as in RouteRiskCore.
@@ -324,9 +390,12 @@ public final class RouteSchemaCore {
                 }
             }
             List<Field> all = new ArrayList<>(queryFields);
+            int inQuery = all.size();
             if (bodyFields != null) all.addAll(bodyFields);
-            for (Field field : all) {
-                String kind = route.kind(method, field.name());
+            for (int index = 0; index < all.size(); index++) {
+                Field field = all.get(index);
+                // Each value against its own location's type: the query's, or the body's.
+                String kind = route.kindAt(method, index < inQuery ? "query" : "body", field.name());
                 if (kind != null && !kind.equals("text") && !fits(kind, field.value())) {
                     return new Review("mismatch", route.path(), field.name(), kind, null);
                 }
@@ -344,12 +413,16 @@ public final class RouteSchemaCore {
                 if (json != null) {
                     for (Map.Entry<String, JsonNode> entry : json.properties()) {
                         Set<String> keys = route.nested().get(entry.getKey());
-                        if (keys == null || !(entry.getValue() instanceof ObjectNode inner)) continue;
-                        for (Map.Entry<String, JsonNode> sub : inner.properties()) {
-                            String key = sub.getKey();
-                            String full = entry.getKey() + "." + key;
-                            if (!keys.contains(key) && !allowed(strict, full)) return new Review("unexpected", route.path(), logged(full), null, null);
+                        if (keys != null && entry.getValue() instanceof ObjectNode inner) {
+                            for (Map.Entry<String, JsonNode> sub : inner.properties()) {
+                                String key = sub.getKey();
+                                String full = entry.getKey() + "." + key;
+                                if (!keys.contains(key) && !allowed(strict, full)) return new Review("unexpected", route.path(), logged(full), null, null);
+                            }
                         }
+                        // Deeper keys init knows, as customer.address.city, or lines[].sku in each item.
+                        String deep = deepUnexpected(route.nested(), strict, entry.getKey(), entry.getValue(), 0);
+                        if (deep != null) return new Review("unexpected", route.path(), logged(deep), null, null);
                     }
                 }
                 List<Field> pairs = new ArrayList<>(queryFields);

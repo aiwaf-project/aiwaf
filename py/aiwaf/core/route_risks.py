@@ -252,7 +252,7 @@ def apply_report(report: Mapping[str, Any], manifest: dict, sources: Optional[Ma
     for data in routes.values():
         if isinstance(data, dict):
             for key in ("injection_risks", "inputs", "inputs_complete", "inputs_incomplete", "inputs_by_method", "inputs_nested",
-                        "inputs_types_by_method"):
+                        "inputs_types_by_method", "inputs_types_by_location"):
                 data.pop(key, None)
     linked, unlinked = 0, 0
     collected: dict[str, dict[tuple, dict[str, str]]] = {}
@@ -381,6 +381,43 @@ def audit_into_manifest(manifest: dict, source: Optional[str]) -> Optional[dict[
                 data.pop("declared_inputs", None)
                 data.pop("input_declaration", None)
                 data.pop("declared_types", None)
+                data.pop("declared_locations", None)
+
+
+# What each newer manifest entry needs from the engine, by the engine's feature name.
+_ENGINE_FEATURES = {
+    "method_types": "per-method types (inputs_types_by_method)",
+    "location_types": "query and body types (inputs_types_by_location)",
+    "nested_paths": "nested keys below the first level (inputs_nested)",
+}
+
+
+def engine_gaps(manifest: Mapping[str, Any], supports: Optional[Any] = None) -> list[str]:
+    """The checks a manifest has that the installed aiwaf-rust can't make, described.
+
+    The manifest stays as written: an engine that can't read an entry checks the type every
+    method agrees on, as before. supports defaults to aiwaf_rust's feature probe.
+    """
+    used = set()
+    for entry in (manifest.get("routes") or {}).values():
+        if not isinstance(entry, Mapping):
+            continue
+        if entry.get("inputs_types_by_method"):
+            used.add("method_types")
+        if entry.get("inputs_types_by_location"):
+            used.add("location_types")
+        if any("." in key or key.endswith("[]") for key in (entry.get("inputs_nested") or {})):
+            used.add("nested_paths")
+    if not used:
+        return []
+    if supports is None:
+        try:
+            import aiwaf_rust
+
+            supports = getattr(getattr(aiwaf_rust, "NativeCSVPipeline", None), "supports", None)
+        except ImportError:
+            supports = None
+    return [_ENGINE_FEATURES[feature] for feature in sorted(used) if not (supports and supports(feature))]
 
 
 def describe_audit(manifest: Mapping[str, Any]) -> str:

@@ -179,3 +179,18 @@ def test_write_found_manifest_refuses_one_with_no_routes(tmp_path):
     assert json.loads(output.read_text(encoding="utf-8")) == {"routes": {"/kept": {}}}
     write_found_manifest({"routes": {"/a": {}}}, output, "app:app")
     assert json.loads(output.read_text(encoding="utf-8")) == {"routes": {"/a": {}}}
+
+
+def test_write_manifest_is_atomic(tmp_path):
+    import json
+
+    import pytest
+
+    from aiwaf.core.path_manifest import write_manifest
+
+    output = tmp_path / "paths.json"
+    write_manifest({"routes": {"/a": {}}}, output)
+    with pytest.raises(TypeError):
+        write_manifest({"routes": {"/b": object()}}, output)
+    assert json.loads(output.read_text(encoding="utf-8")) == {"routes": {"/a": {}}}
+    assert [path.name for path in tmp_path.iterdir()] == ["paths.json"]

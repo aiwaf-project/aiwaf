@@ -65,13 +65,30 @@ function jsonSchemaFields(schema, label, reasons, nested = null) {
   }
   for (const [name, value] of Object.entries(schema.properties || {})) {
     found[name] = value && value.$ref === undefined ? schemaKind(value) : 'text';
-    // An object property listing its own properties, which allows no others: the keys inside it.
-    if (nested && value && typeof value === 'object' && (value.type === 'object' || (!value.type && value.properties))
-      && value.properties && Object.keys(value.properties).length && closed(value)) {
-      nested[name] = Object.keys(value.properties).sort();
-    }
+    if (nested) nestedKeys(value, name, nested, 0);
   }
   return found;
+}
+
+const MAX_NESTED_DEPTH = 4;
+
+const closedObject = value => Boolean(value && typeof value === 'object' && (value.type === 'object' || (!value.type && value.properties))
+  && value.properties && Object.keys(value.properties).length && closed(value));
+
+// The keys inside a property, by path: an object that lists its properties and allows no others
+// gives "customer": [...], and deeper "customer.address": [...]; an array of such objects gives
+// "lines[]": [...]. Open objects, and anything deeper than MAX_NESTED_DEPTH, are left alone.
+function nestedKeys(value, path, nested, depth) {
+  if (!value || typeof value !== 'object' || depth >= MAX_NESTED_DEPTH) return;
+  if (closedObject(value)) {
+    nested[path] = Object.keys(value.properties).sort();
+    for (const [name, child] of Object.entries(value.properties)) nestedKeys(child, `${path}.${name}`, nested, depth + 1);
+  } else if (value.type === 'array' && value.items && !Array.isArray(value.items)) {
+    if (closedObject(value.items)) {
+      nested[`${path}[]`] = Object.keys(value.items.properties).sort();
+      for (const [name, child] of Object.entries(value.items.properties)) nestedKeys(child, `${path}[].${name}`, nested, depth + 1);
+    }
+  }
 }
 
 const isJoi = value => Boolean(value && typeof value === 'object' && value.$_terms && typeof value.type === 'string');
@@ -243,6 +260,9 @@ function fromSchemas(parts) {
   const found = {};
   const reasons = [];
   const nested = {};
+  // Each location's own types (a query limit that's an integer next to a body limit that's
+  // text): found merges them, locations keeps them apart.
+  const locations = {};
   let any = false;
   for (const [label, schema] of parts) {
     if (schema === false) {
@@ -252,12 +272,16 @@ function fromSchemas(parts) {
     const fields = fieldsOf(schema, label, reasons, nested);
     if (!fields) continue;
     any = true;
-    for (const [name, kind] of Object.entries(fields)) found[name] = kind;
+    for (const [name, kind] of Object.entries(fields)) {
+      found[name] = found[name] === undefined || found[name] === kind ? kind : 'text';
+      if (label === 'query' || label === 'body') (locations[label] = locations[label] || {})[name] = kind;
+    }
   }
   if (!any) return null;
   // The schema only checks what's sent; the handler may still read the raw request itself.
   const result = { inputs: found, covers: COVERS, reasons, standalone: false };
   if (Object.keys(nested).length) result.nested = nested;
+  if (Object.keys(locations).length) result.locations = locations;
   return result;
 }
 
@@ -591,11 +615,20 @@ function combine(first, second) {
   const nested = {};
   for (const [own, other] of [[first, second], [second, first]]) {
     for (const [name, keys] of Object.entries(own.nested || {})) {
-      if (name in other.inputs && !(other.nested && name in other.nested)) continue;
+      const top = name.split('.')[0].replace(/\[\]$/, '');
+      if (top in other.inputs && !(other.nested && (top in other.nested || name in other.nested))) continue;
       nested[name] = [...new Set([...(nested[name] || []), ...keys])].sort();
     }
   }
   if (Object.keys(nested).length) combined.nested = nested;
+  const locations = {};
+  for (const side of [first, second]) {
+    for (const [where, types] of Object.entries(side.locations || {})) {
+      const into = (locations[where] = locations[where] || {});
+      for (const [name, kind] of Object.entries(types)) into[name] = into[name] === undefined || into[name] === kind ? kind : 'text';
+    }
+  }
+  if (Object.keys(locations).length) combined.locations = locations;
   return combined;
 }
 

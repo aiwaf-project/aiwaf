@@ -180,9 +180,31 @@ def build_manifest(*, framework: str, routes: Mapping[str, Any], app_context: Ma
 
 
 def write_manifest(manifest: Mapping[str, Any], output_path: str | Path = DEFAULT_MANIFEST_PATH) -> Path:
+    """Write the manifest atomically: to a temporary file beside it, then replacing the old one,
+    so a write that fails (a full disk, a value that can't be serialized) leaves it intact."""
+    import os
+    import tempfile
+
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    handle, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as file:
+            file.write(text)
+            file.flush()
+            os.fsync(file.fileno())
+        if path.exists():
+            os.chmod(temporary, path.stat().st_mode & 0o777)
+        else:
+            os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
     return path
 
 

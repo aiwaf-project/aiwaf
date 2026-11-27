@@ -86,6 +86,14 @@ impl NativeRequestPipeline {
     pub fn diagnostics(&self) -> String { self.inner.diagnostics() }
 }
 
+/// Whether this build supports an optional feature, without a pipeline to ask: init uses it to
+/// say when a manifest it wrote has checks the installed engine can't make. Older builds don't
+/// export it, which means no.
+#[wasm_bindgen]
+pub fn supports_feature(feature: &str) -> bool {
+    request_pipeline::FEATURES.contains(&feature)
+}
+
 #[wasm_bindgen]
 pub struct KeywordMatcher {
     inner: CoreKeywordMatcher,

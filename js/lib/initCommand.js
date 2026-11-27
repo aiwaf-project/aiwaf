@@ -81,6 +81,37 @@ function writeFound(manifest, output, where) {
   require('./pathManifest').writeManifest(manifest, output);
 }
 
+// What each newer manifest entry needs from the engine, by the engine's feature name.
+const ENGINE_FEATURES = {
+  method_types: 'per-method types (inputs_types_by_method)',
+  location_types: 'query and body types (inputs_types_by_location)',
+  nested_paths: 'nested keys below the first level (inputs_nested)'
+};
+
+/**
+ * The checks a manifest has that the installed aiwaf-wasm can't make, described. The manifest
+ * stays as written: an engine that can't read an entry checks the type every method agrees on.
+ */
+function engineGaps(manifest, supports) {
+  const used = new Set();
+  for (const entry of Object.values((manifest && manifest.routes) || {})) {
+    if (!entry || typeof entry !== 'object') continue;
+    if (entry.inputs_types_by_method && Object.keys(entry.inputs_types_by_method).length) used.add('method_types');
+    if (entry.inputs_types_by_location && Object.keys(entry.inputs_types_by_location).length) used.add('location_types');
+    if (Object.keys(entry.inputs_nested || {}).some(key => key.includes('.') || key.endsWith('[]'))) used.add('nested_paths');
+  }
+  return [...used].sort().filter(feature => !(supports && supports(feature))).map(feature => ENGINE_FEATURES[feature]);
+}
+
+async function engineProbe() {
+  try {
+    const wasm = await require('./wasmAdapter').loadWasm();
+    return wasm && typeof wasm.supports_feature === 'function' ? feature => wasm.supports_feature(feature) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 function summary(manifest, output, extra = []) {
   const routes = Object.keys(manifest.routes || {});
   const api = routes.filter(name => {
@@ -142,6 +173,11 @@ async function runInit(args, io = { out: console.log, err: console.error }) {
     }
     writeFound(manifest, options.output, where);
     io.out(summary(manifest, options.output, extra));
+    const gaps = engineGaps(manifest, await engineProbe());
+    if (gaps.length) {
+      io.err(`The installed aiwaf-wasm can't check ${gaps.join(', ')}; it checks the type every method agrees on instead. `
+        + 'Run: npm install aiwaf-wasm@latest');
+    }
     return 0;
   } catch (error) {
     io.err(error.message || String(error));
@@ -192,4 +228,4 @@ async function runManifest(args, io = { out: console.log, err: console.error }) 
   }
 }
 
-module.exports = { runInit, runManifest, parseArgs, describeAudit, EmptyManifestError, INIT_HELP };
+module.exports = { runInit, runManifest, parseArgs, describeAudit, engineGaps, EmptyManifestError, INIT_HELP };

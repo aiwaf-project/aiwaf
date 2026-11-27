@@ -364,6 +364,9 @@ aiwaf init --framework flask --app app:app --source src    # audits another fold
 aiwaf init --framework flask --app app:app --no-audit      # saves no route checks
 ```
 
+The manifest is written atomically, to a temporary file beside it that replaces the old one,
+so a failed write never leaves a truncated manifest.
+
 When the audit source doesn't exist, or the scan fails, `init` stops with exit status 1 and
 writes nothing, so an existing manifest stays. A source with no files to read counts as
 `--no-audit`, with a warning.
@@ -438,6 +441,12 @@ Java 1.4.0 check for that method alone:
 
 An older engine reads only `inputs`, so it keeps checking the agreed type. Each method also has
 its own list of names.
+
+A name sent in both the query and the body with different types (a query `limit` that's an
+integer, a JSON `limit` that's text) keeps each location's type in `inputs_types_by_location`,
+as `{"POST": {"query": {"limit": "int"}}}`; each value is checked against its own location's
+type, then its method's, then the route's. `init` warns when the installed aiwaf-rust or
+aiwaf-wasm can't check an entry it wrote.
 
 `inputs_complete` is true only when every read was understood. When it isn't, the route's
 `inputs_incomplete` says why, with the file and line, and `init`'s summary counts the reasons:
@@ -560,7 +569,10 @@ Keys inside an object-valued input are checked too when `init` knows them all
 Schema object property that lists its properties and allows no others (Fastify, Hapi,
 OpenAPI-style), from a FastAPI body model whose field is itself a Pydantic model (`customer: Customer` gives `customer`'s
 declared fields, one level down), or from a Java body class's nested classes. A JSON
-`{"user": {"role": "admin"}}`, or a form's `user[role]`, is then `user.role`, unexpected. An
+`{"user": {"role": "admin"}}`, or a form's `user[role]`, is then `user.role`, unexpected.
+Deeper levels are saved by path where a closed schema or Pydantic model gives them, as
+`"customer.address": ["city", "zip"]` and `"lines[]": ["qty", "sku"]` for each item of a list,
+up to four levels; objects that allow other keys are left alone. An
 input a handler passes on whole, a model that allows undeclared fields, or one that another
 framework schema or declaration names, has no such list and isn't checked inside.
 

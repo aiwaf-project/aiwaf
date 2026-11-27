@@ -167,7 +167,7 @@ def _walk_routes(routes, prefix: str = "", mounts: Optional[list] = None, depth:
                 original = getattr(candidate, "original_route", None)
                 path = getattr(candidate, "path", "") or getattr(getattr(candidate, "starlette_route", None), "path", "")
                 if original is not None and path:
-                    yield _join(prefix, path), original
+                    yield _join(prefix, path), original, candidate
             continue
         path = getattr(route, "path", None)
         if getattr(route, "endpoint", None) is None and hasattr(route, "routes"):
@@ -182,13 +182,28 @@ def _walk_routes(routes, prefix: str = "", mounts: Optional[list] = None, depth:
             yield from _walk_routes(children, inner, mounts, depth + 1)
             continue
         if path:
-            yield _join(prefix, path), route
+            yield _join(prefix, path), route, None
+
+
+class _WithIncludeDependencies:
+    """An included route as FastAPI serves it: its own parameters and the dependencies the
+    include_router() call adds (include_router(router, dependencies=[...])), which the original
+    route doesn't carry. Everything else is the original route's."""
+
+    def __init__(self, original: Any, context: Any) -> None:
+        self._original = original
+        self._context = context
+
+    def __getattr__(self, name: str) -> Any:
+        if name in {"dependant", "dependencies"} and getattr(self._context, name, None) is not None:
+            return getattr(self._context, name)
+        return getattr(self._original, name)
 
 
 def extract_fastapi_routes(app) -> dict[str, dict[str, Any]]:
     routes: dict[str, dict[str, Any]] = {}
     mounted: list = []
-    for full_path, route in _walk_routes(getattr(app, "routes", []), mounts=mounted):
+    for full_path, route, context in _walk_routes(getattr(app, "routes", []), mounts=mounted):
         path_template = full_path
         raw_endpoint = getattr(route, "endpoint", None)
         endpoint = _unwrap_endpoint(raw_endpoint)
@@ -227,7 +242,7 @@ def extract_fastapi_routes(app) -> dict[str, dict[str, Any]]:
         if tags:
             entry["tags"] = tags
         entry['request_constraints'] = fastapi_declarations(route, methods)
-        framework_inputs = fastapi_inputs(route)
+        framework_inputs = fastapi_inputs(_WithIncludeDependencies(route, context) if context is not None else route)
         if framework_inputs is not None:
             entry["declared_inputs"] = framework_inputs
         declaration = declared_on(raw_endpoint)

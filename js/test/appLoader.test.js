@@ -96,3 +96,39 @@ describe('loadApp', () => {
     }
   });
 });
+
+describe('captureFastifyRoutes', () => {
+  test('wraps the app\'s Fastify so each instance records its routes from the start, and undoes it', () => {
+    const { captureFastifyRoutes, ROUTES } = require('../lib/appLoader');
+    const resolved = require.resolve('fastify', { paths: [fixture('fastify')] });
+    const hooks = [];
+    const original = function fakeFastify() { return { addHook: (name, fn) => hooks.push([name, fn]) }; };
+    original.extra = 'kept';
+    const cache = { [resolved]: { exports: original } };
+    const restore = captureFastifyRoutes(fixture('fastify', 'app.js'), cache, () => original);
+    const wrapped = cache[resolved].exports;
+    expect(wrapped).not.toBe(original);
+    expect([wrapped.default, wrapped.fastify, wrapped.extra]).toEqual([wrapped, wrapped, 'kept']);
+    const instance = wrapped();
+    expect(hooks.map(([name]) => name)).toEqual(['onRoute']);
+    hooks[0][1]({ url: '/x', method: 'GET' });
+    expect(instance[ROUTES]).toEqual([{ url: '/x', method: 'GET' }]);
+    // An instance without hooks still loads.
+    const bare = function bareFastify() { return {}; };
+    captureFastifyRoutes(fixture('fastify', 'app.js'), { [resolved]: { exports: bare } }, () => bare)();
+    restore();
+    expect(cache[resolved].exports).toBe(original);
+  });
+
+  test('leaves things alone when Fastify isn\'t there or isn\'t a factory', () => {
+    const { captureFastifyRoutes } = require('../lib/appLoader');
+    const outside = path.join(os.tmpdir(), 'no-such-app', 'app.js');
+    expect(() => captureFastifyRoutes(outside)()).not.toThrow();
+    const resolved = require.resolve('fastify', { paths: [fixture('fastify')] });
+    expect(() => captureFastifyRoutes(fixture('fastify', 'app.js'), {}, () => { throw new Error('broken'); })()).not.toThrow();
+    const cache = { [resolved]: { exports: {} } };
+    captureFastifyRoutes(fixture('fastify', 'app.js'), cache, () => ({}))();
+    expect(cache[resolved].exports).toEqual({});
+  });
+});
+
