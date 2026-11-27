@@ -591,21 +591,78 @@ function fileInputs(ast, filename, source, label, scope = null) {
     if (pattern.type === 'ObjectPattern') return pattern.properties.some(item => binds(item.type === 'RestElement' ? item : item.value, name));
     return false;
   };
-  const localFunction = name => {
-    for (let index = enclosing.length - 1; index >= 0; index -= 1) {
-      const fn = enclosing[index];
-      const body = fn.body;
-      for (const statement of (body && body.type === 'BlockStatement' ? body.body : [])) {
-        if (statement.type === 'FunctionDeclaration' && statement.id && statement.id.name === name) return statement;
-        if (statement.type === 'ClassDeclaration' && statement.id && statement.id.name === name) return SHADOWED;
-        if (statement.type !== 'VariableDeclaration') continue;
-        for (const declaration of statement.declarations) {
-          if (!binds(declaration.id, name)) continue;
-          return declaration.id.type === 'Identifier' && isFunction(declaration.init) ? declaration.init : SHADOWED;
-        }
+  // Scopes that can bind a name: the program, functions, blocks, loops, catch clauses, switches.
+  const SCOPES = new Set(['Program', 'BlockStatement', 'StaticBlock', 'ForStatement', 'ForInStatement', 'ForOfStatement',
+    'CatchClause', 'SwitchStatement']);
+  // How a statement binds name: a function it declares, SHADOWED for any other binding, or null.
+  const declared = (statement, name, varsToo) => {
+    if (!statement) return null;
+    if (statement.type === 'FunctionDeclaration' && statement.id && statement.id.name === name) return statement;
+    if (statement.type === 'ClassDeclaration' && statement.id && statement.id.name === name) return SHADOWED;
+    if (statement.type === 'VariableDeclaration' && (varsToo || statement.kind !== 'var')) {
+      for (const declaration of statement.declarations) {
+        if (!binds(declaration.id, name)) continue;
+        return declaration.id.type === 'Identifier' && isFunction(declaration.init) && statement.kind === 'const' ? declaration.init : SHADOWED;
       }
-      if ((fn.params || []).some(parameter => binds(parameter, name))) return SHADOWED;
-      if (fn.id && fn.id.name === name && fn.type !== 'FunctionDeclaration') return fn;
+    }
+    return null;
+  };
+  // What a scope node itself binds name to, by its own statements and parameters.
+  const ownBinding = (node, name) => {
+    const statements = node.type === 'SwitchStatement' ? node.cases.flatMap(item => item.consequent)
+      : isFunction(node) ? (node.body && node.body.type === 'BlockStatement' ? node.body.body : [])
+        : Array.isArray(node.body) ? node.body : [];
+    for (const statement of statements) {
+      // A function's own body also holds its var declarations; a block's are its function's.
+      const found = declared(statement, name, isFunction(node) || node.type === 'Program');
+      if (found) return found;
+    }
+    if (['ForStatement', 'ForInStatement', 'ForOfStatement'].includes(node.type)) {
+      const head = node.init || node.left;
+      if (head && head.type === 'VariableDeclaration' && head.declarations.some(item => binds(item.id, name))) return SHADOWED;
+    }
+    if (node.type === 'CatchClause' && binds(node.param, name)) return SHADOWED;
+    if (isFunction(node)) {
+      if ((node.params || []).some(parameter => binds(parameter, name))) return SHADOWED;
+      if (node.id && node.id.name === name && node.type !== 'FunctionDeclaration') return node;
+    }
+    return null;
+  };
+  // Whether name is declared deeper inside a function's or the program's own code, in a block that
+  // doesn't hold the route: a var there is the function's binding, and in sloppy code a function
+  // declared in a block leaks out too, so which one runs isn't certain.
+  const declaredDeeper = (node, name, onPath) => {
+    const top = isFunction(node) ? node.body : node;
+    const own = new Set(isFunction(node) ? (top && top.type === 'BlockStatement' ? top.body : []) : (Array.isArray(top && top.body) ? top.body : []));
+    let found = false;
+    const walkDeeper = item => {
+      if (found || !item || typeof item.type !== 'string') return;
+      if (!own.has(item) && !onPath.has(item) && declared(item, name, true)) {
+        found = true;
+        return;
+      }
+      if (isFunction(item)) return; // A nested function's own declarations are its own.
+      for (const child of children(item)) walkDeeper(child);
+    };
+    for (const child of children(top)) walkDeeper(child);
+    return found;
+  };
+  const localFunction = name => {
+    const onPath = new Set(enclosing);
+    for (let index = enclosing.length - 1; index >= 0; index -= 1) {
+      const node = enclosing[index];
+      const binding = ownBinding(node, name);
+      const outer = isFunction(node) || node.type === 'Program';
+      const deeper = outer && declaredDeeper(node, name, onPath);
+      if (node.type === 'Program') {
+        // At module scope the module lookup reads a binding, following require() and imports,
+        // unless a block elsewhere in the module declares the name too.
+        if (deeper) return SHADOWED;
+        return binding && binding !== SHADOWED ? binding : null;
+      }
+      if (binding === SHADOWED) return SHADOWED;
+      if (binding) return deeper && binding.type === 'FunctionDeclaration' ? SHADOWED : binding;
+      if (deeper) return SHADOWED;
     }
     return null;
   };
@@ -625,11 +682,13 @@ function fileInputs(ast, filename, source, label, scope = null) {
     return lookup(scope, 'function', dotted(reference));
   };
   const visit = (node, parent) => {
-    if (isFunction(node)) enclosing.push(node);
+    // A function's body block is the function's own scope, not another one.
+    const opens = isFunction(node) || (SCOPES.has(node.type) && !(node.type === 'BlockStatement' && isFunction(parent)));
+    if (opens) enclosing.push(node);
     try {
       visitNode(node, parent);
     } finally {
-      if (isFunction(node)) enclosing.pop();
+      if (opens) enclosing.pop();
     }
   };
   const visitNode = (node, parent) => {

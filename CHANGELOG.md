@@ -26,6 +26,12 @@
   module function only when nothing closer binds the name. A plugin-local `readTenant` read the
   module-level one of the same name instead. A local binding the reader can't follow (a
   parameter, a `require()`, a destructured option) leaves the route incomplete.
+- **Hook names resolve through block scopes:** a hook declared inside a `{}` block (or a `switch`
+  case, a loop or a `catch`) is that block's alone, so a route outside it reads the outer hook of
+  the same name and a route inside it reads the block's. A hook declared in a block was
+  mistaken for a same-named outer one, giving a wrong list marked complete. A name the reader
+  can't settle (a loop or `catch` variable, a `let` or block-level `var`, a function declared in
+  a block that sloppy code lets leak out) leaves the route incomplete.
 - **FastAPI optional body models:** `body: Optional[Filters] = None` saved the argument name
   `body` as a request key and lost the model's own fields; the model is read through
   `Optional` and `Annotated` now.

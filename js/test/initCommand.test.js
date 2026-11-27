@@ -300,6 +300,16 @@ describe('scoped schemas, route hooks and factory handlers', () => {
     }
   });
 
+  test('a hook declared in a block is that block\'s; outside it the outer one runs', async () => {
+    const routes = await runAt('fastify-blocks');
+    expect(routes['/inside']).toMatchObject({ inputs: { tenant: 'text' }, inputs_complete: true });
+    expect(routes['/outside']).toMatchObject({ inputs: { region: 'text' }, inputs_complete: true });
+    expect(routes['/inside'].inputs.region).toBeUndefined();
+    expect(routes['/outside'].inputs.tenant).toBeUndefined();
+    // A loop variable isn't a function the reader can follow: unknown, not the outer hook.
+    expect(routes['/loop']).toMatchObject({ inputs: {}, inputs_complete: false });
+  });
+
   test('handlers a factory makes are linked to their source', async () => {
     const routes = await runAt('fastify-export');
     for (const route of ['/exports/csv', '/exports/pdf']) {
