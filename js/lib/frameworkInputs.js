@@ -22,7 +22,30 @@ const reason = (code, detail) => ({ code, detail });
 const COVERS = ['dependency', 'external_class', 'model_fields', 'container_whole'];
 
 /** A JSON Schema object's named properties; one that allows others is a container_whole reason. */
-function jsonSchemaFields(schema, label, reasons) {
+/**
+ * A JSON Schema with its $refs replaced by what they name, from registry ({ id: schema }, as
+ * Fastify's getSchemas() gives) or the schema's own definitions: "id#", "id", "id#/properties/x"
+ * and "#/definitions/x". A $ref that can't be resolved is left, and reads as unknown.
+ */
+function resolveRefs(schema, registry = {}, root = schema, depth = 0) {
+  if (!schema || typeof schema !== 'object' || depth > 16) return schema;
+  if (Array.isArray(schema)) return schema.map(item => resolveRefs(item, registry, root, depth + 1));
+  if (typeof schema.$ref === 'string') {
+    const [id, pointer = ''] = schema.$ref.split('#');
+    const base = id ? (registry[id] || registry[`${id}#`] || Object.values(registry).find(item => item && item.$id === id)) : root;
+    let target = base;
+    for (const part of pointer.split('/').filter(Boolean)) target = target && typeof target === 'object' ? target[part.replace(/~1/g, '/').replace(/~0/g, '~')] : undefined;
+    if (target && typeof target === 'object' && target !== schema) return resolveRefs(target, registry, id ? base : root, depth + 1);
+    return schema;
+  }
+  const out = {};
+  for (const [key, value] of Object.entries(schema)) out[key] = resolveRefs(value, registry, root, depth + 1);
+  return out;
+}
+
+const closed = schema => [false, null, undefined].includes(schema.additionalProperties) && !schema.patternProperties;
+
+function jsonSchemaFields(schema, label, reasons, nested = null) {
   if (schema.$ref !== undefined) {
     reasons.push(reason('external_class', `the ${label} schema is a reference (${schema.$ref})`));
     return {};
@@ -42,6 +65,11 @@ function jsonSchemaFields(schema, label, reasons) {
   }
   for (const [name, value] of Object.entries(schema.properties || {})) {
     found[name] = value && value.$ref === undefined ? schemaKind(value) : 'text';
+    // An object property listing its own properties, which allows no others: the keys inside it.
+    if (nested && value && typeof value === 'object' && (value.type === 'object' || (!value.type && value.properties))
+      && value.properties && Object.keys(value.properties).length && closed(value)) {
+      nested[name] = Object.keys(value.properties).sort();
+    }
   }
   return found;
 }
@@ -191,14 +219,14 @@ function classFields(cls, label, reasons) {
  * The named inputs a schema accepts: JSON Schema, zod (3 or 4), Joi, a DTO class, or a plain
  * object of Joi schemas (Hapi's shorthand). Null when it isn't one of those.
  */
-function fieldsOf(schema, label, reasons) {
+function fieldsOf(schema, label, reasons, nested = null) {
   if (isDto(schema)) return classFields(schema, label, reasons);
   if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return null;
   if (isZod(schema)) return zodFields(schema, label, reasons);
   if (isJoi(schema)) return joiFields(schema, label, reasons);
   if (schema.type !== undefined || schema.properties || schema.$ref !== undefined
     || ['allOf', 'oneOf', 'anyOf'].some(key => Array.isArray(schema[key]))) {
-    return jsonSchemaFields(schema, label, reasons);
+    return jsonSchemaFields(schema, label, reasons, nested);
   }
   const values = Object.values(schema);
   if (values.length && values.every(isJoi)) {
@@ -214,26 +242,31 @@ function fieldsOf(schema, label, reasons) {
 function fromSchemas(parts) {
   const found = {};
   const reasons = [];
+  const nested = {};
   let any = false;
   for (const [label, schema] of parts) {
     if (schema === false) {
       any = true; // Hapi: this input isn't allowed at all.
       continue;
     }
-    const fields = fieldsOf(schema, label, reasons);
+    const fields = fieldsOf(schema, label, reasons, nested);
     if (!fields) continue;
     any = true;
     for (const [name, kind] of Object.entries(fields)) found[name] = kind;
   }
   if (!any) return null;
   // The schema only checks what's sent; the handler may still read the raw request itself.
-  return { inputs: found, covers: COVERS, reasons, standalone: false };
+  const result = { inputs: found, covers: COVERS, reasons, standalone: false };
+  if (Object.keys(nested).length) result.nested = nested;
+  return result;
 }
 
 /** A Fastify route's schema.querystring and schema.body. */
-function fastifyInputs(schema) {
+function fastifyInputs(schema, registry = {}) {
   if (!schema || typeof schema !== 'object') return null;
-  return fromSchemas([['query', schema.querystring || schema.query], ['body', schema.body]]);
+  // Each part is its own JSON Schema: a local $ref (#/definitions/x) is relative to it.
+  const part = value => (value && typeof value === 'object' ? resolveRefs(value, registry, value) : value);
+  return fromSchemas([['query', part(schema.querystring || schema.query)], ['body', part(schema.body)]]);
 }
 
 /** A Hapi route's validate.query and validate.payload. */
@@ -544,15 +577,29 @@ function expressInputs(handlers) {
 function combine(first, second) {
   if (!first) return second;
   if (!second) return first;
-  return {
-    inputs: { ...first.inputs, ...second.inputs },
+  // A name both declare with different types takes the weaker, as the engine keeps one type for
+  // every method: POST's integer can't hold for a GET that sends any text.
+  const inputs = { ...first.inputs };
+  for (const [name, kind] of Object.entries(second.inputs)) inputs[name] = inputs[name] === undefined || inputs[name] === kind ? kind : 'text';
+  const combined = {
+    inputs,
     covers: first.covers.filter(code => second.covers.includes(code)),
     reasons: [...first.reasons, ...second.reasons],
     standalone: first.standalone && second.standalone
   };
+  // A field's inner keys hold only when neither takes the field whole.
+  const nested = {};
+  for (const [own, other] of [[first, second], [second, first]]) {
+    for (const [name, keys] of Object.entries(own.nested || {})) {
+      if (name in other.inputs && !(other.nested && name in other.nested)) continue;
+      nested[name] = [...new Set([...(nested[name] || []), ...keys])].sort();
+    }
+  }
+  if (Object.keys(nested).length) combined.nested = nested;
+  return combined;
 }
 
 /** Whether value is a schema object or class fieldsOf reads, rather than a plain { name: type } map. */
 const isSchema = value => isZod(value) || isJoi(value) || isDto(value);
 
-module.exports = { isSchema, classFields, closureInputs, closureValues, combine, expressInputs, fastifyInputs, fieldsOf, hapiInputs, nestInputs, nestRoutes };
+module.exports = { isSchema, classFields, resolveRefs, closureInputs, closureValues, combine, expressInputs, fastifyInputs, fieldsOf, hapiInputs, nestInputs, nestRoutes };

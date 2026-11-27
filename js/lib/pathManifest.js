@@ -592,7 +592,8 @@ function fastifyRouteList(fastify) {
     parts.push(match[2]);
     const methods = (match[3] || '').split(',').map(method => method.trim()).filter(method => method && method !== 'HEAD');
     const routePath = parts.join('');
-    if (methods.length && routePath.startsWith('/')) list.push({ path: routePath, methods });
+    // One entry per method: each has its own handler and schema.
+    if (routePath.startsWith('/')) for (const method of methods) list.push({ path: routePath, methods: [method] });
   }
   return list;
 }
@@ -609,11 +610,7 @@ function fastifyRoutes(fastify) {
     const routePath = route.url || route.path;
     for (const method of [].concat(route.method || route.methods || [])) seen.add(`${String(method).toUpperCase()} ${routePath}`);
   }
-  const missing = [];
-  for (const route of fastifyRouteList(fastify)) {
-    const methods = route.methods.filter(method => !seen.has(`${method} ${route.path}`));
-    if (methods.length) missing.push({ ...route, methods });
-  }
+  const missing = fastifyRouteList(fastify).filter(route => !seen.has(`${route.methods[0]} ${route.path}`));
   return [...recorded, ...missing];
 }
 
@@ -819,6 +816,19 @@ function buildFrameworkManifest(framework, app, options = {}) {
   } else if (normalized === 'fastify' && app) {
     const listed = fastifyRoutes(app);
     if (listed.length) options = { ...options, routes: withSourceHandlers(listed, handlerSource) };
+  }
+  // Fastify schemas that $ref shared ones (fastify.addSchema): resolved from the live app's
+  // getSchemas() and the source's literal addSchema calls.
+  if (normalized === 'fastify' && Array.isArray(options.routes) && options.routes.some(route => route && route.schema)) {
+    let registry = {};
+    try {
+      if (handlerSource) registry = { ...require('./sourceRoutes').sourceSchemas(handlerSource) };
+    } catch (_) { /* source schemas are a bonus */ }
+    try {
+      if (app && typeof app.getSchemas === 'function') Object.assign(registry, app.getSchemas() || {});
+    } catch (_) { /* a Fastify without getSchemas */ }
+    const { resolveRefs } = require('./frameworkInputs');
+    options = { ...options, routes: options.routes.map(route => (route && route.schema ? { ...route, schema: resolveRefs(route.schema, registry) } : route)) };
   }
   const extractors = {
     express: () => options.routes ? extractNextRoutes(options.routes) : extractExpressRoutes(app),

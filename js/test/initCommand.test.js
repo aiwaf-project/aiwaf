@@ -141,6 +141,23 @@ describe('route inventory: init lists what the framework serves', () => {
   });
 });
 
+describe('Fastify input rules', () => {
+  test('types stay with their method, $refs resolve, and a raw text body is no field', async () => {
+    const output = path.join(dir, 'paths.json');
+    const { io } = capture();
+    expect(await runInit(['--app', fixture('fastify-refs', 'app.js'), '--output', output, '--source', fixture('fastify-refs')], io)).toBe(0);
+    const routes = readRoutes(output);
+    // GET sends ref as any text; POST's integer can't hold for both.
+    expect(routes['/orders'].inputs).toEqual({ customer: 'text', ref: 'text' });
+    expect(routes['/orders'].inputs_by_method).toEqual({ GET: ['ref'], POST: ['customer', 'ref'] });
+    expect(routes['/orders'].inputs_nested).toEqual({ customer: ['email', 'tier'] });
+    expect(routes['/orders'].inputs_complete).toBe(true);
+    expect(routes['/notes'].inputs).toEqual({});
+    expect(routes['/notes'].inputs_complete).toBe(false);
+    expect(routes['/notes'].inputs_incomplete.map(item => item.code)).toEqual(['raw_body']);
+  });
+});
+
 describe('the audit', () => {
   test('a route whose handler the audit never read is not complete', async () => {
     const output = path.join(dir, 'paths.json');

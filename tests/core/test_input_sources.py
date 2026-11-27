@@ -472,3 +472,45 @@ def test_a_type_the_framework_validates_holds_over_an_untyped_read():
     # Even a list complete on its own isn't complete unaudited: its risks weren't looked for.
     assert unread["/items"]["inputs_complete"] is False
     assert "inputs" not in unread["/plain"]
+
+
+def test_pydantic_fields_accept_every_name_they_validate():
+    from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field
+
+    class ByName(BaseModel):
+        model_config = ConfigDict(populate_by_name=True)
+        order_id: int = Field(alias="orderId")
+
+    class Choices(BaseModel):
+        ref: int = Field(validation_alias=AliasChoices("ref", "reference"))
+        city: int = Field(validation_alias=AliasPath("address", "zip"))
+        code: str = Field(validation_alias="zip_code")
+        plain: int = Field(alias="Plain")
+
+    assert class_fields(ByName) == {"orderId": "int", "order_id": "int"}
+    assert class_fields(Choices) == {"ref": "int", "reference": "int", "address": "text", "zip_code": "text", "Plain": "int"}
+
+
+def test_combined_handlers_and_methods_keep_a_type_to_where_it_holds():
+    from aiwaf.core.input_sources import combine
+
+    get = {"inputs": {"ref": "text"}, "covers": [], "reasons": [], "standalone": True}
+    post = {"inputs": {"ref": "int", "note": "text"}, "covers": [], "reasons": [], "standalone": True}
+    assert combine(get, post)["inputs"] == {"ref": "text", "note": "text"}
+    framework = {"inputs": {"ref": "int"}, "covers": [], "reasons": [], "standalone": False}
+
+    def route(**extra):
+        return {"methods": ["GET", "POST"], "inputs": {"ref": "text"}, "inputs_complete": True,
+                "declared_inputs": dict(framework), **extra}
+
+    routes = {
+        "/split": route(declared_methods={"POST": ["ref"]}, _input_methods={"GET": ["ref"], "POST": ["ref"]}),
+        "/same": route(declared_methods={"POST": ["ref"]}, _input_methods={"POST": ["ref"]}),
+        "/unknown": route(),
+        "/single": {"methods": ["POST"], "inputs": {"ref": "text"}, "inputs_complete": True, "declared_inputs": dict(framework)},
+    }
+    finalize(routes)
+    assert routes["/split"]["inputs"]["ref"] == "text"
+    assert routes["/same"]["inputs"]["ref"] == "int"
+    assert routes["/unknown"]["inputs"]["ref"] == "text"
+    assert routes["/single"]["inputs"]["ref"] == "int"

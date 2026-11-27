@@ -305,3 +305,19 @@ test('inputs named like object properties are ordinary keys', () => {
   `);
   expect(Object.keys(found['/ctor'][0]).sort()).toEqual(['constructor', 'toString']);
 });
+
+test('a text body read whole is no field', () => {
+  const found = inputs(`
+    fastify.post('/notes', async request => ({ size: request.body.length, first: request.body.trim().split('\\n')[0] }));
+    app.post('/raw', (req, res) => res.json({ n: req.body.length, up: req.body.toUpperCase() }));
+    app.post('/json', (req, res) => res.json({ n: req.body.count, m: req.body.trim }));
+    app.post('/indexed', (req, res) => res.json({ n: req.body['length'] }));
+  `);
+  for (const route of ['/notes', '/raw']) {
+    expect([route, found[route][0], found[route][1]]).toEqual([route, {}, false]);
+  }
+  // A property that isn't called stays a field, as does one read with brackets.
+  expect(found['/json']).toEqual([{ count: 'text', trim: 'text' }, true]);
+  expect(found['/indexed']).toEqual([{ length: 'text' }, true]);
+});
+

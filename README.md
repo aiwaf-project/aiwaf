@@ -425,6 +425,10 @@ into the project's other files through imports: `from .forms import ContactForm`
 Body } from './schemas'`, `require('./helpers')`, or a static `Paging.page(request)` in Java. A key
 held in a constant, as in `request.GET[PAGE_PARAM]` or `getParameter(PAGE)`, is known.
 
+A name read with different types by different methods on one path (a GET's text `ref`, a
+POST's integer `ref`) is saved as text: a type applies to every method, so it holds only where
+every method agrees. Each method still has its own list of names.
+
 `inputs_complete` is true only when every read was understood. When it isn't, the route's
 `inputs_incomplete` says why, with the file and line, and `init`'s summary counts the reasons:
 
@@ -542,8 +546,9 @@ routes with no saved inputs, path parameters, headers and other bodies are never
 
 Keys inside an object-valued input are checked too when `init` knows them all
 (`inputs_nested`): from code that reads only constant keys inside it, as
-`data["user"]["name"]` or `req.body.user.name`, in every handler that reads it, from a FastAPI
-body model whose field is itself a Pydantic model (`customer: Customer` gives `customer`'s
+`data["user"]["name"]` or `req.body.user.name`, in every handler that reads it, from a JSON
+Schema object property that lists its properties and allows no others (Fastify, Hapi,
+OpenAPI-style), from a FastAPI body model whose field is itself a Pydantic model (`customer: Customer` gives `customer`'s
 declared fields, one level down), or from a Java body class's nested classes. A JSON
 `{"user": {"role": "admin"}}`, or a form's `user[role]`, is then `user.role`, unexpected. An
 input a handler passes on whole, a model that allows undeclared fields, or one that another

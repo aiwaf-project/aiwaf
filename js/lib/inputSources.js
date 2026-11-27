@@ -245,6 +245,25 @@ function finalize(routes, sources = {}) {
         claims[method.toUpperCase()] = new Set([...(claims[method.toUpperCase()] || []), ...names]);
       }
     }
+    // Which methods the framework declares each name for, and which methods' code reads it: a
+    // framework type only holds over the code's reading of the methods it declares it for.
+    const declaredFor = {};
+    for (const [method, names] of Object.entries(data.declared_methods || {})) {
+      for (const name of names) (declaredFor[name] = declaredFor[name] || new Set()).add(method.toUpperCase());
+    }
+    const codeFor = {};
+    for (const [method, names] of Object.entries(data._input_methods || {})) {
+      for (const name of names) (codeFor[name] = codeFor[name] || new Set()).add(method.toUpperCase());
+    }
+    const allMethods = (data.methods || []).map(method => String(method).toUpperCase());
+    for (const name of data._input_shared || []) codeFor[name] = new Set(allMethods.length ? allMethods : ['*']);
+    const typeHolds = name => {
+      if (!(name in (data.inputs || {}))) return true; // The code doesn't read it: nothing to weaken.
+      const declared = declaredFor[name];
+      const reads = codeFor[name];
+      if (!declared) return allMethods.length <= 1; // One method: the framework's is the only reading.
+      return Boolean(reads) && [...reads].every(method => declared.has(method));
+    };
     const shared = new Set(data._input_shared || []);
     const nested = data._nested || {};
     const flat = new Set(data._flat || []);
@@ -255,12 +274,19 @@ function finalize(routes, sources = {}) {
     if (framework && typeof framework === 'object') {
       const covered = new Set(framework.covers || []);
       reasons = reasons.filter(item => !covered.has(item.code)).concat(framework.reasons || []);
+      const frameworkNested = framework.nested || {};
       for (const [name, kind] of Object.entries(framework.inputs || {})) {
         // A type the framework validates (a schema's integer, a pipe's int) holds whatever the
         // handler's own read says: the value reaching it has been checked, or coerced, already.
-        if (kind && kind !== 'text') found[name] = kind;
+        if (kind && kind !== 'text' && typeHolds(name)) found[name] = kind;
         else merge(found, name, kind);
-        flat.add(name);
+        if (!(name in frameworkNested)) flat.add(name);
+      }
+      // The framework validates these objects' keys (a closed schema), so they stand even where
+      // reading the code found only the whole field.
+      for (const [name, keys] of Object.entries(frameworkNested)) {
+        nested[name] = [...new Set([...(nested[name] || []), ...keys])];
+        flat.delete(name);
       }
       read = read || Boolean(framework.standalone);
     }

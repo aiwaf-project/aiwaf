@@ -151,9 +151,15 @@ def class_fields(cls: Any) -> Optional[Dict[str, str]]:
                 for name, field in fields.items() if not getattr(field, "read_only", False)}
     model_fields = getattr(cls, "model_fields", None)
     if isinstance(model_fields, dict) and hasattr(cls, "model_config"):  # Pydantic 2.
-        if (getattr(cls, "model_config", None) or {}).get("extra") == "allow":
+        config = getattr(cls, "model_config", None) or {}
+        if config.get("extra") == "allow":
             return None
-        return {(field.alias or name): _kind(field.annotation) for name, field in model_fields.items()}
+        found: Dict[str, str] = {}
+        for name, field in model_fields.items():
+            for accepted in _pydantic_names(name, field, config):
+                # An AliasPath's first key holds an object, not the field's own value.
+                found[accepted] = "text" if accepted in _path_heads(field) else _kind(field.annotation)
+        return found
     declared = getattr(cls, "_declared_fields", None)
     if isinstance(declared, dict):  # marshmallow.
         if str(getattr(getattr(cls, "Meta", None), "unknown", "")).lower() == "include":
@@ -175,6 +181,39 @@ def class_fields(cls: Any) -> Optional[Dict[str, str]]:
     if hasattr(cls, "__total__") and hasattr(cls, "__annotations__"):  # TypedDict.
         return {name: _kind(kind) for name, kind in typing.get_type_hints(cls).items()}
     return None
+
+
+def _pydantic_names(name: str, field: Any, config: Mapping[str, Any]) -> List[str]:
+    """Every top-level key a Pydantic 2 field accepts in input.
+
+    Its validation_alias when set (a string, each of AliasChoices', or an AliasPath's first key),
+    else its alias, else its name; and its name too when the model populates by name.
+    """
+    names: List[str] = []
+    validation = getattr(field, "validation_alias", None)
+    if isinstance(validation, str):
+        names.append(validation)
+    elif validation is not None:
+        for choice in getattr(validation, "choices", None) or [validation]:
+            path = choice if isinstance(choice, str) else (getattr(choice, "path", None) or [None])[0]
+            if isinstance(path, str):
+                names.append(path)
+    if not names:
+        names.append(getattr(field, "alias", None) or name)
+    if config.get("populate_by_name") or config.get("validate_by_name"):
+        names.append(name)
+    return list(dict.fromkeys(names))
+
+
+def _path_heads(field: Any) -> set:
+    """The first keys of a field's AliasPaths that go deeper, as address in AliasPath("address", "city")."""
+    validation = getattr(field, "validation_alias", None)
+    heads = set()
+    for choice in (getattr(validation, "choices", None) or [validation]) if validation is not None and not isinstance(validation, str) else ():
+        path = getattr(choice, "path", None)
+        if path and len(path) > 1 and isinstance(path[0], str):
+            heads.add(path[0])
+    return heads
 
 
 def _object_class(annotation: Any) -> Any:
@@ -205,7 +244,8 @@ def nested_fields(cls: Any) -> Dict[str, List[str]]:
             continue
         keys = class_fields(inner)
         if keys:
-            found[field.alias or name] = sorted(keys)
+            for accepted in _pydantic_names(name, field, getattr(cls, "model_config", None) or {}):
+                found[accepted] = sorted(keys)
     return found
 
 
@@ -494,12 +534,21 @@ def webargs_inputs(view: Any) -> Optional[dict]:
     return {"inputs": found, "covers": covers, "reasons": reasons, "standalone": exact}
 
 
+def _merged(first: Mapping[str, str], second: Mapping[str, str]) -> Dict[str, str]:
+    out = dict(first)
+    for name, kind in second.items():
+        _merge(out, name, kind)
+    return out
+
+
 def combine(first: Optional[dict], second: Optional[dict]) -> Optional[dict]:
     """Two framework declarations for one route (say, its GET and POST handlers) as one."""
     if not first or not second:
         return first or second
     combined = {
-        "inputs": {**first["inputs"], **second["inputs"]},
+        # A name both declare with different types takes the weaker, as the engine keeps one type
+        # for every method: POST's integer can't hold for a GET that sends any text.
+        "inputs": _merged(first["inputs"], second["inputs"]),
         "covers": [code for code in first["covers"] if code in second["covers"]],
         "reasons": [*first["reasons"], *second["reasons"]],
         "standalone": bool(first["standalone"] and second["standalone"]),
@@ -790,9 +839,23 @@ def finalize(
         declaration = data.pop("input_declaration", None)
         # Which method reads what: the code reading's and the framework's, per method. Names
         # from anywhere else are shared by every method.
-        claims = {str(method).upper(): set(names) for method, names in (data.pop("_input_methods", None) or {}).items()}
-        for method, names in (data.pop("declared_methods", None) or {}).items():
-            claims.setdefault(str(method).upper(), set()).update(names)
+        code_methods = {str(method).upper(): set(names) for method, names in (data.pop("_input_methods", None) or {}).items()}
+        declared_methods = {str(method).upper(): set(names) for method, names in (data.pop("declared_methods", None) or {}).items()}
+        claims = {method: set(names) for method, names in code_methods.items()}
+        for method, names in declared_methods.items():
+            claims.setdefault(method, set()).update(names)
+        all_methods = {str(method).upper() for method in data.get("methods") or ()}
+        code_read = set(data.get("inputs") or {})
+
+        def type_holds(name: str) -> bool:
+            """A framework type only holds over the code's reading of the methods it's declared for."""
+            if name not in code_read:
+                return True
+            declared = {method for method, names in declared_methods.items() if name in names}
+            if not declared:
+                return len(all_methods) <= 1
+            reads = {method for method, names in code_methods.items() if name in names}
+            return bool(reads) and reads <= declared
         shared: set = set()
         nested = data.pop("_nested", None) or {}
         flat = set(data.pop("_flat", None) or ())
@@ -807,7 +870,7 @@ def finalize(
             for name, kind in (framework.get("inputs") or {}).items():
                 # A type the framework validates (a Pydantic int, a schema's integer) holds whatever
                 # the handler's own read says: the value reaching it is checked, or coerced, already.
-                if kind and kind != "text":
+                if kind and kind != "text" and type_holds(name):
                     found[name] = kind
                 else:
                     _merge(found, name, kind)

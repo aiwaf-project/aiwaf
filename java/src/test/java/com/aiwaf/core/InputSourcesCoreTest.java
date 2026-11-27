@@ -297,6 +297,8 @@ class InputSourcesCoreTest {
         entry.put("methods", List.of("GET", "POST"));
         entry.put("inputs", new TreeMap<>(Map.of("page", "text")));
         entry.put("inputs_complete", true);
+        // The GET handler's code read page; the framework binds it there as an int.
+        entry.put("_input_methods", new TreeMap<>(Map.of("GET", List.of("page"))));
         Map<String, Object> routes = new TreeMap<>();
         routes.put("/orders", entry);
         return routes;
@@ -326,5 +328,26 @@ class InputSourcesCoreTest {
         assertEquals(List.of("not_audited"), codes(types.get("inputs_incomplete")));
         assertNull(types.get("inputs_by_method"));
         assertNull(((Map<?, ?>) unread.get("/plain")).get("inputs"));
+    }
+
+    public static class Split {
+        @org.springframework.web.bind.annotation.PostMapping
+        public String create(@org.springframework.web.bind.annotation.RequestParam("ref") int ref) { return ""; }
+    }
+
+    @Test
+    void aFrameworkTypeHoldsOnlyForTheMethodsItIsDeclaredFor() throws Exception {
+        List<PathManifestCore.RouteInfo> live = List.of(
+                new PathManifestCore.RouteInfo("/orders", List.of("POST"), Split.class, method(Split.class, "create")));
+        InputSourcesCore.Sources sources = InputSourcesCore.forRoutes(live, InputSourcesCore.Sources.none());
+        Map<String, Object> entry = new LinkedHashMap<>();
+        entry.put("methods", List.of("GET", "POST"));
+        entry.put("inputs", new TreeMap<>(Map.of("ref", "text")));
+        entry.put("inputs_complete", true);
+        // GET's code reads ref untyped; only POST binds it as an int.
+        entry.put("_input_methods", new TreeMap<>(Map.of("GET", List.of("ref"))));
+        Map<String, Object> routes = new TreeMap<>(Map.of("/orders", entry));
+        InputSourcesCore.finalize(routes, sources);
+        assertEquals(Map.of("ref", "text"), ((Map<?, ?>) routes.get("/orders")).get("inputs"));
     }
 }

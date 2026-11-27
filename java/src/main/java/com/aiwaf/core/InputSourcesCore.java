@@ -627,6 +627,7 @@ public final class InputSourcesCore {
             if (data.get("inputs_incomplete") instanceof List<?> saved) {
                 for (Object item : saved) if (item instanceof Map<?, ?> map) reasons.add((Map<String, Object>) map);
             }
+            Set<String> codeRead = new TreeSet<>(found.keySet());
             Map<String, Object> framework = sources.framework().get(route.getKey());
             if (framework != null) {
                 Collection<Object> covers = (Collection<Object>) framework.getOrDefault("covers", List.of());
@@ -636,7 +637,14 @@ public final class InputSourcesCore {
                 ((Map<String, String>) framework.getOrDefault("inputs", Map.of())).forEach((name, kind) -> {
                     // A type the framework binds (@RequestParam int page) holds whatever the code
                     // reading says: the value reaching the handler is converted already.
-                    if (kind != null && !kind.equals("text")) found.put(name, kind);
+                    // The type holds only over the code's reading of the methods it's declared for.
+                    Set<String> declaredFor = new TreeSet<>();
+                    frameworkMethods.forEach((verb, names) -> { if (names.contains(name)) declaredFor.add(verb); });
+                    Set<String> readFor = new TreeSet<>();
+                    claims.forEach((verb, names) -> { if (names.contains(name)) readFor.add(verb); });
+                    boolean holds = !codeRead.contains(name) || (!declaredFor.isEmpty() && !readFor.isEmpty() && declaredFor.containsAll(readFor))
+                            || (declaredFor.isEmpty() && !(data.get("methods") instanceof List<?> verbs && verbs.size() > 1));
+                    if (kind != null && !kind.equals("text") && holds) found.put(name, kind);
                     else merge(found, name, kind);
                     boolean claimed = false;
                     for (Map.Entry<String, Set<String>> verb : frameworkMethods.entrySet()) {

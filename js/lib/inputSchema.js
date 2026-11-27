@@ -15,6 +15,13 @@
 const REQUEST_NAMES = new Set(['req', 'request']);
 const CONTEXT_NAMES = new Set(['ctx', 'context']);
 const CONTAINERS = new Set(['query', 'body']);
+// String and array methods: called on a container, they read a raw text body whole.
+const TEXT_METHODS = new Set([
+  'trim', 'trimStart', 'trimEnd', 'split', 'slice', 'substring', 'substr', 'toLowerCase', 'toUpperCase', 'includes',
+  'startsWith', 'endsWith', 'indexOf', 'lastIndexOf', 'match', 'matchAll', 'replace', 'replaceAll', 'charAt', 'charCodeAt',
+  'padStart', 'padEnd', 'concat', 'toString', 'at', 'search', 'normalize', 'localeCompare'
+]);
+
 const CONVERTERS = new Map([
   ['parseInt', 'int'], ['Number.parseInt', 'int'], ['Number', 'float'], ['parseFloat', 'float'],
   ['Number.parseFloat', 'float'], ['Boolean', 'bool']
@@ -291,6 +298,14 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
     const parent = parents.get(expr);
     if (isMember(parent) && parent.object === expr) {
       const key = memberKey(parent, scope.constants);
+      // body.length, or body.trim() and other string methods called on it: a text body read
+      // whole, not a field named length.
+      const call = parents.get(parent);
+      if (!parent.computed && key !== null && (key === 'length'
+        || (TEXT_METHODS.has(key) && isCall(call) && call.callee === parent))) {
+        incomplete('raw_body', `${label}.${key} reads the body as text`, parent);
+        return;
+      }
       const imported = key === null && parent.computed && parent.property.type === 'Identifier'
         ? lookup(scope, 'constant', parent.property.name) : null;
       if (key !== null) {

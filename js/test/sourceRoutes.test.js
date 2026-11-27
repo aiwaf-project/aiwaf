@@ -154,8 +154,9 @@ describe('live route reading', () => {
     await fastify.ready();
     try {
       const listed = pathManifest.fastifyRouteList(fastify);
-      expect(listed.map(route => route.path)).toEqual(['/', '/early', '/early-order', '/api', '/api/items/:id', '/api/items/:id/notes']);
-      expect(listed.find(route => route.path === '/early-order').methods).toEqual(['GET', 'POST']);
+      expect(listed.map(route => `${route.methods[0]} ${route.path}`)).toEqual([
+        'GET /', 'GET /early', 'GET /early-order', 'POST /early-order', 'GET /api', 'GET /api/items/:id', 'GET /api/items/:id/notes'
+      ]);
       for (const route of listed) for (const method of route.methods) expect(fastify.hasRoute({ url: route.path, method })).toBe(true);
     } finally {
       await fastify.close();

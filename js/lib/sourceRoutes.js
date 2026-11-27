@@ -162,6 +162,47 @@ function routeHandlers(source = '.') {
 }
 
 /**
+ * The shared schemas a Fastify app adds in its source, as fastify.addSchema({ $id: 'order', ... }),
+ * by $id: literal ones only, including a schema held in a constant in the same file.
+ */
+function sourceSchemas(source = '.') {
+  const { collectFiles, parseSource } = require('./injectionAnalysis');
+  const found = {};
+  const root = path.resolve(source);
+  if (!fs.existsSync(root)) return found;
+  for (const file of collectFiles(root, false, [])) {
+    let ast;
+    try {
+      if (fs.statSync(file).size > MAX_BYTES) continue;
+      ast = parseSource(fs.readFileSync(file, 'utf8'));
+    } catch (_) {
+      continue;
+    }
+    const constants = new Map();
+    const calls = [];
+    const visit = node => {
+      if (!node || typeof node.type !== 'string') return;
+      if (node.type === 'VariableDeclarator' && node.id && node.id.type === 'Identifier' && node.init
+        && ['ObjectExpression', 'ArrayExpression'].includes(node.init.type)) constants.set(node.id.name, node.init);
+      if (node.type === 'CallExpression' && node.callee && node.callee.type === 'MemberExpression'
+        && (node.callee.property.name || node.callee.property.value) === 'addSchema') calls.push(node);
+      for (const key of Object.keys(node)) {
+        if (key === 'loc' || key === 'start' || key === 'end') continue;
+        const value = node[key];
+        if (Array.isArray(value)) value.forEach(visit);
+        else if (value && typeof value.type === 'string') visit(value);
+      }
+    };
+    visit(ast.program);
+    for (const call of calls) {
+      const value = staticValue(call.arguments[0], constants);
+      if (value && typeof value === 'object' && typeof value.$id === 'string') found[value.$id] = value;
+    }
+  }
+  return found;
+}
+
+/**
  * The source handler for a listed route: the same method and path, else (for a router mounted
  * under a prefix) the one route whose path the listed path ends with. ALL matches any method.
  */
@@ -180,4 +221,4 @@ function handlerFor(handlers, routePath, methods = []) {
   return suffix.length === 1 ? suffix[0] : null;
 }
 
-module.exports = { HandlerSource, handlerText, routeHandlers, handlerFor };
+module.exports = { HandlerSource, handlerText, routeHandlers, handlerFor, sourceSchemas, staticValue };

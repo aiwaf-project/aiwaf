@@ -220,3 +220,36 @@ test('a type the framework validates holds over an untyped read of the same name
   expect(unread['/plain'].inputs).toBeUndefined();
 });
 
+test('a framework type holds only for the methods it is declared for', () => {
+  const { finalize } = require('../lib/inputSources');
+  const framework = { inputs: { ref: 'int' }, covers: [], reasons: [], standalone: false };
+  const route = extra => ({
+    methods: ['GET', 'POST'], inputs: { ref: 'text' }, inputs_complete: true, declared_inputs: { ...framework }, ...extra
+  });
+  const routes = {
+    // POST's schema types ref; GET's code reads it untyped.
+    '/split': route({ declared_methods: { POST: ['ref'] }, _input_methods: { GET: ['ref'], POST: ['ref'] } }),
+    // Only POST's code reads it, and POST's schema types it.
+    '/same': route({ declared_methods: { POST: ['ref'] }, _input_methods: { POST: ['ref'] } }),
+    // No method is known for the framework's names, on a path with two methods.
+    '/unknown': route({}),
+    // A name the code reads with no method known.
+    '/shared': route({ declared_methods: { POST: ['ref'] }, _input_shared: ['ref'] }),
+    '/single': { methods: ['POST'], inputs: { ref: 'text' }, inputs_complete: true, declared_inputs: { ...framework } }
+  };
+  finalize(routes);
+  expect(routes['/split'].inputs.ref).toBe('text');
+  expect(routes['/same'].inputs.ref).toBe('int');
+  expect(routes['/unknown'].inputs.ref).toBe('text');
+  expect(routes['/shared'].inputs.ref).toBe('text');
+  expect(routes['/single'].inputs.ref).toBe('int');
+});
+
+test('a closed nested schema object gives its keys', () => {
+  const { finalize } = require('../lib/inputSources');
+  const routes = { '/orders': { methods: ['POST'], inputs: { customer: 'text' }, inputs_complete: true, _flat: ['customer'],
+    declared_inputs: { inputs: { customer: 'text' }, covers: [], reasons: [], standalone: false, nested: { customer: ['email'] } } } };
+  finalize(routes);
+  expect(routes['/orders'].inputs_nested).toEqual({ customer: ['email'] });
+});
+

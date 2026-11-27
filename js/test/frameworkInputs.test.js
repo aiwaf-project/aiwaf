@@ -233,6 +233,53 @@ describe('framework inputs', () => {
     }
   });
 
+  it('resolves $refs, reads closed nested objects, and merges types when combining', () => {
+    const registry = {
+      customer: { $id: 'customer', type: 'object', properties: { email: { type: 'string' } }, additionalProperties: false },
+      'money#': { type: 'number' },
+      other: { $id: 'by-id', definitions: { n: { type: 'integer' } } }
+    };
+    const resolved = framework.resolveRefs({
+      type: 'object',
+      definitions: { local: { type: 'boolean' } },
+      properties: {
+        a: { $ref: 'customer#' }, b: { $ref: 'money' }, c: { $ref: 'by-id#/definitions/n' }, d: { $ref: '#/definitions/local' },
+        e: { $ref: 'missing#' }, f: { $ref: '#/nowhere' }
+      }
+    }, registry);
+    expect(resolved.properties.a.properties.email.type).toBe('string');
+    expect(resolved.properties.b.type).toBe('number');
+    expect(resolved.properties.c.type).toBe('integer');
+    expect(resolved.properties.d.type).toBe('boolean');
+    expect(resolved.properties.e).toEqual({ $ref: 'missing#' });
+    expect(resolved.properties.f).toEqual({ $ref: '#/nowhere' });
+    const loop = { $id: 'loop', $ref: 'loop#' };
+    // A schema referring to itself stops, still a reference.
+    expect(framework.resolveRefs({ $ref: 'loop#' }, { loop }).$ref).toBe('loop#');
+
+    const found = framework.fastifyInputs({
+      body: {
+        type: 'object', definitions: { q: { type: 'integer' } },
+        properties: {
+          q: { $ref: '#/definitions/q' },
+          closed: { type: 'object', properties: { x: { type: 'string' }, y: { type: 'integer' } }, additionalProperties: false },
+          open: { type: 'object', properties: { x: { type: 'string' } }, additionalProperties: true },
+          bare: { properties: { z: { type: 'string' } } },
+          empty: { type: 'object', properties: {} }
+        }
+      }
+    });
+    expect(found.inputs).toEqual({ q: 'int', closed: 'text', open: 'text', bare: 'text', empty: 'text' });
+    expect(found.nested).toEqual({ closed: ['x', 'y'], bare: ['z'] });
+
+    const get = { inputs: { ref: 'text', page: 'int' }, covers: ['a'], reasons: [], standalone: true, nested: { page: ['x'] } };
+    const post = { inputs: { ref: 'int', customer: 'text' }, covers: ['a'], reasons: [], standalone: true, nested: { customer: ['email'] } };
+    const combined = framework.combine(get, post);
+    expect(combined.inputs).toEqual({ ref: 'text', page: 'int', customer: 'text' });
+    expect(combined.nested).toEqual({ page: ['x'], customer: ['email'] });
+    expect(framework.combine(post, { ...post, nested: undefined }).nested).toBeUndefined();
+  });
+
   it('handles Nest edge cases and non-Nest apps', () => {
     expect(framework.nestRoutes(null)).toEqual([]);
     expect(framework.nestRoutes({ container: {} })).toEqual([]);

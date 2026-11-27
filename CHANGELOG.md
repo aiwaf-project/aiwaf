@@ -41,6 +41,30 @@
   tree even with `commonPrefix: false`. Paths are now rebuilt from the tree.
 - **Fastify `route({ url, handler })` handlers are audited:** the npm audit only linked route
   objects with Hapi's `path`, so these handlers' reads and risks weren't tied to their routes.
+- **A type stays with the methods that declare it:** a GET whose query `ref` is any text and a
+  POST whose body types `ref` as an integer on the same path saved `ref` as `int`, so a valid
+  GET was a type mismatch. The engine keeps one type per name for every method, so a name read
+  with different types by different methods is now `text` (the methods' name lists still
+  differ). Handlers sharing a path combined their framework lists by letting the last one's type
+  win (Python and npm), and a framework type overrode the code's reading on methods it wasn't
+  declared for (all three).
+- **Fastify routes with several methods on one path:** each method's handler and schema now
+  come from the source on their own. The route table lists `/orders (GET, POST)` on one line,
+  and both methods took GET's, so POST's inputs were missing from a list marked complete.
+- **Pydantic names:** a field is listed under every key Pydantic accepts for it: its
+  `validation_alias` (a string, each of `AliasChoices`, an `AliasPath`'s first key, as text),
+  else its alias, and its own name too under `populate_by_name` or `validate_by_name`. A
+  complete list missing an accepted name made strict inputs reject a valid request.
+- **A text body read whole is no field (npm):** `request.body.length`, or a string method
+  called on the body (`body.trim()`, `body.split(...)`), was saved as a JSON field named
+  `length` or `trim` in a complete list. It's now a raw read (`raw_body`).
+- **Fastify `$ref` schemas:** a schema referring to a shared one (`fastify.addSchema`) is
+  resolved from the live app's `getSchemas()` and the source's literal `addSchema` calls, as
+  `id#`, `id#/pointer` and local `#/definitions/x` references; it was an unknown schema
+  (`external_class`).
+- **Nested keys from Fastify, Hapi and other JSON Schemas:** an object property that lists its
+  own properties and allows no others saves them as `inputs_nested`, as FastAPI's Pydantic
+  models and the code reading already did. Keys are checked one level down, not inside lists.
 - **Route-inventory tests** compare `init`'s routes with what each framework reports or serves:
   FastAPI's OpenAPI paths for each mounted app, a real request to every Express route, and
   Fastify's `hasRoute()`.
