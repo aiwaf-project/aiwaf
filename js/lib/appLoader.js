@@ -88,6 +88,8 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // registered, from an onRoute hook added before the app's own code adds any route. The AIWAF
 // plugin's hook only sees routes added after it, and Fastify's route table has no schemas.
 const ROUTES = Symbol.for('aiwaf.init.fastifyRoutes');
+// The Fastify instance (plugin scope) a recorded route was registered in.
+const OWNER = Symbol.for('aiwaf.fastify.routeOwner');
 
 /**
  * Wraps the app's own Fastify factory while it loads, so each instance it creates records its
@@ -116,7 +118,9 @@ function captureFastifyRoutes(file, cache = require.cache, load = require) {
     try {
       const routes = [];
       Object.defineProperty(instance, ROUTES, { value: routes, enumerable: false });
-      instance.addHook('onRoute', options => { routes.push(options); });
+      // The instance a hook runs for is the plugin scope the route is registered in: its schemas
+      // are the ones the route's $refs name.
+      instance.addHook('onRoute', function recordRoute(options) { routes.push({ ...options, [OWNER]: this }); });
     } catch (_) { /* a Fastify without onRoute: the route table is used instead */ }
     return instance;
   };
@@ -194,4 +198,4 @@ async function loadApp(options = {}) {
   }
 }
 
-module.exports = { loadApp, frameworkOf, resolveAppFile, AppLoadError, ROUTES, captureFastifyRoutes };
+module.exports = { loadApp, frameworkOf, resolveAppFile, AppLoadError, ROUTES, OWNER, captureFastifyRoutes };

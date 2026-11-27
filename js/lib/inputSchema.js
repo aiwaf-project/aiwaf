@@ -594,6 +594,34 @@ function fileInputs(ast, filename, source, label, scope = null) {
           // Fastify's route options, as { schema }: only their hooks run before the handler.
           if (argument.type === 'ObjectExpression' && !argument.properties.some(property => property.type !== 'ObjectProperty'
             || ROUTE_HOOKS.has(property.key.name || property.key.value))) continue;
+          // { preHandler: fn } or [fn, ...]: each hook is read like the handler, and what it reads
+          // is this route's alone. A hook that can't be read leaves the route incomplete.
+          if (argument.type === 'ObjectExpression' && argument.properties.every(property => property.type === 'ObjectProperty')) {
+            for (const property of argument.properties) {
+              if (!ROUTE_HOOKS.has(property.key.name || property.key.value)) continue;
+              const hooks = property.value.type === 'ArrayExpression' ? property.value.elements : [property.value];
+              for (const hook of hooks) {
+                const own = hook && isFunction(hook) ? { node: hook, scope }
+                  : hook && (hook.type === 'Identifier' || isMember(hook)) ? lookup(scope, 'function', dotted(hook)) : null;
+                if (own && isFunction(own.node) && takesRequest(own.node) && !own.scope.active.has(own.node)) {
+                  own.scope.active.add(own.node);
+                  const read = handlerInputs(own.node, own.scope.schemas, own.scope);
+                  own.scope.active.delete(own.node);
+                  for (const [name, kind] of Object.entries(read.inputs)) {
+                    merge(found.inputs, name, kind);
+                    validated.inputs[name] = validated.inputs[name] || kind;
+                  }
+                  found.reasons.push(...read.reasons);
+                  continue;
+                }
+                if (own && isFunction(own.node) && !takesRequest(own.node)) continue; // A hook reading no request.
+                const reason = { code: 'middleware', detail: `route hook ${dotted(hook) || 'here'} may read the request`, file: filename };
+                if (hook && hook.loc) reason.line = hook.loc.start.line;
+                found.reasons.push(reason);
+              }
+            }
+            continue;
+          }
           if (isCall(argument) && RAW_PARSERS.test(dotted(argument.callee))) {
             // express.raw() and express.text(): the handler gets the body as bytes or text, not
             // names, so what it reads off req.body (as .length) aren't inputs.

@@ -262,6 +262,19 @@ function applyReport(report, manifest, sources = {}) {
   }
   // What each route reads, with types. A route whose handlers weren't all found gets none.
   const read = new Set();
+  // Names the source defines once: a handler a factory makes for several routes, as
+  // makeExport(format) for each format, shares its name across them, so it links to each.
+  const defined = {};
+  for (const definition of report.definitions || []) defined[definition.function] = (defined[definition.function] || 0) + 1;
+  const linkedTo = item => {
+    const linked = routesFor(item, routes);
+    const name = String(item.function || '');
+    if (linked.length || defined[name] !== 1 || name.includes('.') || name.includes(' ')) return linked;
+    return Object.keys(routes).filter(path => {
+      const view = String((routes[path] && routes[path].view) || '').replace(/^bound /, '');
+      return view && view === name;
+    });
+  };
   // A request hook's reads (fastify.addHook('preHandler', ...)) are every route's: the app
   // doesn't say which routes a hook's scope holds, so each route allows its names, with their
   // types. Its own handler still has to be read for the route to count as audited.
@@ -275,7 +288,7 @@ function applyReport(report, manifest, sources = {}) {
   for (const entry of (report.inputs || []).filter(item => item && !item.hook)) {
     // The method a handler serves, from its label, as app.get /items; unknown for a named one.
     const labelled = (/^(?:\S+\.)?(get|post|put|patch|delete|head|options) \//i.exec(String(entry.function || '')) || [])[1];
-    for (const path of routesFor(entry, routes)) {
+    for (const path of linkedTo(entry)) {
       read.add(path);
       mergeInto(routes, path, entry);
       const route = routes[path];
@@ -295,7 +308,7 @@ function applyReport(report, manifest, sources = {}) {
   }
   // A handler defined in the audited source was read even when it reads nothing itself.
   for (const definition of report.definitions || []) {
-    for (const path of routesFor(definition, routes)) read.add(path);
+    for (const path of linkedTo(definition)) read.add(path);
   }
   // A framework list for a handler the audit didn't read still goes in, as incomplete
   // (finalize skips a route it can't tell was read otherwise).

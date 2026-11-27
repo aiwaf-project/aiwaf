@@ -174,6 +174,7 @@ function routeHandlers(source = '.') {
 function sourceSchemas(source = '.') {
   const { collectFiles, parseSource } = require('./injectionAnalysis');
   const found = {};
+  const ambiguous = new Set();
   const root = path.resolve(source);
   if (!fs.existsSync(root)) return found;
   for (const file of collectFiles(root, false, [])) {
@@ -202,9 +203,15 @@ function sourceSchemas(source = '.') {
     visit(ast.program);
     for (const call of calls) {
       const value = staticValue(call.arguments[0], constants);
-      if (value && typeof value === 'object' && typeof value.$id === 'string') found[value.$id] = value;
+      if (value && typeof value === 'object' && typeof value.$id === 'string') {
+        // Sibling plugins may reuse an $id for different schemas; which one a route sees depends
+        // on its scope, which the source doesn't say. Such an $id is left out, so it's unresolved.
+        if (value.$id in found && JSON.stringify(found[value.$id]) !== JSON.stringify(value)) ambiguous.add(value.$id);
+        else found[value.$id] = value;
+      }
     }
   }
+  for (const id of ambiguous) delete found[id];
   return found;
 }
 

@@ -204,8 +204,9 @@ describe('more exact input rules', () => {
   test('an app-level hook\'s reads are every route\'s', async () => {
     const { routes } = await run('fastify-hooks');
     expect(routes['/invoices']).toMatchObject({ inputs: { page: 'int', tenant: 'text' }, inputs_complete: true });
-    expect(routes['/scoped'].inputs.tenant).toBe('text');
-    expect(routes['/scoped'].inputs_complete).toBe(false);
+    // Its own inline preHandler is read too: region is /scoped's alone.
+    expect(routes['/scoped']).toMatchObject({ inputs: { region: 'text', tenant: 'text' }, inputs_complete: true });
+    expect(routes['/invoices'].inputs.region).toBeUndefined();
   });
 
   test('closed schemas give nested keys by path, open ones none', async () => {
@@ -237,6 +238,51 @@ describe('more exact input rules', () => {
     expect(() => writeManifest({ routes: { '/b': loop } }, output)).toThrow();
     expect(JSON.parse(fs.readFileSync(output, 'utf8'))).toEqual({ routes: { '/a': {} } });
     expect(fs.readdirSync(dir).filter(name => name.endsWith('.tmp'))).toEqual([]);
+  });
+});
+
+describe('scoped schemas, route hooks and factory handlers', () => {
+  const runAt = async (name, env = {}) => {
+    const output = path.join(dir, `${name}-${Object.values(env).join('') || 'default'}.json`);
+    const saved = { ...process.env };
+    Object.assign(process.env, env);
+    try {
+      execFileSync(process.execPath, [CLI, 'init', '--app', fixture(name, 'app.js'), '--output', output, '--source', fixture(name)], {
+        cwd: dir, encoding: 'utf8', timeout: 30000, env: process.env
+      });
+    } finally {
+      process.env = saved;
+    }
+    return readRoutes(output);
+  };
+
+  test('sibling plugins reusing a schema $id each get their own, in either order', async () => {
+    for (const order of ['normal', 'reversed']) {
+      const routes = await runAt('fastify-scoped', { AIWAF_SCOPED_ORDER: order });
+      expect([order, routes['/counts'].inputs, routes['/counts'].inputs_complete]).toEqual([order, { value: 'int' }, true]);
+      expect([order, routes['/flags'].inputs, routes['/flags'].inputs_complete]).toEqual([order, { value: 'bool' }, true]);
+    }
+    // Without the live app the scope isn't known, and the $id is defined twice: unresolved.
+    const list = path.join(dir, 'routes.json');
+    fs.writeFileSync(list, JSON.stringify([{ method: 'POST', path: '/counts' }]));
+    const output = path.join(dir, 'listed.json');
+    const { io } = capture();
+    expect(await runManifest(['--framework', 'fastify', '--routes', list, '--source', fixture('fastify-scoped'), '--output', output], io)).toBe(0);
+    expect(readRoutes(output)['/counts'].inputs_complete).toBe(false);
+  });
+
+  test('a route\'s own hooks are read for that route alone', async () => {
+    const routes = await runAt('fastify-prehandler');
+    expect(routes['/invoices']).toMatchObject({ inputs: { page: 'float', tenant: 'text' }, inputs_complete: true });
+    expect(routes['/inline']).toMatchObject({ inputs: { region: 'text' }, inputs_complete: true });
+    expect(routes['/plain'].inputs).toEqual({ page: 'float' });
+  });
+
+  test('handlers a factory makes are linked to their source', async () => {
+    const routes = await runAt('fastify-export');
+    for (const route of ['/exports/csv', '/exports/pdf']) {
+      expect([route, routes[route].inputs, routes[route].inputs_complete]).toEqual([route, { since: 'text' }, true]);
+    }
   });
 });
 

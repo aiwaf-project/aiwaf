@@ -35,8 +35,9 @@ function fastifyPlugin(fastify, opts = {}, done) {
   if (!fastify.hasDecorator || !fastify.hasDecorator('aiwafRoutes')) {
     if (fastify.decorate) fastify.decorate('aiwafRoutes', []);
   }
-  fastify.addHook('onRoute', route => {
-    if (Array.isArray(fastify.aiwafRoutes)) fastify.aiwafRoutes.push(route);
+  // With the plugin scope each route is registered in, whose schemas its $refs name.
+  fastify.addHook('onRoute', function recordRoute(route) {
+    if (Array.isArray(fastify.aiwafRoutes)) fastify.aiwafRoutes.push({ ...route, [Symbol.for('aiwaf.fastify.routeOwner')]: this });
   });
 
   if (middleware.ready) {

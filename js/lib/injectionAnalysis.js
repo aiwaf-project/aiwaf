@@ -1669,7 +1669,11 @@ function analyzePath(target = '.', options = {}) {
     const visit = (node, owner) => {
       if (!node || typeof node.type !== 'string') return;
       let inside = owner;
-      if (node.type === 'FunctionDeclaration' && node.id) definitions.push({ function: node.id.name, file: item.display });
+      // Declared functions, and named function expressions, as a factory's
+      // return async function exportReport(request) { ... }.
+      if ((node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression') && node.id) {
+        definitions.push({ function: node.id.name, file: item.display });
+      }
       else if (node.type === 'VariableDeclarator' && node.id && node.id.type === 'Identifier' && node.init
         && ['FunctionExpression', 'ArrowFunctionExpression'].includes(node.init.type)) definitions.push({ function: node.id.name, file: item.display });
       else if ((node.type === 'ClassDeclaration' || node.type === 'ClassExpression') && node.id) inside = node.id.name;

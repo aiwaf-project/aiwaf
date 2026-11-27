@@ -363,3 +363,37 @@ def test_init_says_when_the_engine_cant_check_a_manifest(monkeypatch, tmp_path, 
     monkeypatch.setattr(route_risks, "engine_gaps", lambda manifest, supports=None: ["per-method types (inputs_types_by_method)"])
     _init_fastapi(monkeypatch, tmp_path, "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/a')\ndef a():\n    return {}\n")
     assert "can't check per-method types" in capsys.readouterr().err
+
+
+def test_init_reads_an_optional_body_model_by_its_keys(monkeypatch, tmp_path):
+    routes = _init_fastapi(monkeypatch, tmp_path,
+                           "from typing import Optional\nfrom fastapi import FastAPI\nfrom pydantic import BaseModel\n"
+                           "class Filters(BaseModel):\n    limit: str\n"
+                           "app = FastAPI()\n@app.post('/reports')\ndef run(limit: int = 10, body: Optional[Filters] = None):\n    return {}\n")
+    assert routes["/reports"]["inputs"] == {"limit": "text"}
+    assert routes["/reports"]["inputs_types_by_location"] == {"POST": {"query": {"limit": "int"}}}
+
+
+def test_init_follows_a_route_dependency_that_reads_the_request(monkeypatch, tmp_path):
+    routes = _init_fastapi(monkeypatch, tmp_path,
+                           "from fastapi import Depends, FastAPI, Request\n"
+                           "def current_tenant(request: Request):\n    return request.query_params.get('tenant')\n"
+                           "def anything(request: Request):\n    return dict(request.query_params)\n"
+                           "app = FastAPI()\n"
+                           "@app.get('/invoices', dependencies=[Depends(current_tenant)])\ndef invoices(page: int = 1):\n    return {}\n"
+                           "@app.get('/open', dependencies=[Depends(anything)])\ndef open_route():\n    return {}\n"
+                           "@app.get('/plain')\ndef plain(page: int = 1):\n    return {}\n")
+    assert routes["/invoices"]["inputs"] == {"page": "int", "tenant": "text"} and routes["/invoices"]["inputs_complete"] is True
+    assert routes["/plain"]["inputs"] == {"page": "int"}
+    assert routes["/open"]["inputs_complete"] is False
+
+
+def test_init_links_handlers_a_factory_makes(monkeypatch, tmp_path):
+    routes = _init_fastapi(monkeypatch, tmp_path,
+                           "from fastapi import FastAPI\napp = FastAPI()\n"
+                           "def make_export(fmt):\n    def export(since: str = ''):\n        return {'format': fmt}\n    return export\n"
+                           "for fmt in ('csv', 'pdf'):\n    app.add_api_route(f'/exports/{fmt}', make_export(fmt), methods=['GET'])\n"
+                           "app.add_api_route('/opaque', lambda: {}, methods=['GET'])\n")
+    for path in ("/exports/csv", "/exports/pdf"):
+        assert routes[path]["inputs"] == {"since": "text"} and routes[path]["inputs_complete"] is True
+    assert [reason["code"] for reason in routes["/opaque"]["inputs_incomplete"]] == ["unread_view"]

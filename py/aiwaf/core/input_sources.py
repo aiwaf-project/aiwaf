@@ -446,6 +446,11 @@ def fastapi_inputs(route: Any) -> Optional[dict]:
     for param in bodies:
         embedded = bool(getattr(getattr(param, "field_info", None), "embed", False))
         model = annotation(param)
+        # Optional[Filters] and Annotated[Filters, ...] are the model's own keys, not the
+        # argument's name: an optional body is still that model's object.
+        unwrapped = _object_class(model)
+        if unwrapped is not None and unwrapped is not model and class_fields(unwrapped) is not None:
+            model = unwrapped
         origin = typing.get_origin(model) or model
         if origin in (dict, typing.Any, object) or (isinstance(origin, type) and issubclass(origin, collections.abc.Mapping)):
             # A dict (or Any) body takes whatever names the client sends.
@@ -469,7 +474,13 @@ def fastapi_inputs(route: Any) -> Optional[dict]:
             "request_param_name", "websocket_param_name", "http_connection_param_name"))
         if reads_request and not top:
             call = getattr(node, "call", None)
-            reasons.append(_reason("dependency", f"dependency {getattr(call, '__name__', 'a dependency')} takes the request itself"))
+            # A dependency taking the request is read like a view; what it reads is the route's.
+            read = _dependency_reads(call)
+            if read is None:
+                reasons.append(_reason("dependency", f"dependency {getattr(call, '__name__', 'a dependency')} takes the request itself"))
+            else:
+                for name, kind in read.items():
+                    _merge(found, name, kind)
         for child in getattr(node, "dependencies", ()) or ():
             walk(child, False)
 
@@ -566,6 +577,32 @@ def webargs_inputs(view: Any) -> Optional[dict]:
     exact = bool(closed.get("query") and closed.get("body"))
     covers = [code for code in REASON_CODES if code not in {"raw_body", "unread_view"}] if exact else []
     return {"inputs": found, "covers": covers, "reasons": reasons, "standalone": exact}
+
+
+def _dependency_reads(call: Any) -> Optional[Dict[str, str]]:
+    """What a FastAPI dependency that takes the request reads from it, by reading its source as
+    init reads a view's, or None when its source can't be read or its reads aren't all known."""
+    import inspect
+    import textwrap
+
+    function = getattr(call, "__wrapped__", call)
+    name = getattr(function, "__name__", "")
+    if not name or not callable(function):
+        return None
+    try:
+        source = textwrap.dedent(inspect.getsource(function))
+    except (OSError, TypeError):
+        return None
+    from aiwaf.core.input_schema import source_inputs
+
+    try:
+        entries = source_inputs(source)
+    except (SyntaxError, ValueError, RecursionError):
+        return None
+    for entry in entries:
+        if str(entry.get("function", "")).split(".")[-1] == name:
+            return dict(entry["inputs"]) if entry.get("complete") else None
+    return None
 
 
 def _merged(first: Mapping[str, str], second: Mapping[str, str]) -> Dict[str, str]:
@@ -837,11 +874,6 @@ def _declare(inputs: Dict[str, str], declared: Mapping[str, Any]) -> bool:
     return bool(declared.get("complete", True))
 
 
-def _method_kind(own_types: Mapping[str, Mapping[str, str]], method: str, name: str, found: Mapping[str, str]) -> str:
-    """The type a method checks a name against without a location type: its own, else the route's."""
-    return (own_types.get(str(method).upper()) or {}).get(name) or found.get(name, "text")
-
-
 def finalize_without_code(routes: Dict[str, Any], **sources: Any) -> Dict[str, Any]:
     """finalize without the injection audit (--no-audit, or a scan that failed).
 
@@ -1016,7 +1048,8 @@ def finalize(
         for method, locations in (declared_locations or {}).items():
             for where, types in locations.items():
                 for name, kind in types.items():
-                    if name in found and found[name] != kind and (kind != "text" or _method_kind(own_types, method, name, found) != "text"):
+                    # The route's type is the weakest of the locations', so only a stricter one differs.
+                    if name in found and found[name] != kind:
                         by_location.setdefault(str(method).upper(), {}).setdefault(where, {})[name] = kind
         if by_location:
             data["inputs_types_by_location"] = by_location

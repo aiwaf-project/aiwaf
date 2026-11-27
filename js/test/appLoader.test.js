@@ -111,8 +111,11 @@ describe('captureFastifyRoutes', () => {
     expect([wrapped.default, wrapped.fastify, wrapped.extra]).toEqual([wrapped, wrapped, 'kept']);
     const instance = wrapped();
     expect(hooks.map(([name]) => name)).toEqual(['onRoute']);
-    hooks[0][1]({ url: '/x', method: 'GET' });
-    expect(instance[ROUTES]).toEqual([{ url: '/x', method: 'GET' }]);
+    // Fastify calls the hook with the route's plugin scope as this; it's recorded as the owner.
+    const scope = { name: 'plugin scope' };
+    hooks[0][1].call(scope, { url: '/x', method: 'GET' });
+    expect(instance[ROUTES]).toMatchObject([{ url: '/x', method: 'GET' }]);
+    expect(instance[ROUTES][0][require('../lib/appLoader').OWNER]).toBe(scope);
     // An instance without hooks still loads.
     const bare = function bareFastify() { return {}; };
     captureFastifyRoutes(fixture('fastify', 'app.js'), { [resolved]: { exports: bare } }, () => bare)();

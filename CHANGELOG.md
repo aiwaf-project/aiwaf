@@ -7,6 +7,26 @@
   1.3.4 declares `aiwaf-wasm ^0.2.13`, since the lockfile can't name an unpublished version: once
   0.2.14 is published, raise it to `^0.2.14` and refresh the lockfile before tagging `js-v1.3.4`.
   With 0.2.13 the per-method types below are ignored, and the agreed type is checked instead.
+- **Fastify `$ref`s resolve in their own scope:** sibling plugins that reuse a schema `$id`
+  for different schemas gave every route the last one (both routes the boolean, both complete).
+  Each recorded route now keeps the plugin scope it was registered in (init's capture and the
+  AIWAF plugin's `onRoute` hook both record `this`), and its `$ref`s resolve against that scope's
+  `getSchemas()`, its own and its parents'. A route whose scope isn't known only takes an `$id`
+  the source defines once; otherwise the reference stays unresolved and the route incomplete.
+- **FastAPI optional body models:** `body: Optional[Filters] = None` saved the argument name
+  `body` as a request key and lost the model's own fields; the model is read through
+  `Optional` and `Annotated` now.
+- **Route-local dependencies and hooks are followed:** a FastAPI route dependency that takes the
+  request (`dependencies=[Depends(current_tenant)]`) is read from its source like a view, and
+  what it reads (`tenant`) goes to the routes using it; one whose reads aren't all known keeps
+  the `dependency` reason. A Fastify route's own `preHandler`, `onRequest`, `preParsing`,
+  `preValidation` or `preSerialization` hooks, inline, in an array or by name, are read for that
+  route alone; one that can't be read keeps the `middleware` reason.
+- **Handlers a factory makes are linked:** a handler returned by a factory
+  (`def make_export(fmt): def export(...)`, `function makeExport(format) { return async function
+  exportReport(...) }`) is linked to its routes when the source defines its name once, even when
+  several routes share it, so they're audited and complete. A handler nothing names, as a
+  lambda, keeps `unread_view`.
 - **Query and body types apart:** a name sent in both locations with different types (a
   query `limit` that's an integer, a JSON `limit` that's text) keeps each location's type in the
   new `inputs_types_by_location`, and the engines (aiwaf-rust, aiwaf-wasm, Java) check each value

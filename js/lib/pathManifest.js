@@ -893,16 +893,29 @@ function buildFrameworkManifest(framework, app, options = {}) {
   }
   // Fastify schemas that $ref shared ones (fastify.addSchema): resolved from the live app's
   // getSchemas() and the source's literal addSchema calls.
+  // A route's $refs name the schemas of the plugin scope it's registered in (fastify.addSchema in
+  // that scope or a parent), which siblings may define differently under one $id. So each route
+  // resolves against its own scope's getSchemas(); one whose scope isn't known only takes an $id
+  // the source defines once, and an unresolved reference leaves its list incomplete.
   if (normalized === 'fastify' && Array.isArray(options.routes) && options.routes.some(route => route && route.schema)) {
-    let registry = {};
+    let fromSource = {};
     try {
-      if (handlerSource) registry = { ...require('./sourceRoutes').sourceSchemas(handlerSource) };
+      if (handlerSource) fromSource = require('./sourceRoutes').sourceSchemas(handlerSource);
     } catch (_) { /* source schemas are a bonus */ }
-    try {
-      if (app && typeof app.getSchemas === 'function') Object.assign(registry, app.getSchemas() || {});
-    } catch (_) { /* a Fastify without getSchemas */ }
     const { resolveRefs } = require('./frameworkInputs');
-    options = { ...options, routes: options.routes.map(route => (route && route.schema ? { ...route, schema: resolveRefs(route.schema, registry) } : route)) };
+    const owner = Symbol.for('aiwaf.fastify.routeOwner');
+    options = {
+      ...options,
+      routes: options.routes.map(route => {
+        if (!route || !route.schema) return route;
+        let registry = fromSource;
+        const scope = route[owner];
+        if (scope && typeof scope.getSchemas === 'function') {
+          try { registry = scope.getSchemas() || {}; } catch (_) { registry = {}; }
+        }
+        return { ...route, schema: resolveRefs(route.schema, registry) };
+      })
+    };
   }
   const extractors = {
     express: () => options.routes ? extractNextRoutes(options.routes) : extractExpressRoutes(app),

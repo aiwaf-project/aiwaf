@@ -1499,9 +1499,21 @@ def analyze_path(path: str = ".", *, include_tests: bool = False) -> dict:
     for analyzer in analyzers:
         findings.extend(analyzer.findings.values())
         if analyzer.filename not in failed:
-            for node in getattr(analyzer.tree, "body", ()):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    definitions.append({"function": node.name, "file": analyzer.filename})
+            top = [node for node in getattr(analyzer.tree, "body", ()) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+            for node in top:
+                definitions.append({"function": node.name, "file": analyzer.filename})
+            # Handlers a factory makes, as def make_export(fmt): def export(...): ... return export.
+            # FastAPI and Flask name them by their own name, so one defined once in the file is linked.
+            inner: Dict[str, int] = {}
+            for node in top:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    for child in ast.walk(node):
+                        if child is not node and isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            inner[child.name] = inner.get(child.name, 0) + 1
+            names = {node.name for node in top}
+            for name, count in sorted(inner.items()):
+                if count == 1 and name not in names:
+                    definitions.append({"function": name, "file": analyzer.filename})
             try:
                 inputs.extend(module_inputs(analyzer.tree, analyzer.filename, input_modules.get(analyzer.filename)))
             except RecursionError:
