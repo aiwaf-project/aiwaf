@@ -21,6 +21,11 @@
   middleware) defined inside the plugin callback, as a function or a `const` arrow, is now found
   and read for that route alone; a sibling route doesn't inherit its reads. A route whose
   schema still allows other keys stays incomplete.
+- **Hook names resolve as JavaScript does:** a named hook or route middleware resolves to its
+  nearest lexical binding (the plugin callback's own function, then an enclosing one), and to a
+  module function only when nothing closer binds the name. A plugin-local `readTenant` read the
+  module-level one of the same name instead. A local binding the reader can't follow (a
+  parameter, a `require()`, a destructured option) leaves the route incomplete.
 - **FastAPI optional body models:** `body: Optional[Filters] = None` saved the argument name
   `body` as a request key and lost the model's own fields; the model is read through
   `Optional` and `Annotated` now.

@@ -578,26 +578,51 @@ function fileInputs(ast, filename, source, label, scope = null) {
   // The functions around the node being visited, innermost last: a hook or middleware named in a
   // route call may be defined in one of them, as inside a Fastify plugin's callback.
   const enclosing = [];
+  const SHADOWED = Symbol('bound locally to something not read');
+  // The nearest binding of name in the enclosing functions, as JavaScript resolves it: a function
+  // declared or assigned there; SHADOWED for any other local binding (a parameter, a require(),
+  // a destructured name), which hides a module function of the same name; null when none binds it.
+  const binds = (pattern, name) => {
+    if (!pattern) return false;
+    if (pattern.type === 'Identifier') return pattern.name === name;
+    if (pattern.type === 'AssignmentPattern') return binds(pattern.left, name);
+    if (pattern.type === 'RestElement') return binds(pattern.argument, name);
+    if (pattern.type === 'ArrayPattern') return pattern.elements.some(item => binds(item, name));
+    if (pattern.type === 'ObjectPattern') return pattern.properties.some(item => binds(item.type === 'RestElement' ? item : item.value, name));
+    return false;
+  };
   const localFunction = name => {
     for (let index = enclosing.length - 1; index >= 0; index -= 1) {
-      const body = enclosing[index].body;
+      const fn = enclosing[index];
+      const body = fn.body;
       for (const statement of (body && body.type === 'BlockStatement' ? body.body : [])) {
         if (statement.type === 'FunctionDeclaration' && statement.id && statement.id.name === name) return statement;
+        if (statement.type === 'ClassDeclaration' && statement.id && statement.id.name === name) return SHADOWED;
         if (statement.type !== 'VariableDeclaration') continue;
         for (const declaration of statement.declarations) {
-          if (declaration.id.type === 'Identifier' && declaration.id.name === name && isFunction(declaration.init)) return declaration.init;
+          if (!binds(declaration.id, name)) continue;
+          return declaration.id.type === 'Identifier' && isFunction(declaration.init) ? declaration.init : SHADOWED;
         }
       }
+      if ((fn.params || []).some(parameter => binds(parameter, name))) return SHADOWED;
+      if (fn.id && fn.id.name === name && fn.type !== 'FunctionDeclaration') return fn;
     }
     return null;
   };
-  // A named hook or middleware: one of the project's module functions, else one in an enclosing scope.
+  // A named hook or middleware: the nearest lexical binding first, then the project's module
+  // functions. A local name that isn't a function the reader can follow resolves to nothing, so
+  // the route stays incomplete rather than reading a module function the code doesn't call.
   const named = reference => {
     if (!reference || !(reference.type === 'Identifier' || isMember(reference))) return null;
-    const own = lookup(scope, 'function', dotted(reference));
-    if (own) return own;
-    const local = reference.type === 'Identifier' ? localFunction(reference.name) : null;
-    return local ? { node: local, scope } : null;
+    if (reference.type === 'Identifier') {
+      const local = localFunction(reference.name);
+      if (local === SHADOWED) return null;
+      if (local) return { node: local, scope };
+    } else {
+      const root = (function rootOf(node) { return isMember(node) ? rootOf(node.object) : node; }(reference));
+      if (root && root.type === 'Identifier' && localFunction(root.name)) return null;
+    }
+    return lookup(scope, 'function', dotted(reference));
   };
   const visit = (node, parent) => {
     if (isFunction(node)) enclosing.push(node);

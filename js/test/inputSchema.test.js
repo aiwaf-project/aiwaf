@@ -330,3 +330,37 @@ test('an input used whole through a built-in is no nested key; a hook is marked'
   const entries = fileInputs(ast, 'app.js', '', () => 'hook');
   expect(entries.map(entry => entry.hook)).toEqual(['preHandler', undefined]);
 });
+
+test('a hook resolves to the binding JavaScript would use', () => {
+  const found = inputs(`
+    async function check(request) { request.r = request.query.region; }
+    const hooks = { check };
+    fastify.register(async app => {
+      const [first, ...rest] = [check];
+      const { a, ...others } = {};
+      class check2 {}
+      app.get('/array', { preHandler: first }, async () => ({}));
+      app.get('/rest', { preHandler: rest }, async () => ({}));
+      app.get('/object-rest', { preHandler: others }, async () => ({}));
+      app.get('/class', { preHandler: check2 }, async () => ({}));
+      app.get('/member', { preHandler: hooks.check }, async () => ({}));
+    });
+    fastify.register(async (app, hooks) => {
+      app.get('/shadowed-member', { preHandler: hooks.check }, async () => ({}));
+    });
+    fastify.register(async function plugin(app) {
+      app.get('/self', { preHandler: plugin }, async () => ({}));
+    });
+    fastify.register(async app => {
+      const named = async function own(request) { request.t = request.query.tenant; };
+      app.get('/named', { preHandler: named }, async () => ({}));
+    });
+  `);
+  // Bindings the reader can't follow, local or a function inside an object, stay unknown.
+  for (const route of ['/array', '/rest', '/object-rest', '/class', '/shadowed-member', '/member']) {
+    expect([route, found[route][1]]).toEqual([route, false]);
+  }
+  expect(found['/named']).toEqual([{ tenant: 'text' }, true]);
+  // The plugin function itself takes no request: it reads nothing for the route.
+  expect(found['/self']).toEqual([{}, true]);
+});

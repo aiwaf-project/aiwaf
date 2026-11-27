@@ -288,6 +288,18 @@ describe('scoped schemas, route hooks and factory handlers', () => {
     expect(routes['/open'].inputs_incomplete.map(item => item.code)).toEqual(['container_whole']);
   });
 
+  test('a hook name resolves to its nearest binding, as JavaScript runs it', async () => {
+    const routes = await runAt('fastify-shadowed');
+    expect(routes['/local']).toMatchObject({ inputs: { tenant: 'text' }, inputs_complete: true });
+    expect(routes['/nested']).toMatchObject({ inputs: { tenant: 'text' }, inputs_complete: true });
+    expect(routes['/module']).toMatchObject({ inputs: { region: 'text' }, inputs_complete: true });
+    // A local binding the reader can't follow hides the module function: unknown, not wrong.
+    for (const route of ['/option', '/required']) {
+      expect([route, routes[route].inputs, routes[route].inputs_complete]).toEqual([route, {}, false]);
+      expect(routes[route].inputs.region).toBeUndefined();
+    }
+  });
+
   test('handlers a factory makes are linked to their source', async () => {
     const routes = await runAt('fastify-export');
     for (const route of ['/exports/csv', '/exports/pdf']) {
