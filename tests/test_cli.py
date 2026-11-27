@@ -100,8 +100,109 @@ def test_detect_calls_django_trainer(monkeypatch):
 
     calls = []
     monkeypatch.setattr("aiwaf.django.trainer.train", lambda: calls.append(True))
+    cli.aiwaf_detect([])
+    assert calls == [True]
+
+
+def test_detect_reads_its_arguments_from_the_command_line(monkeypatch):
+    from aiwaf import cli
+
+    calls = []
+    monkeypatch.setattr("aiwaf.django.trainer.train", lambda: calls.append(True))
+    monkeypatch.setattr(sys, "argv", ["aiwaf-detect"])
     cli.aiwaf_detect()
     assert calls == [True]
+
+
+def test_detect_without_django_says_to_install_it(monkeypatch, capsys):
+    from aiwaf import cli
+
+    monkeypatch.setitem(sys.modules, "django", None)
+    with pytest.raises(SystemExit) as exit_info:
+        cli.aiwaf_detect([])
+    assert exit_info.value.code == 1
+    assert "pip install aiwaf[django]" in capsys.readouterr().err
+
+
+def test_detect_sets_up_django_when_settings_are_configured_but_apps_are_not(monkeypatch):
+    import django
+    from django.apps import apps
+    from aiwaf import cli
+
+    calls = []
+    monkeypatch.setattr(apps, "ready", False)
+    monkeypatch.setattr(django, "setup", lambda: calls.append("setup"))
+    monkeypatch.setattr("aiwaf.django.trainer.train", lambda: calls.append("train"))
+    cli.aiwaf_detect([])
+    assert calls == ["setup", "train"]
+
+
+def test_detect_reports_a_django_setup_failure(monkeypatch):
+    import django
+    from django.apps import apps
+    from aiwaf import cli
+
+    def broken():
+        raise RuntimeError("bad INSTALLED_APPS")
+
+    monkeypatch.setattr(apps, "ready", False)
+    monkeypatch.setattr(django, "setup", broken)
+    with pytest.raises(SystemExit) as exit_info:
+        cli.aiwaf_detect([])
+    assert str(exit_info.value) == "Could not initialize Django settings: bad INSTALLED_APPS"
+
+
+def test_detect_reports_why_the_trainer_could_not_load(monkeypatch):
+    from aiwaf import cli
+
+    monkeypatch.setitem(sys.modules, "aiwaf.django.trainer", None)
+    with pytest.raises(SystemExit) as exit_info:
+        cli.aiwaf_detect([])
+    message = str(exit_info.value)
+    assert message.startswith("Could not load the AIWAF Django trainer:")
+    assert "pip install" not in message
+
+
+def _run_detect(cwd, *args):
+    import os
+    import subprocess
+    from pathlib import Path
+
+    env = {key: value for key, value in os.environ.items() if key != "DJANGO_SETTINGS_MODULE"}
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "py")
+    return subprocess.run(
+        [sys.executable, "-c", "from aiwaf.cli import aiwaf_detect; aiwaf_detect()", *args],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def test_detect_outside_a_project_says_how_to_point_at_settings(tmp_path):
+    result = _run_detect(tmp_path)
+    assert result.returncode == 1
+    assert "Django settings are not configured" in result.stderr
+    assert "--settings" in result.stderr
+    assert "pip install" not in result.stderr
+
+
+def test_detect_finds_the_settings_manage_py_names(tmp_path):
+    (tmp_path / "manage.py").write_text(
+        "import os\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'missingproject.settings')\n",
+        encoding="utf-8",
+    )
+    result = _run_detect(tmp_path)
+    assert result.returncode == 1
+    assert "Could not initialize Django settings" in result.stderr
+    assert "missingproject" in result.stderr
+
+
+def test_detect_settings_flag_names_the_module(tmp_path):
+    result = _run_detect(tmp_path, "--settings", "otherproject.settings")
+    assert result.returncode == 1
+    assert "otherproject" in result.stderr
 
 
 VULNERABLE_VIEW = (

@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 import importlib
 from aiwaf.core import storage_csv_impl as csv_impl
+from aiwaf.core.storage_schema import ALLOWLIST_CSV, move_legacy_list_files
 
 def get_storage_instance():
     """Get storage instance based on available configuration."""
@@ -49,7 +50,8 @@ def get_storage_instance():
             """Read allowlist from CSV."""
             data_dir = Path(_get_data_dir())
             data_dir.mkdir(parents=True, exist_ok=True)
-            allowlist_file = data_dir / 'whitelist.csv'
+            move_legacy_list_files(data_dir)
+            allowlist_file = data_dir / ALLOWLIST_CSV
             
             allowlist = set()
             if allowlist_file.exists():
@@ -130,7 +132,8 @@ def get_storage_instance():
             """Add IP to allowlist CSV."""
             data_dir = Path(_get_data_dir())
             data_dir.mkdir(exist_ok=True)
-            allowlist_file = data_dir / 'whitelist.csv'
+            move_legacy_list_files(data_dir)
+            allowlist_file = data_dir / ALLOWLIST_CSV
             
             # Check if file exists and has header
             file_exists = allowlist_file.exists()
@@ -464,7 +467,8 @@ class AIWAFManager:
         """Remove IP from allowlist."""
         try:
             data_dir = Path(self.storage['data_dir']())
-            allowlist_file = data_dir / 'whitelist.csv'
+            move_legacy_list_files(data_dir)
+            allowlist_file = data_dir / ALLOWLIST_CSV
             
             if not allowlist_file.exists():
                 print(f" Allowlist file not found")
@@ -544,7 +548,7 @@ class AIWAFManager:
         legacy = self.legacy_blocklist()
         print(f"\n Legacy Blocklist Entries ({len(legacy)}):")
         for ip, entry in legacy.items():
-            print(f"   {ip} - {entry.get('reason', 'legacy_import')} ({entry.get('reputation_reason', 'legacy_blacklist')})")
+            print(f"   {ip} - {entry.get('reason', 'legacy_import')} ({entry.get('reputation_reason', 'legacy_blocklist')})")
 
     def migrate_blocklist(self) -> int:
         """Force CSV blocklist migration and report legacy entries."""
@@ -578,7 +582,7 @@ class AIWAFManager:
             entry["duration"] = duration_seconds
             entry["expires_at"] = now + duration_seconds if duration_seconds else None
             entry["blocked_at"] = entry.get("blocked_at") or now
-            entry["reputation_reason"] = "legacy_blacklist_converted" if duration_seconds else "legacy_blacklist"
+            entry["reputation_reason"] = "legacy_blocklist_converted" if duration_seconds else "legacy_blocklist"
             current[ip] = entry
         if changed:
             self.storage['rewrite_blocklist'](current)
@@ -1384,8 +1388,8 @@ def main():
                             BlocklistedIP.blocked_at.is_(None),
                         ).update(
                             {
-                                BlocklistedIP.reputation_reason: "legacy_blacklist",
-                                BlocklistedIP.reasons: ["legacy_blacklist"],
+                                BlocklistedIP.reputation_reason: "legacy_blocklist",
+                                BlocklistedIP.reasons: ["legacy_blocklist"],
                                 BlocklistedIP.score: 100,
                                 BlocklistedIP.offenses: 1,
                                 BlocklistedIP.permanent: True,

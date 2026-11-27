@@ -115,7 +115,7 @@ def test_keyword_learning_and_reputation_files(tmp_path):
     e = engine(tmp_path, enabled=["ip_keyword_block"])
     assert begin(e, path="/../shell/shell.php")[1] == 403
     assert "shell" in {row["keyword"] for row in rows(tmp_path, "keywords.csv")}
-    blocked = rows(tmp_path, "blacklist.csv")
+    blocked = rows(tmp_path, "blocklist.csv")
     assert blocked[0]["ip"] == "8.8.8.8"
     assert int(blocked[0]["offenses"]) == 1
     assert begin(e, path="/known", exists=True)[1] == 403
@@ -142,14 +142,14 @@ def test_concurrent_rate_consumption_is_atomic(tmp_path, backend):
 def test_rate_flood_and_soft_blocklist(tmp_path):
     e = engine(tmp_path, enabled=["rate_limit"], rate_max=1, rate_flood=2)
     assert [begin(e)[1] for _ in range(3)] == [0, 429, 403]
-    assert rows(tmp_path, "blacklist.csv")[0]["reason"] == "Flood pattern"
+    assert rows(tmp_path, "blocklist.csv")[0]["reason"] == "Flood pattern"
 
 
 def test_exemption_and_disabled_stages(tmp_path):
     e = engine(tmp_path, enabled=["ip_keyword_block", "header_validation"], exempt_paths=["/safe"])
     assert begin(e, path="/safe/child", query=b"q=1 union select 1")[1] == 0
     assert begin(e, query=b"q=1 union select 1", disabled=["ip_keyword_block", "header_validation"])[1] == 0
-    rust.csv_write(str(tmp_path / "whitelist.csv"), ["ip", "added_date"], [["8.8.8.8", "today"]], False)
+    rust.csv_write(str(tmp_path / "allowlist.csv"), ["ip", "added_date"], [["8.8.8.8", "today"]], False)
     assert begin(e, query=b"q=1 union select 1")[1] == 0
 
 
@@ -157,7 +157,7 @@ def test_geo_first_and_header_policy_parity(tmp_path):
     e = engine(tmp_path, enabled=["geo_block", "ip_keyword_block", "header_validation"], geo_block=["cn"])
     ctx, status, _ = begin(e, country="CN", query=b"q=1 union select 1")
     assert status == 403
-    assert rows(tmp_path, "blacklist.csv")[0]["reason"] == "Geo blocked: CN"
+    assert rows(tmp_path, "blocklist.csv")[0]["reason"] == "Geo blocked: CN"
     h = engine(tmp_path / "h", enabled=["header_validation"])
     for headers in ({}, {"HTTP_USER_AGENT":"curl/8.0", "HTTP_ACCEPT":"*/*"},
                     {"HTTP_USER_AGENT":"Mozilla/5.0", "HTTP_ACCEPT":"text/html", "HTTP_ACCEPT_LANGUAGE":"en-US"}):
@@ -561,7 +561,7 @@ def host_begin(e, path="/x", *, ip="203.0.113.60", country="", query=b"", exists
 def test_host_store_mode_takes_facts_and_returns_effects(tmp_path):
     e = engine(tmp_path, enabled=["ip_keyword_block", "geo_block"], policy_store="host")
     # No policy CSV files: the host's stores hold that state.
-    assert not any((tmp_path / name).exists() for name in ("blacklist.csv", "whitelist.csv", "keywords.csv"))
+    assert not any((tmp_path / name).exists() for name in ("blocklist.csv", "allowlist.csv", "keywords.csv"))
     ctx, status, _ = host_begin(e, blocked=True)
     assert status == 403 and ctx.take_effects() == []
     ctx, status, _ = host_begin(e, country="cn", geo_countries={"CN"})

@@ -13,6 +13,11 @@ import logging
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
 
+from aiwaf.core.storage_schema import LEGACY_LIST_FILES
+
+# A data directory may still hold the list files under their earlier names.
+CURRENT_AND_LEGACY_LIST_FILES = [*LEGACY_LIST_FILES.values(), *LEGACY_LIST_FILES]
+
 logger = logging.getLogger(__name__)
 
 
@@ -179,7 +184,7 @@ class AIWAFAutoConfig:
     def _validate_aiwaf_data_dir(self, path: Path) -> bool:
         """Validate that a directory looks like an AIWAF data directory."""
         # Check for characteristic files
-        csv_files = ['whitelist.csv', 'blacklist.csv', 'keywords.csv', 'geo_blocked_countries.csv', 'path_exemptions.csv']
+        csv_files = [*CURRENT_AND_LEGACY_LIST_FILES, 'keywords.csv', 'geo_blocked_countries.csv', 'path_exemptions.csv']
         
         # If any CSV files exist, consider it valid
         if any((path / csv_file).exists() for csv_file in csv_files):
@@ -198,7 +203,8 @@ class AIWAFAutoConfig:
     def _has_policy_files(path: Path) -> bool:
         from aiwaf.core.storage_schema import CSV_HEADERS
 
-        return path.is_dir() and any((path / name).is_file() for name in (*CSV_HEADERS, 'runtime_store.csv'))
+        names = (*CSV_HEADERS, *LEGACY_LIST_FILES, 'runtime_store.csv')
+        return path.is_dir() and any((path / name).is_file() for name in names)
     
     def _detect_project_structure(self) -> bool:
         """Detect project structure and infer best data directory location."""
@@ -507,7 +513,7 @@ class AIWAFAutoConfig:
     def _calculate_data_directory_score(self, path: Path) -> int:
         """Calculate a score for a data directory based on its contents."""
         score = 0
-        csv_files = ['whitelist.csv', 'blacklist.csv', 'keywords.csv', 'geo_blocked_countries.csv', 'path_exemptions.csv']
+        csv_files = [*CURRENT_AND_LEGACY_LIST_FILES, 'keywords.csv', 'geo_blocked_countries.csv', 'path_exemptions.csv']
         
         for csv_file in csv_files:
             csv_path = path / csv_file

@@ -11,7 +11,7 @@ except Exception:
 sys.path.insert(0, repo_root)
 
 # Default CSV storage dir for Flask tests that don't set `AIWAF_DATA_DIR` explicitly.
-# This prevents local repo state (e.g. `aiwaf_data/whitelist.csv`) from affecting tests.
+# This prevents local repo state (e.g. `aiwaf_data/allowlist.csv`) from affecting tests.
 if "AIWAF_DATA_DIR" not in os.environ:
     import tempfile
 

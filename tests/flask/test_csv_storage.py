@@ -52,7 +52,7 @@ def test_csv_allowlist_operations(csv_app_context):
     
     # Check CSV file was created and contains the IP
     data_dir = Path(csv_app_context.config['AIWAF_DATA_DIR'])
-    allowlist_file = data_dir / 'whitelist.csv'
+    allowlist_file = data_dir / 'allowlist.csv'
     assert allowlist_file.exists()
     
     with open(allowlist_file, 'r') as f:
@@ -73,7 +73,7 @@ def test_csv_blocklist_operations(csv_app_context):
     
     # Check CSV file was created and contains the IP
     data_dir = Path(csv_app_context.config['AIWAF_DATA_DIR'])
-    blocklist_file = data_dir / 'blacklist.csv'
+    blocklist_file = data_dir / 'blocklist.csv'
     assert blocklist_file.exists()
     
     with open(blocklist_file, 'r') as f:
@@ -115,14 +115,14 @@ def test_csv_file_creation(csv_app_context):
     add_keyword('test')
     
     # Check allowlist file
-    allowlist_file = data_dir / 'whitelist.csv'
+    allowlist_file = data_dir / 'allowlist.csv'
     with open(allowlist_file, 'r') as f:
         reader = csv.reader(f)
         headers = next(reader)
         assert headers == ['ip', 'added_date']
     
     # Check blocklist file
-    blocklist_file = data_dir / 'blacklist.csv'
+    blocklist_file = data_dir / 'blocklist.csv'
     with open(blocklist_file, 'r') as f:
         reader = csv.reader(f)
         headers = next(reader)
@@ -146,7 +146,7 @@ def test_csv_duplicate_handling(csv_app_context):
     
     # Should still only appear once
     data_dir = Path(csv_app_context.config['AIWAF_DATA_DIR'])
-    allowlist_file = data_dir / 'whitelist.csv'
+    allowlist_file = data_dir / 'allowlist.csv'
     
     with open(allowlist_file, 'r') as f:
         content = f.read()
@@ -167,7 +167,7 @@ def test_csv_persistence_across_operations(csv_app_context):
     
     # Verify data persists by checking file directly
     data_dir = Path(csv_app_context.config['AIWAF_DATA_DIR'])
-    allowlist_file = data_dir / 'whitelist.csv'
+    allowlist_file = data_dir / 'allowlist.csv'
     assert allowlist_file.exists()
     
     with open(allowlist_file, 'r') as f:
@@ -203,7 +203,7 @@ def test_csv_error_handling(csv_app_context):
     data_dir = Path(csv_app_context.config['AIWAF_DATA_DIR'])
     
     # Create a file with same name as expected directory
-    invalid_file = data_dir / 'whitelist.csv'
+    invalid_file = data_dir / 'allowlist.csv'
     invalid_file.parent.mkdir(exist_ok=True)
     
     # Try operations that should handle errors gracefully

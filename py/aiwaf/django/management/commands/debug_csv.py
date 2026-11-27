@@ -1,5 +1,6 @@
 from django.core.management.base import BaseCommand
 from aiwaf.core.logs import csv_log_path
+from aiwaf.core.storage_schema import ALLOWLIST_CSV, BLOCKLIST_CSV, move_legacy_list_files
 import os
 import csv
 
@@ -50,7 +51,8 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.SUCCESS(f" Created CSV directory: {csv_dir}"))
         
         # Check CSV files
-        csv_files = ['blacklist.csv', 'exemptions.csv', 'keywords.csv']
+        move_legacy_list_files(csv_dir)
+        csv_files = [BLOCKLIST_CSV, ALLOWLIST_CSV, 'exemptions.csv', 'keywords.csv']
         for filename in csv_files:
             filepath = os.path.join(csv_dir, filename)
             if os.path.exists(filepath):

@@ -38,7 +38,7 @@ def test_cli_listing_filters_expired_rows_without_rewriting_the_file(tmp_path, m
     policy.rewrite_blocklist(tmp_path, {'203.0.113.9': {
         'reason': 'old block', 'expires_at': time.time() - 1,
         'blocked_at': time.time() - 901, 'duration': 900}})
-    path = tmp_path / 'blacklist.csv'
+    path = tmp_path / 'blocklist.csv'
     before = path.read_bytes()
     assert cli.get_storage_instance()['read_blocklist']() == {}
     assert path.read_bytes() == before

@@ -987,7 +987,7 @@ pub fn csv_runtime_block(
         let score = old.get("score").and_then(|v| v.as_i64()).unwrap_or(if old.is_string() {100} else {0});
         let offenses = old.get("offenses").and_then(|v| v.as_i64()).unwrap_or(if old.is_string() {1} else {0});
         let reasons = if let Some(reason) = old.as_str() {
-            vec!["legacy_blacklist".into(), reason.into()]
+            vec!["legacy_blocklist".into(), reason.into()]
         } else {
             match old.get("reasons").filter(|v| !v.is_null() && v.as_array().is_none_or(|a| !a.is_empty()))
                 .or_else(|| old.get("reason")) {

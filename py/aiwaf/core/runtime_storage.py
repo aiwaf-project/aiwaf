@@ -610,8 +610,8 @@ class BlocklistStore:
         return {
             "ip": ip,
             "reason": str(value),
-            "reputation_reason": "legacy_blacklist",
-            "reasons": ["legacy_blacklist", str(value)],
+            "reputation_reason": "legacy_blocklist",
+            "reasons": ["legacy_blocklist", str(value)],
             "score": 100,
             "offenses": 1,
             "blocked_at": None,

@@ -39,14 +39,14 @@ the supported Redis backends when sharing limits across workers.
 
 Each package is versioned and released independently.
 
-Python 1.3.4, Rust/Python 0.2.18, Node.js 1.3.4, WASM 0.2.14, and Java 1.4.0 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
+Python 1.3.4, Rust/Python 0.2.19, Node.js 1.3.4, WASM 0.2.15, and Java 1.4.0 are local source targets. See the package table below and [CHANGELOG](CHANGELOG.md) for release changes.
 
 | Runtime | Package | Repository version | Primary use |
 | --- | --- | ---: | --- |
 | Python | [`aiwaf`](https://pypi.org/project/aiwaf/) | `1.3.4` | Django, Flask, and FastAPI protection |
 | Node.js | [`aiwaf`](https://www.npmjs.com/package/aiwaf) | `1.3.4` | Express and Node framework middleware |
-| Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.18` | Native Python acceleration and JSON model inference |
-| WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.14` | Rust detection and model primitives for JavaScript |
+| Rust/Python | [`aiwaf-rust`](https://pypi.org/project/aiwaf-rust/) | `0.2.19` | Native Python acceleration and JSON model inference |
+| WebAssembly | [`aiwaf-wasm`](https://www.npmjs.com/package/aiwaf-wasm) | `0.2.15` | Rust detection and model primitives for JavaScript |
 | Java | `io.github.aiwaf-project:aiwaf-java` | `1.4.0` | Spring MVC and Jakarta Servlet protection |
 
 Supported framework integrations include Django, Flask, FastAPI, Express, Fastify, Hapi, Koa, NestJS, Next.js API routes, AdonisJS, Sails.js, Spring MVC, and Jakarta Servlet.
@@ -660,7 +660,7 @@ Java 1.4.0, after it is published to Maven Central:
 
 The Python package requires Python 3.10 or newer. Framework dependencies are optional, so install only the extra needed by the application.
 
-Python 1.3.4 requires `aiwaf-rust>=0.2.18`; the `rust` extra remains an installation
+Python 1.3.4 requires `aiwaf-rust>=0.2.19`; the `rust` extra remains an installation
 alias. Publish the matching Rust wheel with `NativeCSVPipeline` support before
 the Python release. The Rust release workflow builds Linux x86_64/aarch64,
 musl x86_64, macOS x86_64/arm64 and Windows x86_64 wheels and checks the native
@@ -1302,8 +1302,10 @@ overrides discovery, including for a new directory. Set the same absolute
 working directories.
 
 Flask, FastAPI, Django CSV mode, and the native Rust pipeline now use the same
-policy files: `blacklist.csv`, `whitelist.csv`, `keywords.csv`,
-`geo_blocked_countries.csv`, and `path_exemptions.csv`. For FastAPI, configure
+policy files: `blocklist.csv`, `allowlist.csv`, `keywords.csv`,
+`geo_blocked_countries.csv`, and `path_exemptions.csv`. A data directory from before 1.3.4
+that still has `blacklist.csv` or `whitelist.csv` has them renamed the first time AIWAF opens
+it; if both names exist, the new file is used and the old one is left alone. For FastAPI, configure
 `storage.backend = "csv"` and `storage.data_dir = "/absolute/path/aiwaf_data"`;
 `AIWAF_DATA_DIR` also supplies the directory. Memory, JSON-file, database, and
 Django ORM modes retain their existing storage behavior.
@@ -2068,8 +2070,8 @@ Release versions and tags must match the relevant manifest.
 | --- | --- | --- | --- |
 | Python `aiwaf` | `pyproject.toml` | `python-v1.3.4` | `python-publish.yml` |
 | npm `aiwaf` | `js/package.json` | `js-v1.3.4` | `npm-publish.yml` |
-| PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.18` | `rust-publish.yml` |
-| npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.14` | `wasm-publish.yml` |
+| PyPI `aiwaf-rust` | `rust/pyproject.toml` + `rust/Cargo.toml` | `rust-v0.2.19` | `rust-publish.yml` |
+| npm `aiwaf-wasm` | `rust/crates/aiwaf_wasm/Cargo.toml` | `wasm-v0.2.15` | `wasm-publish.yml` |
 | Maven `aiwaf-java` | `java/pom.xml` | `java-v1.4.0` | `java-publish.yml` |
 
 Python and Rust publish to PyPI with trusted publishing. The npm workflows use npm trusted publishing and stage packages for approval. Configure the trusted publisher with organization `aiwaf-project`, repository `aiwaf`, the exact workflow filename, and the environment used by that workflow.
@@ -2078,13 +2080,13 @@ Java publishing uses the protected `maven-publish` environment plus `GPG_PRIVATE
 
 Registry releases are immutable. Increment the relevant manifest version before publishing another release.
 
-This release is Python `aiwaf 1.3.4`, npm `aiwaf 1.3.4`, `aiwaf-rust 0.2.18` and
-`aiwaf-wasm 0.2.14`: per-method input types, input rules that hold per method and handler,
-Fastify `$ref` schemas and nested keys, and routes `init` used to miss. Python 1.3.3, npm 1.3.3,
-`aiwaf-rust 0.2.17` and `aiwaf-wasm 0.2.13` are published. Publish `aiwaf-rust 0.2.18` before
-Python 1.3.4, which requires it. npm 1.3.4 still declares `aiwaf-wasm ^0.2.13`, because the
-lockfile can't name an unpublished version; once 0.2.14 is published, raise it to `^0.2.14`
-and refresh the lockfile before tagging `js-v1.3.4`. Java 1.4.0 isn't on Maven Central yet.
+This release is Python `aiwaf 1.3.4`, npm `aiwaf 1.3.4`, `aiwaf-rust 0.2.19` and
+`aiwaf-wasm 0.2.15`: per-method input types, input rules that hold per method and handler,
+Fastify `$ref` schemas and nested keys, routes `init` used to miss, and the list files renamed
+to `allowlist.csv` and `blocklist.csv`. `aiwaf-rust 0.2.18` and `aiwaf-wasm 0.2.14` are
+published. Publish `aiwaf-rust 0.2.19` before Python 1.3.4, which requires it for the renamed
+files. npm 1.3.4 requires `aiwaf-wasm ^0.2.14`, which already reads the current field names, so
+`aiwaf-wasm 0.2.15` can follow. Java 1.4.0 isn't on Maven Central yet.
 
 ## Security and limitations
 

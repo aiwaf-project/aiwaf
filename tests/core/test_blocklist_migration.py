@@ -19,8 +19,8 @@ def test_legacy_metadata_normalizes_reason_and_timestamp():
 
     assert metadata == {
         "reason": "imported block",
-        "reputation_reason": "legacy_blacklist",
-        "reasons": ["legacy_blacklist", "imported block"],
+        "reputation_reason": "legacy_blocklist",
+        "reasons": ["legacy_blocklist", "imported block"],
         "score": 100,
         "offenses": 1,
         "blocked_at": 123.5,

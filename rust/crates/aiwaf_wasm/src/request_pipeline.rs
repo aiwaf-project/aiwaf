@@ -65,7 +65,7 @@ struct Profile {
     learning: bool,
     geo_allow: HashSet<String>,
     geo_block: HashSet<String>,
-    #[serde(rename = "blacklist", alias = "blocklist")]
+    #[serde(alias = "blacklist")]
     blocklist: HashMap<String, f64>,
     rate_window: f64,
     rate_max: usize,

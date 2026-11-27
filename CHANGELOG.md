@@ -1,12 +1,35 @@
 # Changelog
 
-## Python 1.3.4 / aiwaf-rust 0.2.18 / Node.js 1.3.4 / WASM 0.2.14 / Java 1.4.0 — prepared release
+## Python 1.3.4 / aiwaf-rust 0.2.19 / Node.js 1.3.4 / WASM 0.2.15 / Java 1.4.0 — prepared release
 
-- **Release note:** publish aiwaf-rust 0.2.18 (`rust-v0.2.18`) before Python 1.3.4, which
-  requires `aiwaf-rust>=0.2.18`, and aiwaf-wasm 0.2.14 (`wasm-v0.2.14`) before npm 1.3.4. npm
-  1.3.4 declares `aiwaf-wasm ^0.2.13`, since the lockfile can't name an unpublished version: once
-  0.2.14 is published, raise it to `^0.2.14` and refresh the lockfile before tagging `js-v1.3.4`.
-  With 0.2.13 the per-method types below are ignored, and the agreed type is checked instead.
+- **Release note:** aiwaf-rust 0.2.18 and aiwaf-wasm 0.2.14 are published. Publish aiwaf-rust
+  0.2.19 (`rust-v0.2.19`) before tagging `python-v1.3.4`: Python 1.3.4 requires
+  `aiwaf-rust>=0.2.19`, the first engine that reads the renamed list files. npm 1.3.4 requires
+  `aiwaf-wasm ^0.2.14`, which already accepts the current field names, so `js-v1.3.4` can be
+  tagged now and aiwaf-wasm 0.2.15 can follow.
+- **Allowlist and blocklist everywhere:** the CSV list files are now `allowlist.csv` and
+  `blocklist.csv`. A data directory that still has `whitelist.csv` or `blacklist.csv` has them
+  renamed the first time Python or the engine opens it; when both names exist, the current file
+  is used and the earlier one is left alone. Run every process on a data directory at 1.3.4 or
+  later, since an older one would start a fresh `blacklist.csv` beside the moved file. Entries
+  imported from the earlier format are marked `legacy_blocklist` (and `legacy_blocklist_converted`),
+  and `legacy_blacklist` rows written before still count as legacy in Python, Node.js and the
+  CLIs. The Django model stays registered as `BlacklistEntry` (use the `BlocklistEntry` name in
+  code): renaming the class would make `makemigrations --noinput` delete and recreate the model,
+  dropping existing blocks in projects that keep their own migrations. Python and Node.js send `blocklist` and
+  `soft_block_blocklist` to the engines instead of the earlier names. Every earlier name (modules,
+  classes, functions, settings, CLI words) still works as an alias.
+- **Python dependency floors raised:** `requests>=2.32.4` (was 2.30), `Django>=5.2` (was 5.0;
+  5.0 and 5.1 no longer get security fixes), `fastapi>=0.116.1` (was 0.100) and
+  `starlette>=0.47.2` (was 0.30), so a fresh install can't resolve to releases missing known
+  security fixes. The FastAPI and Starlette floors are chosen to fit together. `pyproject.toml`
+  and `setup.py` match.
+- **`aiwaf-detect` finds the project's Django settings:** it read settings without setting
+  Django up, so outside `manage.py` it always failed and told you to `pip install aiwaf[django]`
+  even with Django installed. It now finds settings the way `aiwaf django init` does
+  (`--settings`, then `DJANGO_SETTINGS_MODULE`, then the module `manage.py` names), sets Django
+  up, and says which step failed: Django missing, settings not found, Django setup failing, or
+  the trainer failing to load.
 - **Fastify `$ref`s resolve in their own scope:** sibling plugins that reuse a schema `$id`
   for different schemas gave every route the last one (both routes the boolean, both complete).
   Each recorded route now keeps the plugin scope it was registered in (init's capture and the

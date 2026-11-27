@@ -147,7 +147,7 @@ def test_csv_storage_blocklist_extended_request_info_column(csv_app_context):
     ip = "10.10.10.2"
     add_ip_blocklist(ip, "CSV extended", extended_request_info={"path": "/login"})
 
-    csv_file = Path(csv_app_context.config["AIWAF_DATA_DIR"]) / "blacklist.csv"
+    csv_file = Path(csv_app_context.config["AIWAF_DATA_DIR"]) / "blocklist.csv"
     content = csv_file.read_text(encoding="utf-8")
     header = content.splitlines()[0]
     assert "extended_request_info" in header

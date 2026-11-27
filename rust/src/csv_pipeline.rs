@@ -29,6 +29,11 @@ const STAGES: [&str; 8] = [
     "header_validation",
     "logging",
 ];
+const ALLOWLIST_CSV: &str = "allowlist.csv";
+const BLOCKLIST_CSV: &str = "blocklist.csv";
+/// Files written under the earlier list names, moved to the current ones on first use.
+const LEGACY_LIST_FILES: [(&str, &str); 2] = [("whitelist.csv", ALLOWLIST_CSV), ("blacklist.csv", BLOCKLIST_CSV)];
+
 const BLOCKLIST_HEADERS: [&str; 12] = [
     "ip",
     "reason",
@@ -268,6 +273,21 @@ impl Default for Profile {
     }
 }
 
+/// Moves a list file written under its earlier name (whitelist.csv, blacklist.csv) to its current
+/// one. Nothing happens when the current file already exists, so a data directory that has both
+/// keeps using the current file and leaves the earlier one alone.
+fn move_legacy_list(legacy: &str, current: &str) -> PyResult<()> {
+    if Path::new(current).exists() || !Path::new(legacy).exists() {
+        return Ok(());
+    }
+    match std::fs::rename(legacy, current) {
+        Ok(()) => Ok(()),
+        // Another process moved it first.
+        Err(_) if Path::new(current).exists() => Ok(()),
+        Err(error) => Err(PyValueError::new_err(format!("Could not move {legacy} to {current}: {error}"))),
+    }
+}
+
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|s| (*s).into()).collect()
 }
@@ -385,7 +405,7 @@ impl NativeCSVPipeline {
         }
         csv::csv_blocklist_check(
             py,
-            self.file("blacklist.csv"),
+            self.file(BLOCKLIST_CSV),
             strings(&BLOCKLIST_HEADERS),
             f.ip.clone(),
             f.now,
@@ -563,7 +583,7 @@ impl NativeCSVPipeline {
         if self.profile.ip_blocking && !f.exempt {
             csv::csv_blocklist_block(
                 py,
-                self.file("blacklist.csv"),
+                self.file(BLOCKLIST_CSV),
                 strings(&BLOCKLIST_HEADERS),
                 f.ip.clone(),
                 reason.into(),
@@ -578,7 +598,7 @@ impl NativeCSVPipeline {
     fn exempt(&self, py: Python<'_>, ip: &str, path: &str) -> PyResult<bool> {
         if self.profile.exempt_ips.contains(ip)
             || (!self.host()
-                && csv::csv_contains(py, self.file("whitelist.csv"), "ip".into(), ip.into(), true)?)
+                && csv::csv_contains(py, self.file(ALLOWLIST_CSV), "ip".into(), ip.into(), true)?)
         {
             return Ok(true);
         }
@@ -1121,9 +1141,14 @@ impl NativeCSVPipeline {
             honeypot_cache,
             rate_counter,
         };
+        if !pipeline.host() {
+            for (legacy, current) in LEGACY_LIST_FILES {
+                move_legacy_list(&pipeline.file(legacy), &pipeline.file(current))?;
+            }
+        }
         for (name, fields) in [
-            ("whitelist.csv", strings(&["ip", "added_date"])),
-            ("blacklist.csv", strings(&BLOCKLIST_HEADERS)),
+            (ALLOWLIST_CSV, strings(&["ip", "added_date"])),
+            (BLOCKLIST_CSV, strings(&BLOCKLIST_HEADERS)),
             ("keywords.csv", strings(&["keyword", "added_date"])),
             (
                 "geo_blocked_countries.csv",

@@ -208,10 +208,10 @@ class LearningParityTests(ParityTestCase):
     sequences = SequenceParityTests.sequences
 
     def learned(self, native, middleware, **settings):
-        from aiwaf.django.models import BlacklistEntry, DynamicKeyword
+        from aiwaf.django.models import BlocklistEntry, DynamicKeyword
 
         DynamicKeyword.objects.all().delete()
-        BlacklistEntry.objects.all().delete()
+        BlocklistEntry.objects.all().delete()
         statuses = self.sequences(native, middleware, LEARNING, **settings)
         keywords = sorted(DynamicKeyword.objects.values_list("keyword", flat=True))
         return statuses, keywords
@@ -326,9 +326,9 @@ class LoggerParityTests(ParityTestCase):
 
     def logged(self, native, middleware, requests, **settings):
         from aiwaf.core.logs import csv_log_path
-        from aiwaf.django.models import BlacklistEntry
+        from aiwaf.django.models import BlocklistEntry
 
-        BlacklistEntry.objects.all().delete()
+        BlocklistEntry.objects.all().delete()
         ParityTestCase.base += 1
         with TemporaryDirectory() as directory:
             log = os.path.join(directory, "requests.log")

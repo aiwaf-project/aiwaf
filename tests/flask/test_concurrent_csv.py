@@ -297,7 +297,7 @@ class TestConcurrentCSVAccess:
         data_dir = Path(_get_data_dir())
         
         # Check allowlist file
-        allowlist_file = data_dir / "whitelist.csv"
+        allowlist_file = data_dir / "allowlist.csv"
         assert allowlist_file.exists(), "Allowlist CSV file missing"
         
         with open(allowlist_file, 'r') as f:
@@ -306,7 +306,7 @@ class TestConcurrentCSVAccess:
             assert 'ip,added_date' in lines[0], "Allowlist header corrupted"
         
         # Check blocklist file
-        blocklist_file = data_dir / "blacklist.csv"
+        blocklist_file = data_dir / "blocklist.csv"
         assert blocklist_file.exists(), "Blocklist CSV file missing"
         
         with open(blocklist_file, 'r') as f:

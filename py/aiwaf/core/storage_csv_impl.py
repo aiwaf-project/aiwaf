@@ -57,6 +57,7 @@ def native_policy_list_update(data_dir, filename, key, row, remove, mode='exact'
     native = csv_function('csv_policy_list_update')
     if native is None:
         return False
+    ensure_csv_files(Path(data_dir), CSV_HEADERS)
     native(str(data_dir / filename), CSV_HEADERS[filename], key, row, remove, mode)
     return True
 
@@ -98,12 +99,12 @@ def _parse_bool(value):
 def _legacy_blocklist_entry(reason=None, migration_time=None, added_date=None) -> dict:
     blocked_at = time.time() if migration_time is None else migration_time
     legacy_detail = str(reason or "").strip()
-    reasons = ["legacy_blacklist"]
+    reasons = ["legacy_blocklist"]
     if legacy_detail:
         reasons.append(legacy_detail)
     return {
         "reason": "legacy_import",
-        "reputation_reason": "legacy_blacklist",
+        "reputation_reason": "legacy_blocklist",
         "added_date": added_date or now_iso(),
         "extended_request_info": None,
         "score": 100,
@@ -292,10 +293,15 @@ def rewrite_blocklist(data_dir: Path, blocklist: dict):
     return rewrite_csv_rows(data_dir, BLOCKLIST_CSV, rows, CSV_HEADERS)
 
 
+# Entries imported from the earlier list format. "legacy_blacklist" is what versions before
+# 1.3.4 wrote, so data written then is still recognised.
+LEGACY_BLOCKLIST_REASONS = frozenset({"legacy_blocklist", "legacy_blacklist"})
+
+
 def is_legacy_blocklist_entry(entry) -> bool:
     return isinstance(entry, dict) and (
-        entry.get("reputation_reason") == "legacy_blacklist"
-        or "legacy_blacklist" in [str(reason) for reason in (entry.get("reasons") or [])]
+        entry.get("reputation_reason") in LEGACY_BLOCKLIST_REASONS
+        or not LEGACY_BLOCKLIST_REASONS.isdisjoint(str(reason) for reason in (entry.get("reasons") or []))
     )
 
 
@@ -320,7 +326,7 @@ def convert_legacy_blocklist_entries(data_dir: Path, duration: Optional[int] = N
         entry["duration"] = duration
         entry["expires_at"] = now + duration if duration else None
         entry["blocked_at"] = entry.get("blocked_at") or now
-        entry["reputation_reason"] = "legacy_blacklist_converted" if duration else "legacy_blacklist"
+        entry["reputation_reason"] = "legacy_blocklist_converted" if duration else "legacy_blocklist"
         blocklist[ip] = entry
     if changed:
         rewrite_blocklist(data_dir, blocklist)

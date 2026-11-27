@@ -263,15 +263,47 @@ def _native_setup(framework, app) -> str:
     return describe_native_setup(native_config_fastapi(), "fastapi")
 
 
-def aiwaf_detect() -> None:
+def aiwaf_detect(argv=None) -> None:
+    """Train AIWAF for a Django project, finding its settings the way `aiwaf django init` does."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="aiwaf-detect",
+        description="Train AIWAF from a Django project's access logs.",
+    )
+    parser.add_argument(
+        "--settings",
+        help="Django settings module, such as project.settings. Defaults to "
+        "DJANGO_SETTINGS_MODULE, then the one manage.py in this directory names.",
+    )
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+
     try:
-        from aiwaf.django.trainer import train
-    except Exception as exc:
+        import django  # noqa: F401
+    except ImportError as exc:
         sys.stderr.write(
             "aiwaf-detect requires Django integration. Install with:\n"
             "  pip install aiwaf[django]\n"
         )
         raise SystemExit(1) from exc
+
+    from django.conf import settings
+
+    if args.settings or not settings.configured:
+        _configure_django_for_init(args.settings)
+    else:
+        from django.apps import apps
+
+        if not apps.ready:
+            try:
+                django.setup()
+            except Exception as exc:
+                raise SystemExit(f"Could not initialize Django settings: {exc}") from exc
+
+    try:
+        from aiwaf.django.trainer import train
+    except Exception as exc:
+        raise SystemExit(f"Could not load the AIWAF Django trainer: {exc}") from exc
 
     train()
 

@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "aiwaf-wasm"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "aiwaf_core",
  "getrandom",
@@ -50,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "aiwaf_rust"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "aiwaf_core",
  "csv",

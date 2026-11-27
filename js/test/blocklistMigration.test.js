@@ -22,7 +22,30 @@ describe('blocklist schema migration', () => {
     expect(await manager.isBlocked('203.0.113.70')).toBe(true);
     const result = await manager.migrateLegacy();
     expect(result).toEqual({ total: 1, changed: 1 });
-    expect((await manager.getBlockInfo('203.0.113.70')).permanent).toBe(true);
+    const info = await manager.getBlockInfo('203.0.113.70');
+    expect(info.permanent).toBe(true);
+    expect(info.reputation_reason).toBe('legacy_blocklist');
+    await db.destroy();
+  });
+
+  test('rows an earlier version marked legacy_blacklist still convert', async () => {
+    jest.resetModules();
+    jest.dontMock('../utils/db');
+    const db = require('../utils/db');
+    const manager = require('../lib/blocklistManager');
+    await manager.initialize();
+    await db('blocked_ips').insert({
+      ip_address: '203.0.113.71', reason: 'old', reputation_reason: 'legacy_blacklist',
+      blocked_at: new Date().toISOString(), permanent: true
+    });
+    await db('blocked_ips').insert({
+      ip_address: '203.0.113.72', reason: 'sql', reputation_reason: 'sql_injection',
+      blocked_at: new Date().toISOString(), permanent: true
+    });
+    const result = await manager.migrateLegacy({ duration: 3600, now: 1000 });
+    expect(result.changed).toBe(1);
+    expect((await manager.getBlockInfo('203.0.113.71')).reputation_reason).toBe('legacy_blocklist_converted');
+    expect((await manager.getBlockInfo('203.0.113.72')).reputation_reason).toBe('sql_injection');
     await db.destroy();
   });
 });

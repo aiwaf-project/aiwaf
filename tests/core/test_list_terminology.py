@@ -51,3 +51,34 @@ def test_cli_accepts_previous_names_with_explicit_data_directory(monkeypatch, ca
         monkeypatch.setattr(sys, 'argv', ['aiwaf', '--data-dir', str(tmp_path), 'list', name])
         cli.main()
         assert '(0)' in capsys.readouterr().out
+
+
+def _write(path, header, *rows):
+    path.write_text('\n'.join([','.join(header), *rows]) + '\n', encoding='utf-8')
+
+
+def test_new_legacy_entries_are_marked_with_the_current_reason_and_earlier_ones_still_count():
+    from aiwaf.core.blocklist_migration import legacy_metadata
+    from aiwaf.core.storage_csv_impl import is_legacy_blocklist_entry
+    assert legacy_metadata('imported')['reputation_reason'] == 'legacy_blocklist'
+    assert is_legacy_blocklist_entry({'reputation_reason': 'legacy_blacklist'})
+    assert is_legacy_blocklist_entry({'reasons': ['legacy_blacklist', 'old']})
+    assert not is_legacy_blocklist_entry({'reputation_reason': 'sql_injection', 'reasons': ['sql_injection']})
+
+
+def test_the_engine_moves_earlier_list_files_itself(tmp_path):
+    import json
+    import pytest
+    from aiwaf.core.storage_schema import CSV_HEADERS
+    rust = pytest.importorskip('aiwaf_rust')
+    _write(tmp_path / 'blacklist.csv', CSV_HEADERS['blocklist.csv'])
+    _write(tmp_path / 'whitelist.csv', CSV_HEADERS['allowlist.csv'], '9.9.9.9,2026-10-14')
+    rust.NativeCSVPipeline(json.dumps({'data_dir': str(tmp_path), 'enabled': [], 'exempt_paths': []}))
+    assert not (tmp_path / 'blacklist.csv').exists()
+    assert not (tmp_path / 'whitelist.csv').exists()
+    assert '9.9.9.9' in (tmp_path / 'allowlist.csv').read_text(encoding='utf-8')
+    # With both names present the engine keeps the current file and leaves the earlier one.
+    _write(tmp_path / 'whitelist.csv', CSV_HEADERS['allowlist.csv'], '1.1.1.1,old')
+    rust.NativeCSVPipeline(json.dumps({'data_dir': str(tmp_path), 'enabled': [], 'exempt_paths': []}))
+    assert '1.1.1.1' in (tmp_path / 'whitelist.csv').read_text(encoding='utf-8')
+    assert '1.1.1.1' not in (tmp_path / 'allowlist.csv').read_text(encoding='utf-8')

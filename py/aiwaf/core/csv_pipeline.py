@@ -169,8 +169,6 @@ class CSVPipeline:
             PolicyCSVStorage(data_dir=directory)
         wire_config = dict(config)
         self._configure_schema(wire_config, supports)
-        if 'soft_block_blocklist' in wire_config:
-            wire_config['soft_block_blacklist'] = wire_config.pop('soft_block_blocklist')
         profile_json = json.dumps(wire_config, allow_nan=False)
         if rate_counter is not None:
             self.native = factory(profile_json, honeypot_cache, rate_counter)

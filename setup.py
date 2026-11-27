@@ -18,26 +18,26 @@ setup(
     package_dir={"": "py"},
     python_requires=">=3.10",
     install_requires=[
-        "aiwaf-rust>=0.2.18",
+        "aiwaf-rust>=0.2.19",
         "numpy>2",
         "pandas>2",
         "scikit-learn>=1.6.0",
         "geoip2>=5.0",
         "packaging>=20",
-        "requests>=2.30",
+        "requests>=2.32.4",
         "python-whois>=0.9",
     ],
     extras_require={
         "django": [
-            "Django>=5.0",
+            "Django>=5.2",
         ],
         "flask": [
             "Flask>=3.0",
             "Flask-SQLAlchemy>=3.0",
         ],
         "fastapi": [
-            "fastapi>=0.100",
-            "starlette>=0.30",
+            "fastapi>=0.116.1",
+            "starlette>=0.47.2",
             "uvicorn>=0.20",
         ]
     },

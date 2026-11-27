@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .storage_csv import file_lock, safe_csv_operation
 from .native_runtime import csv_function, csv_values
+from .storage_schema import LEGACY_LIST_FILES, move_legacy_list_files
 
 
 # Directories whose files were last found complete: (directory, file names) -> (the
@@ -49,6 +50,8 @@ def ensure_csv_files(data_dir: Path, schema_headers: dict[str, list[str]]):
 def _ensure_csv_files(data_dir: Path, schema_headers: dict[str, list[str]]):
     def _create_files():
         data_dir.mkdir(exist_ok=True, parents=True)
+        if not set(LEGACY_LIST_FILES.values()).isdisjoint(schema_headers):
+            move_legacy_list_files(data_dir)
         for name, headers in schema_headers.items():
             file_path = data_dir / name
             if file_path.exists():

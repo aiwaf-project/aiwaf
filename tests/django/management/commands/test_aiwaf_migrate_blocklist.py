@@ -9,4 +9,4 @@ class TestMigrateBlocklist(TestCase):
         row = BlocklistEntry.objects.create(ip_address="203.0.113.80", reason="old")
         call_command("aiwaf_migrate_blocklist")
         row.refresh_from_db()
-        self.assertEqual(row.reputation_reason, "legacy_blacklist")
+        self.assertEqual(row.reputation_reason, "legacy_blocklist")

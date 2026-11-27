@@ -553,15 +553,9 @@ async function createRequestPipeline(profile = {}, model = null) {
   if (!mod || typeof mod.NativeRequestPipeline !== 'function') {
     throw new Error('Native pipeline requires aiwaf-wasm with NativeRequestPipeline support; no fallback');
   }
-  // Retain the existing wire key so published WASM companions remain compatible.
-  const wireProfile = { ...profile };
-  if (Object.hasOwn(wireProfile, 'blocklist')) {
-    wireProfile.blacklist = wireProfile.blocklist;
-    delete wireProfile.blocklist;
-  }
   let native;
   try {
-    native = new mod.NativeRequestPipeline(JSON.stringify(wireProfile));
+    native = new mod.NativeRequestPipeline(JSON.stringify(profile));
   } catch (error) {
     // The engine reports its startup errors as strings; give them an Error's message and stack.
     throw error instanceof Error ? error : new Error(`Native pipeline: ${String(error)}`);

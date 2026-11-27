@@ -79,10 +79,10 @@ class PolicyCSVStorage(StorageBackend):
             if ttl is not None:
                 entry['expires_at'] = time.time() + ttl
                 entry['permanent'] = False
-            entry.setdefault('reputation_reason', 'legacy_blacklist')
+            entry.setdefault('reputation_reason', 'legacy_blocklist')
             entry.setdefault('permanent', entry.get('expires_at') is None)
             # Native list update replaces this IP while retaining other rows.
-            if not policy.native_policy_list_update(self.data_dir, 'blacklist.csv', ip,
+            if not policy.native_policy_list_update(self.data_dir, policy.BLOCKLIST_CSV, ip,
                     policy._blocklist_row(ip, entry), False):
                 blocks = policy.read_blocklist(self.data_dir)
                 blocks[ip] = entry
@@ -144,7 +144,7 @@ class PolicyCSVStorage(StorageBackend):
     def update_exemption(self, operation, value):
         remove = operation.startswith('remove_')
         existed = value in policy.read_allowlist(self.data_dir)
-        if not policy.native_policy_list_update(self.data_dir, 'whitelist.csv', value, [value, now_iso()], remove):
+        if not policy.native_policy_list_update(self.data_dir, policy.ALLOWLIST_CSV, value, [value, now_iso()], remove):
             with file_lock(self.lock_path, 'a+'):
                 values = policy.read_allowlist(self.data_dir)
                 values.discard(value) if remove else values.add(value)

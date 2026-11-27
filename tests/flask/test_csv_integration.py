@@ -61,7 +61,7 @@ def test_csv_files_structure():
         _ensure_csv_files()
         
         # Check allowlist structure
-        allowlist_file = Path(temp_dir) / 'whitelist.csv'
+        allowlist_file = Path(temp_dir) / 'allowlist.csv'
         assert allowlist_file.exists()
         
         with open(allowlist_file, 'r') as f:
@@ -70,7 +70,7 @@ def test_csv_files_structure():
             assert headers == ['ip', 'added_date']
         
         # Check blocklist structure
-        blocklist_file = Path(temp_dir) / 'blacklist.csv'
+        blocklist_file = Path(temp_dir) / 'blocklist.csv'
         assert blocklist_file.exists()
         
         with open(blocklist_file, 'r') as f:

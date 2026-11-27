@@ -82,11 +82,12 @@ def test_csv_blocklist_auto_upgrades_previous_schema(tmp_path):
     )
 
     blocklist = storage_csv_impl.read_blocklist(tmp_path)
-    headers = blocklist_file.read_text(encoding="utf-8").splitlines()[0].split(",")
+    assert not blocklist_file.exists()
+    headers = (tmp_path / "blocklist.csv").read_text(encoding="utf-8").splitlines()[0].split(",")
 
     assert headers == CSV_HEADERS[BLOCKLIST_CSV]
     assert blocklist["203.0.113.70"]["reason"] == "legacy_import"
-    assert blocklist["203.0.113.70"]["reputation_reason"] == "legacy_blacklist"
+    assert blocklist["203.0.113.70"]["reputation_reason"] == "legacy_blocklist"
     assert blocklist["203.0.113.70"]["score"] == 100
     assert blocklist["203.0.113.70"]["permanent"] is True
     assert blocklist["203.0.113.70"]["expires_at"] is None
@@ -102,11 +103,12 @@ def test_csv_blocklist_auto_upgrades_old_cli_schema(tmp_path):
     )
 
     blocklist = storage_csv_impl.read_blocklist(tmp_path)
-    headers = blocklist_file.read_text(encoding="utf-8").splitlines()[0].split(",")
+    assert not blocklist_file.exists()
+    headers = (tmp_path / "blocklist.csv").read_text(encoding="utf-8").splitlines()[0].split(",")
 
     assert headers == CSV_HEADERS[BLOCKLIST_CSV]
     assert blocklist["203.0.113.71"]["reason"] == "legacy_import"
-    assert blocklist["203.0.113.71"]["reputation_reason"] == "legacy_blacklist"
+    assert blocklist["203.0.113.71"]["reputation_reason"] == "legacy_blocklist"
     assert blocklist["203.0.113.71"]["score"] == 100
     assert blocklist["203.0.113.71"]["permanent"] is True
     assert blocklist["203.0.113.71"]["expires_at"] is None
@@ -122,14 +124,15 @@ def test_csv_blocklist_auto_upgrades_headerless_legacy_rows(tmp_path):
     )
 
     blocklist = storage_csv_impl.read_blocklist(tmp_path)
-    headers = blocklist_file.read_text(encoding="utf-8").splitlines()[0].split(",")
+    assert not blocklist_file.exists()
+    headers = (tmp_path / "blocklist.csv").read_text(encoding="utf-8").splitlines()[0].split(",")
 
     assert headers == CSV_HEADERS[BLOCKLIST_CSV]
     assert blocklist["192.168.1.5"]["reason"] == "legacy_import"
-    assert blocklist["192.168.1.5"]["reputation_reason"] == "legacy_blacklist"
+    assert blocklist["192.168.1.5"]["reputation_reason"] == "legacy_blocklist"
     assert blocklist["192.168.1.5"]["permanent"] is True
     assert blocklist["192.168.1.5"]["expires_at"] is None
-    assert blocklist["192.168.1.6"]["reasons"] == ["legacy_blacklist", "bad_bot"]
+    assert blocklist["192.168.1.6"]["reasons"] == ["legacy_blocklist", "bad_bot"]
 
 
 def test_csv_blocklist_converts_legacy_entries_to_temporary(tmp_path):

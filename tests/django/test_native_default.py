@@ -306,7 +306,7 @@ class NativeDefaultDatabaseTests(TestCase):
         self.assertEqual(rows, [("198.51.100.47", "GET", "/items", 200, "Mozilla/5.0 Chrome/130", "https://example.com/")] * 2)
 
     def test_a_block_records_the_requests_headers_when_the_app_asks(self):
-        from aiwaf.django.models import BlacklistEntry
+        from aiwaf.django.models import BlocklistEntry
 
         with TemporaryDirectory() as directory, settings_for(directory, AIWAF_STORAGE_MODE="models",
                                                              AIWAF_BLOCKLIST_STORE_EXTENDED_INFO=True):
@@ -314,7 +314,7 @@ class NativeDefaultDatabaseTests(TestCase):
                             HTTP_COOKIE="session=secret")
             self.assertIn("NativeAIWAFMiddleware", middleware_types(client))
             self.assertEqual(client.get("/wp-login.php").status_code, 403)
-        entry = BlacklistEntry.objects.get(ip_address="198.51.100.48")
+        entry = BlocklistEntry.objects.get(ip_address="198.51.100.48")
         info = entry.extended_request_info
         self.assertEqual(info["headers"]["User-Agent"], "Mozilla/5.0 Chrome/130")
         self.assertNotIn("secret", str(info))

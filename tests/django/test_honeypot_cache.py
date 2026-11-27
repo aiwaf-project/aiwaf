@@ -58,7 +58,7 @@ class NativeHoneypotCacheTests(SimpleTestCase):
         self.assertEqual(self.request(second, 'post', .1).status_code, 403)
         self.assertEqual(self.request(second, 'post', 2).status_code, 200)
         self.assertFalse(Path(self.directory.name, 'pipeline_state.csv').exists())
-        self.assertTrue(Path(self.directory.name, 'blacklist.csv').exists())
+        self.assertTrue(Path(self.directory.name, 'blocklist.csv').exists())
 
     def test_post_without_get_and_expired_ttl_allow(self):
         middleware = self.middleware()

@@ -51,8 +51,8 @@ class Command(BaseCommand):
             reputation_reason="",
             blocked_at__isnull=True,
         ).update(
-            reputation_reason="legacy_blacklist",
-            reasons=["legacy_blacklist"],
+            reputation_reason="legacy_blocklist",
+            reasons=["legacy_blocklist"],
             score=100,
             offenses=1,
             permanent=True,

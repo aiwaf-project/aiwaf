@@ -37,7 +37,7 @@
     },
     "dependencies": {
         "@babel/parser": "^7.29.2",
-        "aiwaf-wasm": "^0.2.13",
+        "aiwaf-wasm": "^0.2.14",
         "express": "^4.21.2",
         "glob": "^14.0.6",
         "knex": "^2.4.2",

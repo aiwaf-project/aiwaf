@@ -15,8 +15,8 @@ def legacy_metadata(reason: Any, *, now: float | None = None) -> dict[str, Any]:
     detail = str(reason or "legacy block").strip() or "legacy block"
     return {
         "reason": detail,
-        "reputation_reason": "legacy_blacklist",
-        "reasons": ["legacy_blacklist", detail],
+        "reputation_reason": "legacy_blocklist",
+        "reasons": ["legacy_blocklist", detail],
         "score": 100,
         "offenses": 1,
         "blocked_at": timestamp,
@@ -27,7 +27,7 @@ def legacy_metadata(reason: Any, *, now: float | None = None) -> dict[str, Any]:
 
 
 def migrate_csv_directory(data_dir: str | Path) -> tuple[int, int]:
-    """Upgrade blacklist.csv and return (total entries, legacy entries)."""
+    """Upgrade blocklist.csv and return (total entries, legacy entries)."""
     directory = Path(data_dir)
     blocklist = storage_csv_impl.read_blocklist(directory)
     legacy = storage_csv_impl.legacy_blocklist_entries(directory)

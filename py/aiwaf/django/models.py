@@ -19,6 +19,9 @@ class FeatureSample(models.Model):
             models.Index(fields=["created_at"]),
         ]
 
+# Django names a model's table, permissions and migration state after its class, so renaming
+# this class would make `makemigrations --noinput` delete the model and create a new one, and
+# applying that would drop existing blocks. Code uses BlocklistEntry, defined below.
 class BlacklistEntry(models.Model):
     class Meta:
         verbose_name = "Blocklist entry"
@@ -129,5 +132,5 @@ class GeoBlockedCountry(models.Model):
         return self.country_code
 
 
-# Preserve the registered database model identity on existing installations.
+# The name to use in code; the class keeps its registered name, as explained above.
 BlocklistEntry = BlacklistEntry

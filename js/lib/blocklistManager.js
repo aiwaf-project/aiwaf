@@ -41,6 +41,9 @@ function toTimestamp(value) {
   return Number.isFinite(parsed) ? parsed / 1000 : null;
 }
 
+// Imported from the earlier list format; "legacy_blacklist" is what versions before 1.3.4 wrote.
+const LEGACY_REASONS = new Set(['legacy_blocklist', 'legacy_blacklist']);
+
 function normalizeRow(row = {}) {
   const reason = normalizeReason(row.reason || 'legacy block');
   const legacy = !row.reputation_reason;
@@ -48,8 +51,8 @@ function normalizeRow(row = {}) {
     ...row,
     ip_address: String(row.ip_address || row.ip || '').trim(),
     reason,
-    reputation_reason: row.reputation_reason || (legacy ? 'legacy_blacklist' : ''),
-    reasons: parseJson(row.reasons, legacy ? ['legacy_blacklist', reason] : [reason]),
+    reputation_reason: row.reputation_reason || (legacy ? 'legacy_blocklist' : ''),
+    reasons: parseJson(row.reasons, legacy ? ['legacy_blocklist', reason] : [reason]),
     score: Number(row.score || (legacy ? 100 : 0)),
     offenses: Number(row.offenses || (legacy ? 1 : 0)),
     blocked_at: toTimestamp(row.blocked_at) || Date.now() / 1000,
@@ -313,9 +316,9 @@ module.exports = {
     const rows = await this.getBlockedIPs({ activeOnly: false });
     let changed = 0;
     for (const original of rows) {
-      if (original.reputation_reason && original.reputation_reason !== 'legacy_blacklist') continue;
+      if (original.reputation_reason && !LEGACY_REASONS.has(original.reputation_reason)) continue;
       const row = normalizeRow(original);
-      row.reputation_reason = duration ? 'legacy_blacklist_converted' : 'legacy_blacklist';
+      row.reputation_reason = duration ? 'legacy_blocklist_converted' : 'legacy_blocklist';
       row.permanent = !duration;
       row.duration = duration || null;
       row.expires_at = duration ? Number(now) + Number(duration) : null;
