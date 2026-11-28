@@ -221,3 +221,49 @@ def test_flask_manifest_does_not_classify_get_template_page_as_form(tmp_path):
     assert route["response_type"] == "html"
     assert "payload_type" not in route
     assert "form_confidence" not in route
+
+
+METHOD_APP = '''from flask import Flask, request
+app = Flask(__name__)
+
+
+@app.get("/items")
+def list_items():
+    return {"q": request.args.get("q"), "page": int(request.args.get("page", "1"))}
+
+
+@app.post("/items")
+def create_item():
+    return {"title": request.json["title"], "page": request.json.get("page")}
+
+
+@app.route("/items", methods=["PATCH"])
+def update_item():
+    return {"note": request.form["note"]}
+
+
+@app.post("/search")
+def search():
+    return {"limit": int(request.args["limit"]), "label": request.form.get("limit"), "flag": request.args.get("flag", type=bool)}
+'''
+
+
+def test_each_method_keeps_its_inputs_and_types_and_each_location_its_own(tmp_path, monkeypatch):
+    import importlib
+    import sys
+
+    (tmp_path / "method_app.py").write_text(METHOD_APP, encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, "method_app", raising=False)
+    app = importlib.import_module("method_app").app
+    routes = generate_flask_manifest(app, tmp_path / "paths.json", audit_source=str(tmp_path))["routes"]
+    items = routes["/items"]
+    assert items["inputs_complete"] is True
+    assert items["inputs_by_method"] == {"GET": ["page", "q"], "PATCH": ["note"], "POST": ["page", "title"]}
+    # page is the GET's integer and the POST's text.
+    assert items["inputs"]["page"] == "text"
+    assert items["inputs_types_by_method"] == {"GET": {"page": "int"}}
+    search = routes["/search"]
+    # An integer query limit beside a text form limit, and type=bool, which accepts any text.
+    assert search["inputs"] == {"limit": "text", "flag": "text"}
+    assert search["inputs_types_by_location"] == {"POST": {"query": {"limit": "int"}}}

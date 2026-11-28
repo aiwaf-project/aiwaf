@@ -92,6 +92,60 @@ class JavaInputSchemaCoreTest {
     }
 
     @Test
+    void aRawJsonBodyParsedWithJacksonIsFollowedAndAnyOtherUseStaysRaw() throws Exception {
+        Map<String, JavaInputSchemaCore.Inputs> found = inputs(HEADER + """
+                class Tree extends HttpServlet {
+                    private final com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                    protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws Exception {
+                        com.fasterxml.jackson.databind.JsonNode node = mapper.readTree(req.getInputStream());
+                        if (node.has("note")) System.out.println(node.get("note").asText());
+                        save(node.path("sku").asText(), node.get("qty").asInt(), node.get("rush").asBoolean());
+                    }
+                }
+                class Typed extends HttpServlet {
+                    protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws Exception {
+                        Order order = mapper.readValue(req.getReader(), Order.class);
+                    }
+                }
+                class Order { String sku; int qty; Line line; }
+                class Line { String code; }
+                class Whole extends HttpServlet {
+                    protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws Exception {
+                        com.fasterxml.jackson.databind.JsonNode node = mapper.readTree(req.getInputStream());
+                        store(node);
+                    }
+                }
+                class Dynamic extends HttpServlet {
+                    protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws Exception {
+                        com.fasterxml.jackson.databind.JsonNode node = mapper.readTree(req.getInputStream());
+                        node.get(req.getHeader("X-Field"));
+                    }
+                }
+                class Stream extends HttpServlet {
+                    protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws Exception {
+                        req.getInputStream().readAllBytes();
+                    }
+                }
+                class Missing extends HttpServlet {
+                    protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws Exception {
+                        mapper.readValue(req.getInputStream(), Elsewhere.class);
+                    }
+                }
+                """);
+        assertEquals(Map.of("note", "text", "sku", "text", "qty", "int", "rush", "bool"), found.get("Tree.doPost").inputs());
+        assertTrue(found.get("Tree.doPost").complete());
+        assertEquals(Map.of("sku", "text", "qty", "int", "line", "text"), found.get("Typed.doPost").inputs());
+        assertTrue(found.get("Typed.doPost").complete());
+        assertEquals(Map.of("line", java.util.List.of("code")), found.get("Typed.doPost").nested());
+        // The parsed tree used whole, read with a key that isn't constant, or the stream read itself: raw.
+        for (String name : new String[] {"Whole.doPost", "Dynamic.doPost", "Stream.doPost"}) {
+            assertFalse(found.get(name).complete(), name);
+            assertEquals("raw_body", found.get(name).reasons().get(0).code(), name);
+        }
+        assertEquals("external_class", found.get("Missing.doPost").reasons().get(0).code());
+    }
+
+    @Test
     void theRequestIsFollowedIntoTheClassesOwnMethodsAndConstantKeysAreKnown() throws Exception {
         Map<String, JavaInputSchemaCore.Inputs> found = inputs(HEADER + """
                 @RestController

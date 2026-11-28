@@ -269,8 +269,13 @@ function finalize(routes, sources = {}) {
     const flat = new Set(data._flat || []);
     const declaredTypes = data.declared_types || {};
     const declaredLocations = data.declared_locations || null;
+    // What each method's own code reads, by type and by location, and the names it reads where
+    // the location isn't known.
+    const codeTypes = data._input_types || {};
+    const codeLocations = data._input_locations || {};
+    const codeUnlocated = data._input_unlocated || {};
     for (const key of ['declared_inputs', 'input_declaration', 'declared_methods', 'declared_types', 'declared_locations', '_input_methods',
-      '_input_shared', '_nested', '_flat']) delete data[key];
+      '_input_shared', '_nested', '_flat', '_input_types', '_input_locations', '_input_unlocated']) delete data[key];
     let read = 'inputs_complete' in data;
     const found = { ...(data.inputs || {}) };
     let reasons = [...(data.inputs_incomplete || [])];
@@ -307,12 +312,15 @@ function finalize(routes, sources = {}) {
       counts.declared += 1;
     }
     const operations = (sources.openapi || {})[key];
+    // Each method's OpenAPI types, which weaken that method's code types like any other reading.
+    const openapiTypes = {};
     if (operations) {
       const methods = data.methods && data.methods.length ? data.methods : Object.keys(operations);
       const listed = methods.filter(method => operations[method]).map(method => operations[method]);
       for (const method of methods.filter(item => operations[item])) {
         for (const [name, kind] of Object.entries(operations[method].inputs)) {
           merge(found, name, kind);
+          merge((openapiTypes[method] = openapiTypes[method] || {}), name, kind);
           claims[method] = new Set([...(claims[method] || []), name]);
         }
       }
@@ -364,12 +372,39 @@ function finalize(routes, sources = {}) {
         (ownTypes[method] = ownTypes[method] || {})[name] = kind;
       }
     }
+    // And a method's type from its own code (a GET's integer page beside a POST's text page),
+    // for names only code reads. A declared type for that method is kept instead; a name some
+    // reading shares with every method (a hook, a declaration, a recording) isn't split.
+    const codeOnly = name => name in found && !shared.has(name);
+    for (const [method, types] of Object.entries(codeTypes)) {
+      for (const [name, read] of Object.entries(types)) {
+        if (!codeOnly(name) || (declaredTypes[method] && name in declaredTypes[method])) continue;
+        let kind = read;
+        if (openapiTypes[method] && name in openapiTypes[method]) kind = openapiTypes[method][name] === kind ? kind : 'text';
+        if (kind === 'text' || found[name] === kind) continue;
+        (ownTypes[method] = ownTypes[method] || {})[name] = kind;
+      }
+    }
     if (Object.keys(ownTypes).length) data.inputs_types_by_method = ownTypes;
     else delete data.inputs_types_by_method;
     // A location's type for a name, where it isn't what the method checks otherwise (a query
     // limit that's an integer next to a JSON limit that's text): checked for values sent there.
-    const locations = declaredLocations || (framework && framework.locations
+    const declared = declaredLocations || (framework && framework.locations
       ? Object.fromEntries((data.methods || []).map(method => [String(method).toUpperCase(), framework.locations])) : {});
+    // The framework's locations, then each method's code reads at a location the framework
+    // doesn't type: only for names only code reads, and never one the method also reads where
+    // the location isn't known (req.param), since that read takes any location's value.
+    const locations = JSON.parse(JSON.stringify(declared));
+    for (const [method, byWhere] of Object.entries(codeLocations)) {
+      const unlocated = new Set(codeUnlocated[method] || []);
+      for (const [where, types] of Object.entries(byWhere)) {
+        for (const [name, kind] of Object.entries(types)) {
+          if (!codeOnly(name) || unlocated.has(name)) continue;
+          const own = ((locations[method] = locations[method] || {})[where] = locations[method][where] || {});
+          if (!(name in own)) own[name] = kind;
+        }
+      }
+    }
     const byLocation = {};
     for (const [method, byWhere] of Object.entries(locations)) {
       for (const [where, types] of Object.entries(byWhere)) {

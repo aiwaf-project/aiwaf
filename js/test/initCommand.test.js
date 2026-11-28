@@ -317,6 +317,90 @@ describe('scoped schemas, route hooks and factory handlers', () => {
     expect(routes['/block-route']).toMatchObject({ inputs: { other: 'text' }, inputs_complete: true });
   });
 
+  test('Hapi reads request.payload as the body, and a payload used whole is open unless a closed schema names it', async () => {
+    const routes = await runAt('hapi-payload');
+    const summary = route => [routes[route].inputs, routes[route].inputs_complete,
+      (routes[route].inputs_incomplete || []).map(item => item.code)];
+    expect(summary('/orders')).toEqual([{ sku: 'text', quantity: 'float' }, true, []]);
+    expect(summary('/raw')).toEqual([{}, false, ['container_whole']]);
+    expect(summary('/closed')).toEqual([{ sku: 'text', quantity: 'int' }, true, []]);
+    expect(summary('/open')[1]).toBe(false);
+    expect(summary('/search')).toEqual([{ q: 'text', page: 'int' }, true, []]);
+  });
+
+  // GET, POST and PATCH on one path, and a handler reading a name from the query and the body:
+  // the shape the benchmark found merged in Hapi, Nest, Express and Koa.
+  const methodShape = route => ({
+    inputs: route.inputs, complete: route.inputs_complete, byMethod: route.inputs_by_method,
+    types: route.inputs_types_by_method, locations: route.inputs_types_by_location
+  });
+  test.each(['hapi-methods', 'express-methods', 'koa-methods', 'nest-methods'])(
+    '%s keeps each method\'s inputs and types, and each location\'s', async name => {
+      const routes = await runAt(name);
+      const items = methodShape(routes['/items']);
+      expect(items.complete).toBe(true);
+      // GET doesn't take POST's title, and PATCH doesn't replace GET's reads.
+      expect(items.byMethod.GET).toEqual(['page', 'q']);
+      expect(items.byMethod.POST).toEqual(['page', 'title']);
+      if (name !== 'koa-methods') expect(items.byMethod.PATCH).toEqual(['note']);
+      // page is GET's integer and POST's text: the route's type is text, GET's is int.
+      expect(items.inputs.page).toBe('text');
+      expect(items.types).toEqual({ GET: { page: 'int' } });
+      if (name !== 'nest-methods') {
+        expect(methodShape(routes['/search'])).toMatchObject({
+          inputs: { limit: 'text' }, complete: true, locations: { POST: { query: { limit: 'int' } } }
+        });
+      }
+    });
+
+  test('Boolean() and a comparison to a string are not boolean restrictions', async () => {
+    const routes = await runAt('express-methods');
+    expect(routes['/flags'].inputs).toEqual({ archived: 'text', mode: 'text' });
+    // And iterating a request array gives its elements' keys.
+    expect(routes['/orders']).toMatchObject({ inputs: { lines: 'text' }, inputs_complete: true, inputs_nested: { 'lines[]': ['qty', 'sku'] } });
+  });
+
+  const runRoutes = async (name, framework, routesFile = 'routes.json') => {
+    const output = path.join(dir, `${name}-routes.json`);
+    execFileSync(process.execPath, [CLI, 'init', '--framework', framework, '--routes', fixture(name, routesFile), '--output', output,
+      '--source', fixture(name)], { cwd: dir, encoding: 'utf8', timeout: 30000 });
+    return readRoutes(output);
+  };
+
+  test('a Next.js Pages handler that branches on req.method gives each method its own reads', async () => {
+    const routes = await runRoutes('next-pages', 'next');
+    const items = routes['/api/items'];
+    // trace is read before the branches, so both methods read it.
+    expect(items.inputs_by_method).toEqual({ GET: ['page', 'q', 'trace'], POST: ['page', 'title', 'trace'] });
+    expect(items.inputs_types_by_method).toEqual({ GET: { page: 'int' } });
+    // switch cases, default, if/else: each method's reads, and what the else leaves.
+    expect(routes['/api/orders'].inputs_by_method).toEqual({ DELETE: ['id', 'title'], GET: ['status', 'title'], POST: ['title'], PUT: ['note'] });
+  });
+
+  test("AdonisJS's list:routes JSON links each controller method, and its request API is read", async () => {
+    const routes = await runRoutes('adonis-routes', 'adonis');
+    expect(routes['/users']).toMatchObject({
+      inputs: { page: 'float', q: 'text', sort: 'text', name: 'text', age: 'text', email: 'text' }, inputs_complete: true,
+      inputs_by_method: { GET: ['page', 'q', 'sort'], POST: ['age', 'email', 'name'] }
+    });
+    // Another controller's index links to its own route, and request.all() takes everything.
+    expect(routes['/posts']).toMatchObject({ inputs: { tag: 'text' }, inputs_complete: true });
+    expect(routes['/users/:id'].inputs_complete).toBe(false);
+  });
+
+  test('a Sails app waiting on lift() loads, and its controller actions and actions2 inputs are linked', async () => {
+    const routes = await runAt('sails-lift');
+    expect(routes['/users']).toMatchObject({
+      inputs: { q: 'text', page: 'int', name: 'text', age: 'float' }, inputs_complete: true,
+      inputs_by_method: { GET: ['page', 'q'], POST: ['age', 'name'] }
+    });
+    expect(routes['/signup']).toMatchObject({ inputs: { email: 'text', age: 'int', newsletter: 'bool' }, inputs_complete: true });
+    // An actions2 fn that reads this.req: its declared input and what it reads.
+    expect(routes['/legacy']).toMatchObject({ inputs: { title: 'text', note: 'text' }, inputs_complete: true });
+    expect(routes['/users/search'].inputs_complete).toBe(false);
+    expect(routes['/health'].methods).toEqual(['DELETE', 'GET', 'PATCH', 'POST', 'PUT']);
+  });
+
   test('handlers a factory makes are linked to their source', async () => {
     const routes = await runAt('fastify-export');
     for (const route of ['/exports/csv', '/exports/pdf']) {

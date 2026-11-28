@@ -420,7 +420,13 @@ class FileAnalyzer {
     const route = value('path') || value('url');
     const handler = value('handler');
     if (route && handler && route.value.type === 'StringLiteral' && handler.value && isFunction(handler.value)) {
-      this.routeLabels.set(handler.value, `route ${route.value.value}`);
+      // With the one method it serves, as post /items, so its reads stay that method's.
+      const method = value('method');
+      const methods = !method ? [] : method.value.type === 'StringLiteral' ? [method.value.value]
+        : method.value.type === 'ArrayExpression' && method.value.elements.every(item => item && item.type === 'StringLiteral')
+          ? method.value.elements.map(item => item.value) : [];
+      const one = methods.length === 1 && /^(get|post|put|patch|delete|head|options)$/i.test(methods[0]) ? methods[0].toLowerCase() : null;
+      this.routeLabels.set(handler.value, `${one || 'route'} ${route.value.value}`);
     }
   }
 

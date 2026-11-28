@@ -748,7 +748,7 @@ public final class InputSourcesCore {
             // Keys inside an input, from the body class's nested classes, when every handler reading it has them.
             Map<String, Object> inner = new TreeMap<>();
             nested.forEach((name, keys) -> {
-                if (found.containsKey(name) && !flat.contains(name)) inner.put(name, keys);
+                if (found.containsKey(topOf(name)) && !flat.contains(topOf(name))) inner.put(name, keys);
             });
             if (!inner.isEmpty() && reasons.isEmpty()) data.put("inputs_nested", inner);
             else data.remove("inputs_nested");
@@ -803,5 +803,11 @@ public final class InputSourcesCore {
             text.append(String.join(", ", top.stream().limit(4).map(entry -> entry.getKey() + " (" + entry.getValue() + ")").toList()));
         }
         return text.toString();
+    }
+
+    /** A key path's first name, as lines in lines[].product or customer in customer.address. */
+    static String topOf(String path) {
+        String head = path.split("\\.", 2)[0];
+        return head.endsWith("[]") ? head.substring(0, head.length() - 2) : head;
     }
 }

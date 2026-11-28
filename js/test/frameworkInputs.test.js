@@ -201,6 +201,68 @@ describe('framework inputs', () => {
     }
   });
 
+  it('keeps the keys of closed Joi and zod objects and arrays of them', () => {
+    const Joi = require('joi');
+    const { z } = require('zod');
+    const hapi = framework.hapiInputs({ payload: Joi.object({
+      lines: Joi.array().items(Joi.object({ sku: Joi.string(), product: Joi.object({ code: Joi.string() }) })),
+      customer: Joi.object({ email: Joi.string() }), open: Joi.object({ a: Joi.string() }).unknown(),
+      tags: Joi.array().items(Joi.string())
+    }) });
+    expect(hapi.nested).toEqual({ 'lines[]': ['product', 'sku'], 'lines[].product': ['code'], customer: ['email'] });
+    const nested = {};
+    framework.fieldsOf(z.object({
+      lines: z.array(z.object({ sku: z.string(), qty: z.number().int() })).optional(),
+      customer: z.object({ email: z.string() }), loose: z.object({ a: z.string() }).passthrough(), tags: z.array(z.string())
+    }), 'body', [], nested);
+    expect(nested).toEqual({ 'lines[]': ['qty', 'sku'], customer: ['email'] });
+  });
+
+  it('keeps the keys of nested DTOs and lists of DTOs', async () => {
+    const property = (cls, name, options = {}) => {
+      const names = Reflect.getMetadata('swagger/apiModelPropertiesArray', cls.prototype) || [];
+      Reflect.defineMetadata('swagger/apiModelPropertiesArray', [...names, `:${name}`], cls.prototype);
+      Reflect.defineMetadata('swagger/apiModelProperties', options, cls.prototype, name);
+    };
+    class Product {}
+    property(Product, 'code');
+    class Line {}
+    property(Line, 'sku');
+    property(Line, 'qty', { type: Number });
+    property(Line, 'product', { type: () => Product });
+    class Customer {}
+    property(Customer, 'email');
+    class Order {}
+    property(Order, 'lines', { type: [Line] });
+    property(Order, 'extras', { type: Line, isArray: true });
+    property(Order, 'customer', { type: Customer });
+    property(Order, 'note');
+    // A DTO that refers to itself stops at itself.
+    class Node {}
+    property(Node, 'children', { type: [Node] });
+    property(Order, 'tree', { type: Node });
+
+    class OrdersController { create(body) { return body; } }
+    decorate(OrdersController, 'create', [Post()]);
+    Body()(OrdersController.prototype, 'create', 0);
+    Reflect.defineMetadata('design:paramtypes', [Order], OrdersController.prototype, 'create');
+    Controller('orders')(OrdersController);
+    class OrdersModule {}
+    Module({ controllers: [OrdersController] })(OrdersModule);
+    const app = await NestFactory.create(OrdersModule, { logger: false });
+    await app.init();
+    try {
+      const declared = extractNestRoutes(app)['/orders'].declared_inputs;
+      expect(declared.inputs).toEqual({ lines: 'text', extras: 'text', customer: 'text', note: 'text', tree: 'text' });
+      expect(declared.nested).toEqual({
+        'lines[]': ['product', 'qty', 'sku'], 'lines[].product': ['code'], 'extras[]': ['product', 'qty', 'sku'],
+        'extras[].product': ['code'], customer: ['email'], tree: ['children'], 'tree.children[]': ['children']
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
   it('marks Nest routes JSON unless they render, redirect or answer through @Res()', async () => {
     class OrdersController {
       constructor() { this.orders = { all: () => [] }; }

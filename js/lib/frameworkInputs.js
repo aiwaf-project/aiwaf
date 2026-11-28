@@ -102,8 +102,27 @@ function joiKind(schema) {
   return items.length === 1 && isJoi(items[0]) ? joiKind(items[0]) : 'text';
 }
 
+// A Joi object that names its keys and allows no others: its keys, or null.
+function joiClosedKeys(schema) {
+  if (!isJoi(schema) || schema.type !== 'object' || !schema.$_terms.keys) return null;
+  if ((schema._flags && schema._flags.unknown) || (schema.$_terms.patterns || []).length) return null;
+  return schema.$_terms.keys;
+}
+
+// The keys inside a Joi key's value, by path, as JSON Schema's are read: closed objects and
+// arrays of them.
+function joiNested(schema, path, nested, depth) {
+  if (!isJoi(schema) || depth >= MAX_NESTED_DEPTH) return;
+  const items = schema.type === 'array' ? (schema.$_terms.items || []) : [];
+  const [target, at] = items.length === 1 ? [items[0], `${path}[]`] : [schema, path];
+  const keys = joiClosedKeys(target);
+  if (!keys) return;
+  nested[at] = keys.map(item => item.key).sort();
+  for (const item of keys) joiNested(item.schema, `${at}.${item.key}`, nested, depth + 1);
+}
+
 /** A Joi (or @hapi/validate) object schema's keys; unknown(), pattern() or no keys allow others. */
-function joiFields(schema, label, reasons) {
+function joiFields(schema, label, reasons, nested = null) {
   if (schema.type !== 'object') {
     reasons.push(reason('container_whole', `the ${label} isn't an object with named keys`));
     return {};
@@ -116,6 +135,7 @@ function joiFields(schema, label, reasons) {
   if ((schema._flags && schema._flags.unknown) || (schema.$_terms.patterns || []).length) {
     reasons.push(reason('container_whole', `the ${label} schema allows keys it doesn't name`));
   }
+  if (nested) for (const item of keys) joiNested(item.schema, item.key, nested, 0);
   return Object.fromEntries(keys.map(item => [item.key, joiKind(item.schema)]));
 }
 
@@ -167,7 +187,36 @@ function zodKind(input) {
 }
 
 /** A zod object schema's keys; passthrough/loose or a catchall allow others. */
-function zodFields(input, label, reasons) {
+// A zod object's shape when it allows no other keys, or null.
+function zodClosedShape(input) {
+  const four = zod4(zodUnwrap(input));
+  const three = zod3(zodUnwrap(input));
+  if (four && four.type === 'object') {
+    const catchall = zod4(four.catchall);
+    return catchall && catchall.type !== 'never' ? null : (four.shape || {});
+  }
+  if (three && three.typeName === 'ZodObject') {
+    const catchall = zod3(three.catchall);
+    if (three.unknownKeys === 'passthrough' || (catchall && catchall.typeName !== 'ZodNever')) return null;
+    return typeof three.shape === 'function' ? three.shape() : (three.shape || {});
+  }
+  return null;
+}
+
+// The keys inside a zod key's value, by path: closed objects and arrays of them.
+function zodNested(input, path, nested, depth) {
+  if (!isZod(input) || depth >= MAX_NESTED_DEPTH) return;
+  const four = zod4(zodUnwrap(input));
+  const three = zod3(zodUnwrap(input));
+  const element = four && four.type === 'array' ? four.element : three && three.typeName === 'ZodArray' ? three.type : null;
+  const [target, at] = element ? [element, `${path}[]`] : [input, path];
+  const shape = zodClosedShape(target);
+  if (!shape || !Object.keys(shape).length) return;
+  nested[at] = Object.keys(shape).sort();
+  for (const [name, value] of Object.entries(shape)) zodNested(value, `${at}.${name}`, nested, depth + 1);
+}
+
+function zodFields(input, label, reasons, nested = null) {
   const schema = zodUnwrap(input);
   const four = zod4(schema);
   const three = zod3(schema);
@@ -187,6 +236,7 @@ function zodFields(input, label, reasons) {
     return {};
   }
   if (open) reasons.push(reason('container_whole', `the ${label} schema allows keys it doesn't name`));
+  if (nested) for (const [name, value] of Object.entries(shape)) zodNested(value, name, nested, 0);
   return Object.fromEntries(Object.entries(shape).map(([name, value]) => [name, zodKind(value)]));
 }
 
@@ -202,7 +252,7 @@ const VALIDATOR_KINDS = {
  * A DTO class's properties, from class-validator's decorators (its global metadata storage, only
  * when the app loaded class-validator) or @nestjs/swagger's @ApiProperty, through inheritance.
  */
-function classFields(cls, label, reasons) {
+function classFields(cls, label, reasons, nested = null, path = '', depth = 0, seen = new Set()) {
   // nestjs-zod's createZodDto(schema): a class marked isZodDto, with the schema as a static.
   if (cls.isZodDto && isZod(cls.schema)) return zodFields(cls.schema, label, reasons);
   const found = {};
@@ -229,7 +279,53 @@ function classFields(cls, label, reasons) {
   if (!Object.keys(found).length) {
     reasons.push(reason('external_class', `${cls.name || 'the'} ${label} class has no class-validator or Swagger property metadata`));
   }
+  // A property typed with another DTO class, or a list of one: its keys, by path, as customer and
+  // lines[] (and deeper, lines[].product), so nested DTOs keep their element keys.
+  if (nested && depth < MAX_NESTED_DEPTH) {
+    seen.add(cls);
+    for (const name of Object.keys(found)) {
+      const child = dtoProperty(proto, name);
+      if (!child) continue;
+      const childPath = `${path ? `${path}.` : ''}${name}${child.list ? '[]' : ''}`;
+      const childReasons = [];
+      // A DTO that holds itself gives its keys once, without going round again.
+      const keys = classFields(child.cls, label, childReasons, seen.has(child.cls) ? null : nested, childPath, depth + 1, seen);
+      if (Object.keys(keys).length && !childReasons.length) nested[childPath] = Object.keys(keys).sort();
+    }
+    seen.delete(cls);
+  }
   return found;
+}
+
+// class-transformer's metadata, from the app's install when it has one: @Type(() => LineDto)
+// is where a list property's element class is.
+function transformerStorage() {
+  for (const load of [() => require('module').createRequire(`${process.cwd()}/`), () => require]) {
+    try {
+      const storage = load()('class-transformer/cjs/storage').defaultMetadataStorage;
+      if (storage && typeof storage.findTypeMetadata === 'function') return storage;
+    } catch (_error) {
+      // Not installed where this looked.
+    }
+  }
+  return null;
+}
+
+/** The DTO class a property holds, and whether it's a list of them, or null. */
+function dtoProperty(proto, name) {
+  const swagger = metadata('swagger/apiModelProperties', proto, name) || {};
+  let type = swagger.type;
+  let list = Array.isArray(type) || Boolean(swagger.isArray);
+  if (Array.isArray(type)) type = type[0];
+  // A lazy type, as @ApiProperty({ type: () => LineDto }): a function that isn't a class.
+  if (typeof type === 'function' && !isDto(type) && !type.prototype) type = type();
+  if (!isDto(type)) {
+    const storage = transformerStorage();
+    const found = storage ? storage.findTypeMetadata(proto.constructor, name) : null;
+    type = found && typeof found.typeFunction === 'function' ? found.typeFunction() : null;
+    list = metadata('design:type', proto, name) === Array;
+  }
+  return isDto(type) ? { cls: type, list } : null;
 }
 
 /**
@@ -239,8 +335,8 @@ function classFields(cls, label, reasons) {
 function fieldsOf(schema, label, reasons, nested = null) {
   if (isDto(schema)) return classFields(schema, label, reasons);
   if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return null;
-  if (isZod(schema)) return zodFields(schema, label, reasons);
-  if (isJoi(schema)) return joiFields(schema, label, reasons);
+  if (isZod(schema)) return zodFields(schema, label, reasons, nested);
+  if (isJoi(schema)) return joiFields(schema, label, reasons, nested);
   if (schema.type !== undefined || schema.properties || schema.$ref !== undefined
     || ['allOf', 'oneOf', 'anyOf'].some(key => Array.isArray(schema[key]))) {
     return jsonSchemaFields(schema, label, reasons, nested);
@@ -320,6 +416,7 @@ function nestInputs(controller, method) {
   const args = metadata('__routeArguments__', controller, method) || {};
   const types = metadata('design:paramtypes', controller.prototype, method) || [];
   const found = {};
+  const nested = {};
   const reasons = [];
   let standalone = true;
   for (const [key, arg] of Object.entries(args)) {
@@ -341,14 +438,16 @@ function nestInputs(controller, method) {
     if (typeof data === 'string' && data) {
       found[data] = pipeKind(arg.pipes) || kindOf(type);
     } else if (isDto(type)) {
-      Object.assign(found, classFields(type, label, reasons));
+      Object.assign(found, classFields(type, label, reasons, nested));
     } else {
       reasons.push(reason('container_whole', `@${paramtype === BODY ? 'Body' : 'Query'}() in ${method} takes the whole ${label} without a DTO class`));
     }
   }
   // With @Req() the code reading still decides about whole reads of the request.
   const covers = standalone ? COVERS : COVERS.filter(code => code !== 'container_whole');
-  return { inputs: found, covers, reasons, standalone };
+  const result = { inputs: found, covers, reasons, standalone };
+  if (Object.keys(nested).length) result.nested = nested;
+  return result;
 }
 
 const MODULE_PATH = '__module_path__';
@@ -441,7 +540,10 @@ function nestRoutes(app, factory = undefined) {
             for (const routePath of full) {
               routes.push({
                 routePath, methods: verb ? [verb] : EVERY_METHOD, handler, name: `${controller.name}.${name}`, declared,
-                responseType: nestResponseType(controller, name, handler)
+                responseType: nestResponseType(controller, name, handler),
+                // The method this controller method serves, so what its code reads (through @Req())
+                // is that method's alone: a GET beside a POST doesn't take the POST's body fields.
+                handlerMethods: [[name, verb ? [verb] : []]]
               });
             }
           }

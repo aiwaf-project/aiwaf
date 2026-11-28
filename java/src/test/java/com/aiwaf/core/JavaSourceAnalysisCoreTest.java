@@ -486,6 +486,34 @@ class JavaSourceAnalysisCoreTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void listsOfDtosAndDeeperDtosKeepTheirKeys() throws IOException {
+        JavaSourceAnalysisCore.Report report = analyze("""
+                @RestController
+                class Orders {
+                    @PostMapping("/orders")
+                    String create(@RequestBody Order order) { return ""; }
+                }
+                class Order { java.util.List<Line> lines; Line[] extras; java.util.Optional<Customer> customer; java.util.List<String> tags;
+                              Node tree; }
+                class Line { String sku; int qty; Product product; }
+                class Product { String code; }
+                class Customer { String email; }
+                class Node { java.util.List<Node> children; String label; }
+                """);
+        Map<String, Object> manifest = PathManifestCore.buildManifestFromSource("java-source", report.routes());
+        Map<String, Object> orders = ((Map<String, Map<String, Object>>) manifest.get("routes")).get("/orders");
+        RouteRiskCore.applyReport(report, manifest);
+        assertEquals(true, orders.get("inputs_complete"));
+        // A list or array of DTOs gives its elements' keys, deeper DTOs their own, and a DTO that
+        // holds a list of itself gives that list's keys once, without going round again.
+        assertEquals(Map.of("lines[]", List.of("product", "qty", "sku"), "lines[].product", List.of("code"),
+                "extras[]", List.of("product", "qty", "sku"), "extras[].product", List.of("code"),
+                "customer", List.of("email"), "tree", List.of("children", "label"), "tree.children[]", List.of("children", "label")),
+                orders.get("inputs_nested"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void everyHandlerOnASharedPathIsLinked() throws IOException {
         JavaSourceAnalysisCore.Report report = analyze("""
                 @RestController

@@ -71,6 +71,8 @@ public final class JavaInputSchemaCore {
     /** The reasons one handler's list is incomplete, with lines from the unit they're in. */
     private static final class Gaps {
         final List<Reason> reasons = new ArrayList<>();
+        // Keys inside inputs a body class parsed from the raw body gives (readValue(..., Dto.class)).
+        final Map<String, List<String>> nested = new java.util.TreeMap<>();
         final SourcePositions positions;
 
         Gaps(SourcePositions positions) {
@@ -111,6 +113,8 @@ public final class JavaInputSchemaCore {
             "Double.parseDouble", "float", "Double.valueOf", "float", "Float.parseFloat", "float",
             "Boolean.parseBoolean", "bool", "Boolean.valueOf", "bool", "UUID.fromString", "uuid");
     private static final Set<String> CONTAINERS = Set.of("List", "Set", "Collection", "Optional", "Iterable");
+    // How deep nested keys are kept, as the other languages' init does.
+    private static final int MAX_NESTED_DEPTH = 4;
     // Request methods that read the query or body other than one named parameter at a time.
     private static final Set<String> RAW_READS = Set.of(
             "getParameterMap", "getParameterNames", "getInputStream", "getReader", "getQueryString", "getParts", "getPart",
@@ -216,24 +220,49 @@ public final class JavaInputSchemaCore {
         }
 
         /**
-         * The keys inside each of a body class's fields whose type is another class of the scanned
-         * sources: what Jackson can fill in it, as {"author": ["name"]}.
+         * The keys inside a body class's fields whose type is another class of the scanned sources,
+         * by path: what Jackson can fill in it, as {"author": ["name"]}; for a list or array of such
+         * classes each element's, as {"lines[]": ["sku"]}; and deeper, as "lines[].product".
          */
         Map<String, List<String>> nested(Tree type) {
-            ClassTree node = classes.get(simpleName(type));
             Map<String, List<String>> nested = new java.util.TreeMap<>();
-            if (node == null || node.getKind() == Tree.Kind.ENUM || node.getKind() == Tree.Kind.INTERFACE) return nested;
+            nestedPaths(type, "", 0, nested, new java.util.HashSet<>());
+            return nested;
+        }
+
+        private void nestedPaths(Tree type, String prefix, int depth, Map<String, List<String>> out, Set<String> seen) {
+            String className = simpleName(type);
+            ClassTree node = classes.get(className);
+            if (node == null || node.getKind() == Tree.Kind.ENUM || node.getKind() == Tree.Kind.INTERFACE
+                    || depth >= MAX_NESTED_DEPTH || !seen.add(className)) return;
             for (Tree member : node.getMembers()) {
                 if (!(member instanceof VariableTree field) || field.getModifiers().getFlags().contains(javax.lang.model.element.Modifier.STATIC)) continue;
                 Map<String, AnnotationTree> marks = annotations(field.getModifiers().getAnnotations());
-                if (marks.containsKey("JsonIgnore") || scalar(field.getType()) != null || isEnum(field.getType())) continue;
-                Map<String, String> inner = fields(field.getType(), 1);
+                Tree element = field.getType();
+                boolean list = false;
+                // Through Optional, and into a List, Set or array's element type.
+                while (true) {
+                    if (element instanceof ArrayTypeTree array) {
+                        element = array.getType();
+                        list = true;
+                    } else if (element instanceof ParameterizedTypeTree parameterized && CONTAINERS.contains(simpleName(parameterized.getType()))
+                            && parameterized.getTypeArguments().size() == 1) {
+                        list = list || !"Optional".equals(simpleName(parameterized.getType()));
+                        element = parameterized.getTypeArguments().get(0);
+                    } else {
+                        break;
+                    }
+                }
+                if (marks.containsKey("JsonIgnore") || TYPES.containsKey(simpleName(element)) || isEnum(element)) continue;
+                Map<String, String> inner = fields(element, 1);
                 if (inner == null) continue;
                 String name = marks.containsKey("JsonProperty") && annotationName(marks.get("JsonProperty")) != null
                         ? annotationName(marks.get("JsonProperty")) : field.getName().toString();
-                nested.put(name, List.copyOf(new java.util.TreeSet<>(inner.keySet())));
+                String path = prefix + name + (list ? "[]" : "");
+                out.put(path, List.copyOf(new java.util.TreeSet<>(inner.keySet())));
+                nestedPaths(element, path + ".", depth + 1, out, seen);
             }
-            return nested;
+            seen.remove(className);
         }
 
         boolean isEnum(Tree type) {
@@ -303,6 +332,7 @@ public final class JavaInputSchemaCore {
                 if (annotations(parameter.getModifiers().getAnnotations()).containsKey("RequestBody")) nested.putAll(dtos.nested(parameter.getType()));
             }
             if (!requests.isEmpty()) reads(unit, type, method, requests, inputs, gaps, dtos, new java.util.HashSet<>());
+            nested.putAll(gaps.nested);
             results.add(new Inputs(type.getSimpleName() + "." + method.getName(), file, inputs, gaps.reasons.isEmpty(),
                     List.copyOf(gaps.reasons), Map.copyOf(nested)));
         }
@@ -408,6 +438,75 @@ public final class JavaInputSchemaCore {
      * apart from checks of whether it was sent (raw == null, raw.isEmpty()). Null, so text, when
      * any use does anything else.
      */
+    // Jackson's JsonNode accessors and what each gives a value as.
+    private static final Map<String, String> NODE_KINDS = Map.ofEntries(
+            Map.entry("asInt", "int"), Map.entry("intValue", "int"), Map.entry("asLong", "int"), Map.entry("longValue", "int"),
+            Map.entry("asDouble", "float"), Map.entry("doubleValue", "float"), Map.entry("asBoolean", "bool"),
+            Map.entry("booleanValue", "bool"), Map.entry("asText", "text"), Map.entry("textValue", "text"));
+    private static final Set<String> NODE_KEYS = Set.of("get", "path", "has", "hasNonNull", "findValue");
+
+    /**
+     * The raw body parsed with Jackson, when what it gives can be followed: readValue(body,
+     * Dto.class) gives the class's fields; readTree(body) into a local whose every use reads a
+     * constant key (node.get("sku").asText(), node.path("qty").asInt()) gives those keys. Whether
+     * it was; anything else stays a raw body read.
+     */
+    private static boolean parsedBody(CompilationUnitTree unit, MethodTree method, TreePath streamPath, MethodInvocationTree stream,
+                                      Map<String, String> inputs, Gaps gaps, Dtos dtos) {
+        TreePath parsePath = streamPath.getParentPath();
+        if (parsePath == null || !(parsePath.getLeaf() instanceof MethodInvocationTree parse) || parse.getArguments().isEmpty()
+                || parse.getArguments().get(0) != stream || !(parse.getMethodSelect() instanceof MemberSelectTree parser)) return false;
+        String how = parser.getIdentifier().toString();
+        if (how.equals("readValue") && parse.getArguments().size() == 2
+                && parse.getArguments().get(1) instanceof MemberSelectTree literal && literal.getIdentifier().contentEquals("class")) {
+            Map<String, String> fields = dtos.fields(literal.getExpression(), 0);
+            if (fields == null) {
+                String[] why = dtos.why(literal.getExpression());
+                gaps.add(unit, why[0], why[1], parse);
+                return true;
+            }
+            fields.forEach((name, kind) -> merge(inputs, name, kind));
+            gaps.nested.putAll(dtos.nested(literal.getExpression()));
+            return true;
+        }
+        if (!how.equals("readTree") || parsePath.getParentPath() == null
+                || !(parsePath.getParentPath().getLeaf() instanceof VariableTree local) || local.getInitializer() != parse) return false;
+        Map<String, String> keys = nodeKeys(unit, method, local.getName().toString());
+        if (keys == null) return false;
+        keys.forEach((name, kind) -> merge(inputs, name, kind));
+        return true;
+    }
+
+    /** The constant keys a JsonNode local is read with, and their types, or null for any other use. */
+    private static Map<String, String> nodeKeys(CompilationUnitTree unit, MethodTree method, String name) {
+        Map<String, String> keys = new LinkedHashMap<>();
+        boolean[] other = {false};
+        new TreePathScanner<Void, Void>() {
+            @Override
+            public Void visitIdentifier(IdentifierTree node, Void unused) {
+                if (!node.getName().contentEquals(name)) return null;
+                TreePath path = getCurrentPath();
+                TreePath up = path.getParentPath();
+                TreePath call = up == null ? null : up.getParentPath();
+                if (!(up != null && up.getLeaf() instanceof MemberSelectTree select && select.getExpression() == node
+                        && NODE_KEYS.contains(select.getIdentifier().toString())
+                        && call != null && call.getLeaf() instanceof MethodInvocationTree read && read.getArguments().size() == 1
+                        && read.getArguments().get(0) instanceof LiteralTree literal && literal.getValue() instanceof String key)) {
+                    other[0] = true;
+                    return null;
+                }
+                // node.get("qty").asInt(): the accessor called on the value gives its type.
+                TreePath outer = call.getParentPath();
+                String kind = outer != null && outer.getLeaf() instanceof MemberSelectTree accessor
+                        && outer.getParentPath() != null && outer.getParentPath().getLeaf() instanceof MethodInvocationTree
+                        ? NODE_KINDS.getOrDefault(accessor.getIdentifier().toString(), "text") : "text";
+                merge(keys, key, kind);
+                return null;
+            }
+        }.scan(TreePath.getPath(unit, method.getBody()), null);
+        return other[0] ? null : keys;
+    }
+
     static String castLater(CompilationUnitTree unit, MethodTree method, String name) {
         if (method.getBody() == null) return null;
         Set<String> kinds = new java.util.HashSet<>();
@@ -488,6 +587,9 @@ public final class JavaInputSchemaCore {
                     } else {
                         gaps.add(unit, "dynamic_key", "request." + called + " is called with a key that isn't a constant", call);
                     }
+                } else if (("getInputStream".equals(called) || "getReader".equals(called)) && call instanceof MethodInvocationTree stream
+                        && parsedBody(unit, method, callPath, stream, inputs, gaps, dtos)) {
+                    return null;  // Parsed with Jackson, and every read of what it parsed followed.
                 } else if (RAW_READS.contains(called)) {
                     String code = Set.of("getParameterMap", "getParameterNames").contains(called) ? "container_whole"
                             : called.equals("getAttribute") ? "helper" : "raw_body";

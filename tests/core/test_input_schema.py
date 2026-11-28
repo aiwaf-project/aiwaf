@@ -331,3 +331,107 @@ def test_fastapi_parameter_aliases_in_defaults_and_annotated_metadata():
         "@app.post('/b')\ndef b(note: str = Body(embed=True, alias='memo'), plain: Annotated[int, 'doc'] = 1):\n    return {}\n")
     assert found["a"][0] == {"limit": "text", "count": "int"}
     assert found["b"][0] == {"memo": "text", "plain": "int"}
+
+
+def test_truthiness_casts_are_not_boolean_restrictions():
+    found = {entry["function"]: entry["inputs"] for entry in source_inputs(
+        "from flask import request\n"
+        "def a():\n    return bool(request.args.get('flag'))\n"
+        "def b():\n    return request.args.get('flag', type=bool)\n"
+        "def c():\n    return request.args.get('flag') == 'true'\n")}
+    assert found == {"a": {"flag": "text"}, "b": {"flag": "text"}, "c": {"flag": "text"}}
+
+
+def test_reads_keep_their_location_and_class_handlers_their_own_reads():
+    found = {entry["function"]: entry for entry in source_inputs(
+        "import json\nfrom django.views import View\n"
+        "class Items(View):\n"
+        "    def get(self, request):\n        return int(request.GET.get('page', '1'))\n"
+        "    def post(self, request):\n        return json.loads(request.body)['page'], self.request.POST.get('title')\n"
+        "    def audit(self):\n        return self.request.GET.get('trace')\n")}
+    found.update({entry["function"]: entry for entry in source_inputs(
+        "from flask import request\n"
+        "def search():\n"
+        "    return int(request.args['limit']), request.form.get('limit'), request.values.get('q')\n")})
+    # Each handler has its own reads, with the class's other methods' (audit) beside them.
+    assert found["Items.get"]["inputs"] == {"page": "int", "trace": "text"}
+    assert found["Items.post"]["inputs"] == {"page": "text", "title": "text", "trace": "text"}
+    assert found["Items.post"]["locations"] == {"body": {"page": "text", "title": "text"}, "query": {"trace": "text"}}
+    # A helper method is read with the whole class, as before.
+    assert found["Items.audit"]["inputs"] == {"page": "text", "title": "text", "trace": "text"}
+    assert found["search"]["locations"] == {"query": {"limit": "int"}, "body": {"limit": "text"}}
+    assert found["search"]["unlocated"] == ["q"]
+
+
+def test_looping_over_a_request_list_gives_its_elements_keys():
+    found = {entry["function"]: entry.get("nested") for entry in source_inputs(
+        "import json\nfrom flask import request\n"
+        "def looped():\n    for line in request.json['lines']:\n        save(line['sku'], int(line.get('qty')))\n"
+        "def comprehension():\n    return [l['sku'] for l in request.json['lines'] if l.get('active')]\n"
+        "def held():\n    lines = request.json['lines']\n    return [l['sku'] for l in lines]\n"
+        "def parsed():\n    data = json.loads(request.data)\n    return {l['sku']: l['qty'] for l in data['lines']}\n"
+        "def whole():\n    for line in request.json['lines']:\n        save(line)\n"
+        "def also_counted():\n    lines = request.json['lines']\n    total = len(lines)\n    return [l['sku'] for l in lines]\n")}
+    assert found["looped"] == {"lines[]": ["qty", "sku"]}
+    assert found["comprehension"] == {"lines[]": ["active", "sku"]}
+    assert found["held"] == {"lines[]": ["sku"]}
+    assert found["parsed"] == {"lines[]": ["qty", "sku"]}
+    assert found["whole"] is None and found["also_counted"] is None
+
+
+def test_marshmallow_nested_fields_give_their_keys():
+    import marshmallow
+
+    from aiwaf.core.input_sources import serializer_nested
+
+    class Line(marshmallow.Schema):
+        sku = marshmallow.fields.Str()
+        qty = marshmallow.fields.Int()
+        id = marshmallow.fields.Int(dump_only=True)
+
+    class Order(marshmallow.Schema):
+        lines = marshmallow.fields.List(marshmallow.fields.Nested(Line))
+        more = marshmallow.fields.Nested(Line, many=True)
+        one = marshmallow.fields.Nested(Line)
+        tags = marshmallow.fields.List(marshmallow.fields.Str())
+
+    assert serializer_nested(Order) == {"lines[]": ["qty", "sku"], "more[]": ["qty", "sku"], "one": ["qty", "sku"]}
+
+
+def test_a_function_view_that_branches_on_request_method_marks_each_read():
+    found = {entry["function"]: entry.get("method_reads") for entry in source_inputs(
+        "import json\n"
+        "def items(request):\n"
+        "    trace = request.GET.get('trace')\n"
+        "    if request.method == 'POST':\n"
+        "        return json.loads(request.body)['title']\n"
+        "    elif request.method in ('PUT', 'PATCH'):\n"
+        "        return request.POST['note']\n"
+        "    return int(request.GET.get('page', '1'))\n"
+        "def guarded(request):\n"
+        "    if request.method != 'POST':\n"
+        "        return None\n"
+        "    return request.POST['title'] if not request.method == 'GET' else None\n"
+        "def either(request):\n"
+        "    if request.method == 'GET' or request.method == 'HEAD':\n"
+        "        return request.GET['q']\n"
+        "    if request.method != 'PUT' and request.method != 'PATCH':\n"
+        "        return request.POST['x']\n"
+        "def plain(request):\n"
+        "    return request.GET.get('q')\n"
+        "def unknown(request):\n"
+        "    if request.method == METHOD:\n"
+        "        return request.GET.get('q')\n")}
+    assert found["items"] == [
+        {"name": "trace", "kind": "text", "where": "query"},
+        {"name": "title", "kind": "text", "where": "body", "only": ["POST"]},
+        {"name": "note", "kind": "text", "where": "body", "only": ["PATCH", "PUT"]},
+        {"name": "page", "kind": "int", "where": "query", "except": ["PATCH", "POST", "PUT"]},
+    ]
+    assert found["guarded"] == [{"name": "title", "kind": "text", "where": "body", "only": ["POST"]}]
+    assert found["either"] == [
+        {"name": "q", "kind": "text", "where": "query", "only": ["GET", "HEAD"]},
+        # After the GET/HEAD guard, and inside the PUT/PATCH exclusion: none of the four.
+        {"name": "x", "kind": "text", "where": "body", "except": ["GET", "HEAD", "PATCH", "PUT"]},
+    ]
+    assert found["plain"] is None and found["unknown"] is None

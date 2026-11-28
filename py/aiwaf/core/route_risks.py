@@ -13,7 +13,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from .path_manifest import DEFAULT_MANIFEST_PATH, load_manifest, now_utc_iso, write_manifest
 from .input_schema import merge_into
@@ -240,6 +240,28 @@ def _routes_for(finding: Mapping[str, Any], routes: Mapping[str, Any]) -> list[s
     return [path for path, data in routes.items() if isinstance(data, Mapping) and _matching_views(finding, data)]
 
 
+# A class view's handler methods, by the HTTP method each serves (HEAD runs get).
+_HANDLER_METHODS = {"get": ("GET", "HEAD"), "post": ("POST",), "put": ("PUT",), "patch": ("PATCH",), "delete": ("DELETE",),
+                    "head": ("HEAD",), "options": ("OPTIONS",)}
+
+
+def _entry_methods(entry: Mapping[str, Any], view_methods: Iterable[str], route_methods: Iterable[str]) -> list[str]:
+    """The methods one entry's reads are for: a class view's get or post handler serves its own
+    method; anything else (a function view, a helper, dispatch) serves every method of its view."""
+    methods = [str(method).upper() for method in view_methods]
+    function = str(entry.get("function", "")).split(" -> ")[0]
+    if "." in function:
+        own = [method for method in _HANDLER_METHODS.get(function.rsplit(".", 1)[1], ()) if method in methods]
+        if own:
+            return own
+    return methods
+
+
+def _merge_kind(inputs: dict, name: str, kind: str) -> None:
+    """A name read as two types, or as text anywhere, is text."""
+    inputs[name] = kind if inputs.get(name, kind) == kind else "text"
+
+
 def apply_report(report: Mapping[str, Any], manifest: dict, sources: Optional[Mapping[str, Any]] = None) -> dict[str, int]:
     """Replace saved risks in a manifest with this report's findings, and count the results.
 
@@ -269,6 +291,11 @@ def apply_report(report: Mapping[str, Any], manifest: dict, sources: Optional[Ma
     typed = 0
     read: dict[str, set] = {}
     claims: dict[str, dict[str, set]] = {}
+    # Each method's own types and locations from its code, and the names it reads where the
+    # location isn't known.
+    code_types: dict[str, dict[str, dict[str, str]]] = {}
+    code_locations: dict[str, dict[str, dict[str, dict[str, str]]]] = {}
+    code_unlocated: dict[str, dict[str, set]] = {}
     for entry in report.get("inputs", ()):
         for path in _routes_for(entry, routes):
             merge_into(routes, path, entry)
@@ -276,11 +303,43 @@ def apply_report(report: Mapping[str, Any], manifest: dict, sources: Optional[Ma
             read.setdefault(path, set()).update(matched)
             # The names each method's views read, so strict inputs can check each method's own.
             view_methods = routes[path].get("view_methods") or {}
+            route_methods = [str(method).upper() for method in routes[path].get("methods") or ()]
+            branched = entry.get("method_reads") or None
+            sited = {site["name"] for site in branched or ()}
             for view in matched:
-                for method in view_methods.get(view, routes[path].get("methods") or ()):
-                    claims.setdefault(path, {}).setdefault(str(method).upper(), set()).update(entry["inputs"])
+                for method in _entry_methods(entry, view_methods.get(view, route_methods), route_methods):
+                    types = code_types.setdefault(path, {}).setdefault(method, {})
+                    where = code_locations.setdefault(path, {}).setdefault(method, {})
+                    unlocated = code_unlocated.setdefault(path, {}).setdefault(method, set())
+                    if branched:
+                        # A view that branches on request.method: each method takes only the reads
+                        # its branch can reach, and names read some other way.
+                        reached = [site for site in branched if method in (site.get("only") or [method])
+                                   and method not in (site.get("except") or ())]
+                        names = {site["name"] for site in reached} | (set(entry["inputs"]) - sited)
+                        claims.setdefault(path, {}).setdefault(method, set()).update(names)
+                        for site in reached:
+                            _merge_kind(types, site["name"], site["kind"])
+                            if site["where"]:
+                                _merge_kind(where.setdefault(site["where"], {}), site["name"], site["kind"])
+                            else:
+                                unlocated.add(site["name"])
+                        for name in set(entry["inputs"]) - sited:
+                            _merge_kind(types, name, entry["inputs"][name])
+                            unlocated.add(name)
+                        continue
+                    claims.setdefault(path, {}).setdefault(method, set()).update(entry["inputs"])
+                    for name, kind in entry["inputs"].items():
+                        _merge_kind(types, name, kind)
+                    for location, located in (entry.get("locations") or {}).items():
+                        for name, kind in located.items():
+                            _merge_kind(where.setdefault(location, {}), name, kind)
+                    unlocated.update(entry.get("unlocated") or ())
     for path, methods in claims.items():
         routes[path]["_input_methods"] = {method: sorted(names) for method, names in methods.items()}
+        routes[path]["_input_types"] = code_types.get(path, {})
+        routes[path]["_input_locations"] = code_locations.get(path, {})
+        routes[path]["_input_unlocated"] = {method: sorted(names) for method, names in code_unlocated.get(path, {}).items()}
     # A view defined in the audited source was read even when it reads nothing itself.
     for definition in report.get("definitions", ()):
         for path in _routes_for(definition, routes):

@@ -459,11 +459,14 @@ function addRoute(routes, routeInfo) {
         for (const [name, kind] of Object.entries(types)) own[name] = own[name] === undefined || own[name] === kind ? kind : 'text';
       }
     }
+    // Every view serving the path, when several do, so each one's code links to it.
+    const views = [...new Set([...(routes[normalized].views || [routes[normalized].view]), entry.view].filter(Boolean))].sort();
     routes[normalized] = {
       ...routes[normalized],
       ...entry,
       methods: mergedMethods
     };
+    if (views.length > 1) routes[normalized].views = views;
     if (combined) routes[normalized].declared_inputs = combined;
     if (Object.keys(declaredMethods).length) routes[normalized].declared_methods = declaredMethods;
     if (Object.keys(declaredTypes).length) routes[normalized].declared_types = declaredTypes;
@@ -614,6 +617,67 @@ function handlerMethodsOf(route) {
   return name && methods.length ? [[name, methods]] : undefined;
 }
 
+/**
+ * AdonisJS's routes as a route list: from `node ace list:routes --json`, or the router's own
+ * toJSON(), which group routes by domain ({ root: [...] }, or [{ domain, routes }]). Each route's
+ * controller handler, as #controllers/users_controller.index, becomes its view,
+ * UsersController.index, so the controller method's code links to it.
+ */
+function adonisRouteList(input) {
+  const routes = [];
+  const add = list => {
+    for (const route of Array.isArray(list) ? list : []) {
+      if (!route || typeof route !== 'object') continue;
+      if (Array.isArray(route.routes)) {
+        add(route.routes); // { domain, routes }
+        continue;
+      }
+      const methods = [].concat(route.methods || route.method || []).map(method => String(method).toUpperCase()).filter(method => method !== 'HEAD');
+      const view = adonisView(route.handler);
+      const method = view.includes('.') ? view.split('.').pop() : '';
+      routes.push({
+        path: route.pattern || route.path || route.route,
+        methods,
+        name: route.name || route.pattern || route.path || '',
+        view,
+        handlerMethods: method ? [[method, methods]] : undefined
+      });
+    }
+  };
+  if (Array.isArray(input)) add(input);
+  else if (input && typeof input === 'object') for (const list of Object.values(input)) add(list);
+  return routes;
+}
+
+/** A route handler's controller view: #controllers/users_controller.index is UsersController.index. */
+function adonisView(handler) {
+  let reference = '';
+  let method = '';
+  if (typeof handler === 'string') reference = handler;
+  else if (Array.isArray(handler)) {
+    reference = typeof handler[0] === 'function' ? handler[0].name : String(handler[0] || '');
+    method = String(handler[1] || 'handle');
+  } else if (handler && typeof handler === 'object') {
+    reference = String(handler.reference || handler.moduleNameOrPath || handler.name || '');
+    method = handler.method ? String(handler.method) : '';
+  }
+  if (!reference || reference === 'closure') return '';
+  if (!method) {
+    const dot = reference.lastIndexOf('.');
+    // A module path's own dots (.js, .ts) aren't a method.
+    if (dot > reference.lastIndexOf('/') && !/\.[cm]?[jt]s$/.test(reference)) {
+      method = reference.slice(dot + 1);
+      reference = reference.slice(0, dot);
+    } else {
+      method = 'handle';
+    }
+  }
+  const file = reference.split('/').pop().replace(/\.[cm]?[jt]s$/, '');
+  const name = /_|-/.test(file) || /^[a-z]/.test(file)
+    ? file.split(/[_-]/).filter(Boolean).map(part => part[0].toUpperCase() + part.slice(1)).join('') : file;
+  return `${name}.${method}`;
+}
+
 function normalizeRouteList(routesInput = []) {
   return (Array.isArray(routesInput) ? routesInput : [])
     .filter(route => route && typeof route === 'object')
@@ -729,16 +793,96 @@ function extractKoaRoutes(app, routesInput = []) {
     for (const layer of (router && Array.isArray(router.stack) ? router.stack : [])) {
       if (!layer || typeof layer.path !== 'string' || !Array.isArray(layer.methods) || !layer.methods.length) continue;
       const handlers = (layer.stack || []).filter(item => typeof item === 'function');
+      const methods = layer.methods.map(method => String(method).toUpperCase()).filter(method => method !== 'HEAD');
       addRoute(routes, {
         routePath: layer.path,
-        methods: layer.methods.map(method => String(method).toUpperCase()).filter(method => method !== 'HEAD'),
+        methods,
         handler: handlers[handlers.length - 1],
         handlers,
+        // The methods each named handler serves, so router.get('/x', list) reads for GET alone.
+        handlerMethods: handlers.filter(item => item.name).map(item => [item.name.replace(/^bound /, ''), methods]),
         name: layer.name || layer.path
       });
     }
   }
   return routes;
+}
+
+const SAILS_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
+// What an actions2 action's declared inputs answer: its code gets only those.
+const COVERS_ALL = ['dependency', 'external_class', 'model_fields', 'container_whole', 'helper'];
+const SAILS_KINDS = { string: 'text', number: 'float', boolean: 'bool', json: 'text', ref: 'text' };
+
+/**
+ * A Sails app's routes, from its config.routes: 'GET /users': 'UserController.find', a
+ * { controller, action } target, or an actions2 identity ('user/find', or { action }). Classic
+ * targets' views are Controller.action, so the controller method's code links to them; an
+ * actions2 action's view is its identity, and its declared inputs are the route's (Sails passes
+ * the action only those). Anything else (a view, a redirect, a function) has no inputs to read.
+ * A Sails app that isn't one is read as the Express app it is.
+ */
+function extractSailsRoutes(app) {
+  const { isSails } = require('./appLoader');
+  if (!isSails(app)) return extractExpressRoutes(app);
+  const appPath = (app.config && app.config.appPath) || process.cwd();
+  const controllers = path.join(appPath, 'api', 'controllers');
+  const exists = file => { try { return fs.statSync(file).isFile(); } catch (_) { return false; } };
+  const actionFile = identity => ['.js', '.cjs', '.mjs'].map(ext => path.join(controllers, `${identity}${ext}`)).find(exists) || null;
+  const routes = [];
+  for (const [address, target] of Object.entries((app.config && app.config.routes) || {})) {
+    const match = /^\s*(?:(get|post|put|patch|delete|head|options|all)\s+)?(\/\S*)\s*$/i.exec(address);
+    if (!match) continue;
+    const methods = !match[1] || match[1].toLowerCase() === 'all' ? SAILS_METHODS : [match[1].toUpperCase()];
+    let view = '';
+    let declared = null;
+    const named = typeof target === 'string' ? target : target && typeof target === 'object'
+      ? (target.controller ? `${target.controller}.${target.action || 'index'}` : target.action || target.target || '') : '';
+    if (/^[\w/-]+Controller\.\w+$/.test(named)) view = named;
+    else if (/^[\w-]+(?:\/[\w-]+)+$/.test(named) || /^[\w-]+$/.test(named)) {
+      // An action identity: an actions2 file, or a classic controller's action (user/find is
+      // UserController.find).
+      const file = actionFile(named);
+      const parts = named.split('/');
+      const classic = parts.length > 1 ? `${parts.slice(0, -1).join('/').replace(/(^|\/)(\w)/g, (_m, slash, c) => slash + c.toUpperCase())}Controller` : '';
+      if (file) {
+        view = named;
+        declared = sailsActionInputs(file);
+      } else if (classic && actionFile(classic)) {
+        view = `${classic}.${parts[parts.length - 1]}`;
+      }
+    }
+    routes.push({
+      routePath: match[2],
+      methods,
+      name: address,
+      view,
+      declared: declared || undefined,
+      handlerMethods: view ? [[view.split('.').pop(), methods]] : undefined
+    });
+  }
+  const out = {};
+  routes.forEach(route => addRoute(out, route));
+  return out;
+}
+
+/** An actions2 action's declared inputs, as a framework declaration, or null. */
+function sailsActionInputs(file) {
+  let definition;
+  try {
+    definition = require(file);
+  } catch (_) {
+    return null;
+  }
+  definition = definition && definition.default ? definition.default : definition;
+  if (!definition || typeof definition !== 'object' || !definition.inputs || typeof definition.fn !== 'function') return null;
+  const inputs = {};
+  for (const [name, spec] of Object.entries(definition.inputs)) {
+    const kind = spec && typeof spec === 'object' ? SAILS_KINDS[spec.type] || 'text' : 'text';
+    inputs[name] = kind === 'float' && spec.isInteger ? 'int' : kind;
+  }
+  // The action gets only its declared inputs, unless its code reaches for the request itself.
+  const own = !/\bthis\.req\b/.test(String(definition.fn));
+  return { inputs, covers: own ? COVERS_ALL : [], reasons: [], standalone: own };
 }
 
 function extractNextRoutes(handlers = []) {
@@ -919,13 +1063,18 @@ function buildFrameworkManifest(framework, app, options = {}) {
   }
   const extractors = {
     express: () => options.routes ? extractNextRoutes(options.routes) : extractExpressRoutes(app),
-    sails: () => options.routes ? extractNextRoutes(options.routes) : extractExpressRoutes(app),
+    sails: () => options.routes ? extractNextRoutes(options.routes) : extractSailsRoutes(app),
     fastify: () => extractFastifyRoutes(app, options.routes),
     hapi: () => extractHapiRoutes(app, options.routes),
     koa: () => extractKoaRoutes(app, options.routes),
     next: () => extractNextRoutes(options.routes || app),
     nest: () => extractNestRoutes(app, options.routes),
-    adonis: () => extractNextRoutes(options.routes || [])
+    // A route list, AdonisJS's list:routes JSON, or a router exported from the app.
+    adonis: () => {
+      const input = options.routes || (app && typeof app.toJSON === 'function' ? app.toJSON() : []);
+      const listed = Array.isArray(input) && input.every(route => route && (route.path || route.url || route.routePath) && !route.pattern);
+      return extractNextRoutes(listed ? input : adonisRouteList(input));
+    }
   };
   const extractor = extractors[normalized];
   if (!extractor) {
@@ -961,6 +1110,8 @@ module.exports = {
   fastifyRouteList,
   fastifyRoutes,
   extractHapiRoutes,
+  extractSailsRoutes,
+  adonisRouteList,
   extractKoaRoutes,
   extractNextRoutes,
   extractNestRoutes,

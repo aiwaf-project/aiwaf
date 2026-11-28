@@ -18,10 +18,46 @@ test('reads, types, destructuring and aliases', () => {
   ].join('\n'));
   expect(found['/search']).toEqual([{ q: 'text', page: 'int', n: 'float' }, true]);
   expect(found['/items']).toEqual([{ title: 'text', note: 'text' }, true]);
-  expect(found.legacy).toEqual([{ a: 'text', n: 'float', ok: 'bool' }, true]);
+  // Boolean() accepts any text, so it isn't evidence the value must be a boolean.
+  expect(found.legacy).toEqual([{ a: 'text', n: 'float', ok: 'text' }, true]);
   expect(found['/param']).toEqual([{ id: 'text' }, true]);
   expect(found['/redirect']).toEqual([{}, true]);
   expect(found['/koa']).toEqual([{ q: 'text', n: 'text' }, true]);
+});
+
+test("Hapi's request.payload is the body: named reads, aliases, and whole or raw use", () => {
+  const found = inputs([
+    'function named(request) { return request.payload.sku + Number(request.payload.n); }',
+    'function aliased(request) { const p = request.payload; return p.title; }',
+    'function whole(request) { return store(request.payload); }',
+    'function text(request) { return request.payload.toString(); }'
+  ].join('\n'));
+  expect(found.aliased).toEqual([{ title: 'text' }, true]);
+  expect(found.whole).toEqual([{}, false]);
+  expect(found.text).toEqual([{}, false]);
+  expect(found.named).toEqual([{ sku: 'text', n: 'float' }, true]);
+});
+
+test('iterating a request array gives its elements\' keys, unless an element is used another way', () => {
+  const parse = source => Object.fromEntries(fileInputs(parser.parse(source), 'app.js', source, node => node.id && node.id.name)
+    .map(entry => [entry.function, entry.nested || null]));
+  const found = parse([
+    'function mapped(req) { return req.body.lines.map(line => line.sku + Number(line.qty)); }',
+    'function looped(req) { for (const line of req.body.lines) save(line.sku, line.qty); }',
+    'function destructured(req) { req.body.lines.forEach(({ sku, qty }) => save(sku, qty)); }',
+    'function local(req) { const { lines } = req.body; return lines.map(l => l.sku); }',
+    'function held(req) { const lines = req.body.lines; for (const l of lines) l.sku; }',
+    'function whole(req) { return req.body.lines.map(line => save(line)); }',
+    'function alsoCounted(req) { const lines = req.body.lines; for (const l of lines) l.sku; return lines.length; }',
+    'function indexed(req) { return req.body.lines.map((line, i) => line[i]); }',
+    'function rest(req) { return req.body.lines.map(({ sku, ...others }) => others); }'
+  ].join('\n'));
+  expect(found.mapped).toEqual({ 'lines[]': ['qty', 'sku'] });
+  expect(found.looped).toEqual({ 'lines[]': ['qty', 'sku'] });
+  expect(found.destructured).toEqual({ 'lines[]': ['qty', 'sku'] });
+  expect(found.local).toEqual({ 'lines[]': ['sku'] });
+  expect(found.held).toEqual({ 'lines[]': ['sku'] });
+  for (const name of ['whole', 'alsoCounted', 'indexed', 'rest']) expect([name, found[name]]).toEqual([name, null]);
 });
 
 test('zod object schemas give their fields', () => {

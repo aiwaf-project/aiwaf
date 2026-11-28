@@ -5,7 +5,9 @@
 //
 // Loading runs the app's own module code. Servers it starts are stopped from binding a port:
 // listen() is recorded instead, which is also how an app that only calls app.listen() without
-// exporting anything is found.
+// exporting anything is found. Its callback still runs, and 'listening' is still emitted, with
+// address() giving the port asked for: an app that waits for them (Sails' lift(), a factory
+// awaiting app.listen()) gets ready without serving.
 
 const fs = require('fs');
 const net = require('net');
@@ -36,7 +38,16 @@ function frameworkOf(value) {
   if (typeof value.printRoutes === 'function' && typeof value.register === 'function') return 'fastify';
   if (typeof value.table === 'function' && typeof value.route === 'function') return 'hapi';
   if (Array.isArray(value.middleware) && typeof value.callback === 'function') return 'koa';
+  if (isSails(value)) return 'sails';
+  // An AdonisJS router, exported from the app: its toJSON() lists the routes.
+  if (typeof value.toJSON === 'function' && typeof value.resource === 'function' && typeof value.group === 'function') return 'adonis';
   return null;
+}
+
+/** A Sails app instance: lift(), lower() and its config. */
+function isSails(value) {
+  return Boolean(value && typeof value === 'object' && typeof value.lift === 'function' && typeof value.lower === 'function'
+    && value.config && typeof value.config === 'object');
 }
 
 /** The app file: the one given, else package.json's main, else a usual name. */
@@ -145,9 +156,19 @@ async function loadApp(options = {}) {
   const servers = [];
   const restoreFastify = captureFastifyRoutes(file);
   const listen = net.Server.prototype.listen;
-  // Records the server instead of binding a port. Its callback isn't run: the app isn't serving.
-  net.Server.prototype.listen = function recordListen() {
+  // Records the server instead of binding a port. Its callback, and 'listening', still run (with
+  // address() giving the port asked for), so an app waiting on them is ready; errors they throw
+  // are the app's, not init's, so they're ignored.
+  net.Server.prototype.listen = function recordListen(...args) {
     servers.push(this);
+    const callback = typeof args[args.length - 1] === 'function' ? args.pop() : null;
+    const first = args[0];
+    const port = Number(first && typeof first === 'object' ? first.port : first) || 0;
+    this.address = () => ({ address: '127.0.0.1', family: 'IPv4', port });
+    if (callback) this.once('listening', callback);
+    setImmediate(() => {
+      try { this.emit('listening'); } catch (_) { /* the app's own listening handler failed */ }
+    });
     return this;
   };
   let namespace;
@@ -184,13 +205,27 @@ async function loadApp(options = {}) {
     }
     if (!app) {
       const hint = options.exportName
-        ? `its export ${options.exportName} isn't an Express, Fastify, Hapi or Nest app, or a function returning one`
-        : 'it exports no Express, Fastify, Hapi or Nest app and started no Express server';
+        ? `its export ${options.exportName} isn't an Express, Fastify, Hapi, Koa, Nest or Sails app, or a function returning one`
+        : 'it exports no Express, Fastify, Hapi, Koa, Nest or Sails app and started no Express server';
       throw new AppLoadError(`No app found in ${path.relative(cwd, file) || file}: ${hint}. `
         + 'Export the app (module.exports = app) or name it with --export.');
     }
+    // Sails serves through Express; its routes and actions are on the Sails app, global by default.
+    if (frameworkOf(app) === 'express' && isSails(globalThis.sails)) app = globalThis.sails;
     const framework = frameworkOf(app);
     if (framework === 'fastify' && typeof app.ready === 'function') await app.ready();
+    // A Sails app that isn't loaded yet: load it (hooks, config, routes) without lifting it.
+    if (framework === 'sails' && !(app.config && app.config.routes) && typeof app.load === 'function') {
+      await new Promise(resolve => {
+        const timer = setTimeout(resolve, waitMs);
+        try {
+          app.load({ hooks: { grunt: false }, log: { level: 'warn' } }, () => { clearTimeout(timer); resolve(); });
+        } catch (_) {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+    }
     return { app, framework, file, exportName: options.exportName || null };
   } finally {
     restoreFastify();
@@ -198,4 +233,4 @@ async function loadApp(options = {}) {
   }
 }
 
-module.exports = { loadApp, frameworkOf, resolveAppFile, AppLoadError, ROUTES, OWNER, captureFastifyRoutes };
+module.exports = { loadApp, frameworkOf, isSails, resolveAppFile, AppLoadError, ROUTES, OWNER, captureFastifyRoutes };

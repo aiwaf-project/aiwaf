@@ -28,6 +28,7 @@ Reason codes (stable; other tools and the docs refer to them):
 from __future__ import annotations
 
 import ast
+import re
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 # Request attributes that hold the query or body. Called ones, as get_json(), are read by calling.
@@ -43,7 +44,16 @@ _SAFE_REQUEST_CALLS = {
     "render", "render_to_response", "render_to_string", "TemplateResponse", "redirect", "login", "logout", "authenticate",
     "add_message", "debug", "info", "success", "warning", "error", "get_token", "csrf", "get_current_site",
 }
-_CONVERTERS = {"int": "int", "float": "float", "Decimal": "float", "bool": "bool", "UUID": "uuid", "uuid.UUID": "uuid"}
+# Casts that reject what isn't their type. bool() isn't one: bool("no") is True, so code that
+# calls it (or Flask's type=bool) accepts any text, and a bool restriction would block values it
+# handles. A declared bool (a Pydantic field, a form's BooleanField) is a restriction.
+# Container labels by location: Django's request.GET and Flask's request.args are the query
+# string; POST, form, json, get_json(), data and body are the body. request.values is both.
+_QUERY_LABEL = re.compile(r"\.(?:GET|args|query_params)\b")
+_BODY_LABEL = re.compile(r"\.(?:POST|FILES|files|form|json|get_json|data|body|get_data)\b")
+# A class view's handler methods, one per HTTP method.
+_HTTP_HANDLERS = {"get", "post", "put", "patch", "delete", "head", "options"}
+_CONVERTERS = {"int": "int", "float": "float", "Decimal": "float", "UUID": "uuid", "uuid.UUID": "uuid"}
 _ANNOTATIONS = {
     "int": "int", "float": "float", "Decimal": "float", "bool": "bool", "UUID": "uuid", "conint": "int", "confloat": "float",
     "PositiveInt": "int", "NegativeInt": "int", "NonNegativeInt": "int", "StrictInt": "int", "StrictFloat": "float",
@@ -385,6 +395,135 @@ class _Reads:
         # way, whose keys aren't known.
         self.nested: Dict[str, set] = {}
         self.flat: set = set()
+        # Each name's type where it was read ({"query": {...}, "body": {...}}), and names read where
+        # the location isn't known (request.values, a form's fields).
+        self.locations: Dict[str, Dict[str, str]] = {}
+        self.unlocated: set = set()
+        # Where each named read is, and the branches on request.method around them, so a
+        # function view's if request.method == "POST": reads can be POST's alone. A helper's
+        # reads count where it's called (call_site).
+        self.sites: List[dict] = []
+        self.regions: List[tuple] = []
+        self.call_site: Optional[tuple] = None
+
+    def locate(self, label: str, name: str, kind: str, at: Optional[ast.AST] = None) -> None:
+        """Records a named read at the location its container's label names."""
+        where = "body" if _BODY_LABEL.search(label) else "query" if _QUERY_LABEL.search(label) else None
+        if where is None:
+            self.unlocated.add(name)
+        else:
+            _merge(self.locations.setdefault(where, {}), name, kind)
+        position = self.call_site or ((at.lineno, at.col_offset) if hasattr(at, "lineno") else None)
+        if position is not None:
+            self.sites.append({"name": name, "kind": kind, "where": where, "at": position})
+
+    def method_reads(self) -> Optional[List[dict]]:
+        """Every read with the methods it's for, when any is inside a branch on request.method."""
+        if not self.regions:
+            return None
+        constrained = False
+        reads = []
+        for site in self.sites:
+            only: Optional[set] = None
+            excluded: set = set()
+            for start, end, test in self.regions:
+                if not start <= site["at"] < end:
+                    continue
+                if "only" in test:
+                    only = set(test["only"]) if only is None else only & set(test["only"])
+                else:
+                    excluded |= set(test["except"])
+            read = {"name": site["name"], "kind": site["kind"], "where": site["where"]}
+            if only is not None:
+                read["only"] = sorted(only - excluded)
+                constrained = True
+            elif excluded:
+                read["except"] = sorted(excluded)
+                constrained = True
+            reads.append(read)
+        return reads if constrained else None
+
+    def branches(self, node, is_request) -> None:
+        """The parts of node that run only for some methods: if request.method == "POST":,
+        its else, and what follows a guard that returns (if request.method != "POST": return)."""
+        def method_of(expr) -> bool:
+            return isinstance(expr, ast.Attribute) and expr.attr == "method" and is_request(expr.value)
+
+        def values(expr) -> Optional[List[str]]:
+            items = expr.elts if isinstance(expr, (ast.Tuple, ast.List, ast.Set)) else [expr]
+            found = [item.value.upper() for item in items if isinstance(item, ast.Constant) and isinstance(item.value, str)]
+            return found if len(found) == len(items) else None
+
+        def test_of(expr) -> Optional[dict]:
+            if isinstance(expr, ast.Compare) and len(expr.ops) == 1:
+                left, op, right = expr.left, expr.ops[0], expr.comparators[0]
+                if not method_of(left) and method_of(right) and isinstance(op, (ast.Eq, ast.NotEq)):
+                    left, right = right, left
+                named = values(right) if method_of(left) else None
+                if named is None:
+                    return None
+                if isinstance(op, (ast.Eq, ast.In)):
+                    return {"only": named}
+                if isinstance(op, (ast.NotEq, ast.NotIn)):
+                    return {"except": named}
+                return None
+            if isinstance(expr, ast.BoolOp):
+                parts = [test_of(value) for value in expr.values]
+                if any(part is None for part in parts):
+                    return None
+                if isinstance(expr.op, ast.Or) and all("only" in part for part in parts):
+                    return {"only": [method for part in parts for method in part["only"]]}
+                if isinstance(expr.op, ast.And) and all("except" in part for part in parts):
+                    return {"except": [method for part in parts for method in part["except"]]}
+                return None
+            if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not):
+                return negate(test_of(expr.operand))
+            return None
+
+        def negate(test: Optional[dict]) -> Optional[dict]:
+            if test is None:
+                return None
+            return {"except": test["only"]} if "only" in test else {"only": test["except"]}
+
+        def exits(statements) -> bool:
+            last = statements[-1] if statements else None
+            if isinstance(last, (ast.Return, ast.Raise)):
+                return True
+            return isinstance(last, ast.If) and exits(last.body) and exits(last.orelse)
+
+        def span(statements) -> tuple:
+            return (statements[0].lineno, statements[0].col_offset), (statements[-1].end_lineno, statements[-1].end_col_offset)
+
+        for holder in ast.walk(node):
+            for field in ("body", "orelse", "finalbody"):
+                statements = getattr(holder, field, None)
+                if not isinstance(statements, list):
+                    continue
+                for index, statement in enumerate(statements):
+                    if not isinstance(statement, ast.If):
+                        continue
+                    test = test_of(statement.test)
+                    if test is None:
+                        continue
+                    self.regions.append((*span(statement.body), test))
+                    if statement.orelse:
+                        self.regions.append((*span(statement.orelse), negate(test)))
+                    # What follows an if (and its elifs) whose branches return is for the other
+                    # methods: if request.method != "POST": return, then POST's code.
+                    rest = statements[index + 1:]
+                    link, chain = statement, []
+                    while rest and isinstance(link, ast.If) and exits(link.body):
+                        link_test = test_of(link.test)
+                        if link_test is None:
+                            chain = []
+                            break
+                        chain.append(negate(link_test))
+                        if not link.orelse:
+                            break
+                        link = link.orelse[0] if len(link.orelse) == 1 else None
+                    if chain and (link is None or not isinstance(link, ast.If) or not link.orelse):
+                        for each in chain:
+                            self.regions.append((*span(rest), each))
 
     @property
     def complete(self) -> bool:
@@ -443,6 +582,7 @@ class _Reads:
                     continue
             for name, kind in fields.items():
                 _merge(self.inputs, name, kind)
+                _merge(self.locations.setdefault(segment, {}), name, kind)
             unknown_node = _keyword(decorator, "unknown")
             unknown = _unknown_setting(unknown_node) if unknown_node is not None else ("exclude" if segment == "query" else schema_unknown)
             if unknown_node is not None and isinstance(unknown_node, ast.Constant) and unknown_node.value is None:
@@ -480,6 +620,9 @@ class _Reads:
 
         def is_request(expr) -> bool:
             return (isinstance(expr, ast.Name) and expr.id in requests) or _dotted(expr) == "self.request"
+
+        if self.call_site is None:
+            self.branches(node, is_request)
 
         def up(expr):
             parent = parents.get(id(expr))
@@ -573,9 +716,64 @@ class _Reads:
             key = self.key(node)
             return [key] if key is not None else loop_keys(node)
 
+        def key_of_use(use) -> Optional[str]:
+            """The constant key a value is read with, as sku in line["sku"] or line.get("sku"), or None."""
+            _, parent = up(use)
+            if isinstance(parent, ast.Subscript) and parent.value is use:
+                return self.key(parent.slice)
+            if isinstance(parent, ast.Attribute) and parent.attr == "get":
+                call = parents.get(id(parent))
+                if isinstance(call, ast.Call) and call.func is parent and call.args:
+                    return self.key(call.args[0])
+            return None
+
+        def element_keys(read) -> Optional[set]:
+            """The keys each element of a list input is read with, when it's looped over
+            straightforwardly (for line in lines: line["sku"], [l["qty"] for l in lines]). None when
+            the elements are used any other way."""
+            _, parent = up(read)
+            scopes: list = []
+            name = None
+            if isinstance(parent, ast.For) and parent.iter is read and isinstance(parent.target, ast.Name):
+                name, scopes = parent.target.id, [*parent.body, *parent.orelse]
+            elif isinstance(parent, ast.comprehension) and parent.iter is read and isinstance(parent.target, ast.Name):
+                owner = parents.get(id(parent))
+                name = parent.target.id
+                scopes = [*parent.ifs, *(getattr(owner, attribute) for attribute in ("elt", "key", "value") if hasattr(owner, attribute)),
+                          *(item for later in getattr(owner, "generators", ()) if later is not parent for item in (later.iter, *later.ifs))]
+            if name is None:
+                return None
+            keys = set()
+            for scope in scopes:
+                for use in ast.walk(scope):
+                    if isinstance(use, ast.Name) and use.id == name and isinstance(use.ctx, ast.Load):
+                        key = key_of_use(use)
+                        if key is None:
+                            return None
+                        keys.add(key)
+            return keys or None
+
+        def alias_element_keys(variable: str) -> Optional[set]:
+            """A list held in a local first, as lines = data["lines"]: every use must loop over it."""
+            keys: set = set()
+            for use in ast.walk(node):
+                if isinstance(use, ast.Name) and use.id == variable and isinstance(use.ctx, ast.Load):
+                    found = element_keys(use)
+                    if found is None:
+                        return None
+                    keys |= found
+            return keys or None
+
         def inner(read, key: str) -> None:
             """What's done with an input's value: a constant-key read inside it, or anything else."""
             _, parent = up(read)
+            elements = element_keys(read)
+            if elements is None and isinstance(parent, ast.Assign) and parent.value is read and len(parent.targets) == 1 \
+                    and isinstance(parent.targets[0], ast.Name):
+                elements = alias_element_keys(parent.targets[0].id)
+            if elements:
+                self.nested.setdefault(f"{key}[]", set()).update(elements)
+                return
             sub = None
             if isinstance(parent, ast.Subscript) and parent.value is read:
                 sub = self.key(parent.slice)
@@ -598,7 +796,9 @@ class _Reads:
                 found = keys(parent.slice)
                 if found is not None:
                     for key in found:
-                        _merge(self.inputs, key, converted(parent))
+                        kind = converted(parent)
+                        _merge(self.inputs, key, kind)
+                        self.locate(name, key, kind, parent)
                         inner(parent, key)
                 else:
                     self.incomplete("dynamic_key", f"{name} is read with a key that isn't a constant", parent)
@@ -610,7 +810,9 @@ class _Reads:
                     if found is not None:
                         kind = next((_CONVERTERS.get(_dotted(k.value), "text") for k in call.keywords if k.arg == "type"), None)
                         for key in found:
-                            _merge(self.inputs, key, kind or converted(call))
+                            read_kind = kind or converted(call)
+                            _merge(self.inputs, key, read_kind)
+                            self.locate(name, key, read_kind, call)
                             inner(call, key)
                     else:
                         self.incomplete("dynamic_key", f"{name}.{parent.attr}() is called with a key that isn't a constant", call)
@@ -634,6 +836,7 @@ class _Reads:
                     if fields is not None:
                         for field, kind in fields.items():
                             _merge(self.inputs, field, kind)
+                            self.unlocated.add(field)  # A form or serializer may read either.
                         return
                     if reason is not None and reason[0] == "model_fields":
                         self.class_reason(reason, call)
@@ -725,6 +928,8 @@ class _Reads:
         self.active.add(id(target))
         caller = self.module
         self.module = module
+        site = self.call_site
+        self.call_site = site or (call.lineno, call.col_offset)
         try:
             if container is None:
                 self.walk(target, {name})
@@ -732,6 +937,7 @@ class _Reads:
                 self.walk(target, set(), {name: container})
         finally:
             self.module = caller
+            self.call_site = site
             self.active.discard(id(target))
         return True
 
@@ -805,11 +1011,23 @@ def _flask_request(tree: ast.Module) -> bool:
 
 def _entry(function: str, filename: str, reads: _Reads) -> dict:
     entry = {"function": function, "file": filename, "inputs": dict(reads.inputs), "complete": reads.complete}
-    nested = {key: sorted(keys) for key, keys in reads.nested.items() if key not in reads.flat and key in reads.inputs}
+    # A key path's first name, as lines in lines[], is the input.
+    def top(path: str) -> str:
+        return path.split(".")[0].removesuffix("[]")
+
+    nested = {key: sorted(keys) for key, keys in reads.nested.items() if top(key) not in reads.flat and top(key) in reads.inputs}
     if nested:
         entry["nested"] = nested
     if reads.reasons:  # Only on incomplete entries, so complete ones keep the shared report shape.
         entry["reasons"] = [dict(reason) for reason in reads.reasons]
+    locations = {where: dict(types) for where, types in reads.locations.items() if types}
+    if locations:
+        entry["locations"] = locations
+    if reads.unlocated:
+        entry["unlocated"] = sorted(reads.unlocated)
+    method_reads = reads.method_reads()
+    if method_reads:
+        entry["method_reads"] = method_reads
     return entry
 
 
@@ -835,18 +1053,26 @@ def module_inputs(tree: ast.Module, filename: str, module: Optional[_Module] = N
         if not any(_uses_request(method, _Reads(module, False).request_names(method)) or _argument_decorated(method)
                    for method in methods):
             continue
-        # A class view is read as a whole: its handlers and helpers share self.request.
-        reads = _Reads(module, flask_request)
-        reads.methods = {method.name for method in methods}
-        reads.plain_class = bool(node.bases) and all(_last(base) in _PLAIN_VIEWS for base in node.bases)
-        if not reads.plain_class:
-            bases = ", ".join(_dotted(base) for base in node.bases) or "no base"
-            reads.incomplete("class_view", f"{node.name} inherits handlers from {bases}", node, view=node.name)
+        # A class view is read as a whole: its handlers and helpers share self.request. Each HTTP
+        # method's handler (get, post, ...) is also read with only the class's other methods, so
+        # what it reads is its own: a GET doesn't take the POST's body fields.
+        def read_class(chosen):
+            reads = _Reads(module, flask_request)
+            reads.methods = {method.name for method in methods}
+            reads.plain_class = bool(node.bases) and all(_last(base) in _PLAIN_VIEWS for base in node.bases)
+            if not reads.plain_class:
+                bases = ", ".join(_dotted(base) for base in node.bases) or "no base"
+                reads.incomplete("class_view", f"{node.name} inherits handlers from {bases}", node, view=node.name)
+            for method in chosen:
+                reads.arguments(method)
+                reads.walk(method, reads.request_names(method))
+            reads.close()
+            return reads
+
+        whole = read_class(methods)
+        shared = [method for method in methods if method.name not in _HTTP_HANDLERS]
         for method in methods:
-            reads.arguments(method)
-            reads.walk(method, reads.request_names(method))
-        reads.close()
-        for method in methods:
+            reads = read_class([method, *shared]) if method.name in _HTTP_HANDLERS else whole
             results.append(_entry(f"{node.name}.{method.name}", filename, reads))
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and id(node) not in owned:
@@ -899,9 +1125,12 @@ def merge_into(routes: dict, path: str, entry: dict) -> None:
     nested = entry.get("nested") or {}
     for name, kind in entry["inputs"].items():
         _merge(inputs, name, kind)
-        # An input's inner keys are only known when every function reading it reads them.
-        if name in nested:
-            data.setdefault("_nested", {}).setdefault(name, set()).update(nested[name])
+        # An input's inner keys are only known when every function reading it reads them: its own
+        # keys (customer) or its elements' (lines[]).
+        paths = [path for path in nested if path.split(".")[0].removesuffix("[]") == name]
+        if paths:
+            for path in paths:
+                data.setdefault("_nested", {}).setdefault(path, set()).update(nested[path])
         else:
             data.setdefault("_flat", set()).add(name)
     data["inputs_complete"] = bool(data.get("inputs_complete", True)) and bool(entry["complete"])

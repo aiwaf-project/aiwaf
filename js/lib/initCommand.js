@@ -47,7 +47,10 @@ function parseArgs(args = []) {
     else if (!arg.startsWith('-') && !options.app) options.app = arg;
     else throw new Error(`Unknown option: ${arg}`);
   }
-  if (options.routes !== null && !Array.isArray(options.routes)) throw new Error('--routes must be a JSON array of routes');
+  // AdonisJS's list:routes --json groups routes by domain in an object.
+  if (options.routes !== null && !Array.isArray(options.routes) && !(options.framework === 'adonis' && options.routes && typeof options.routes === 'object')) {
+    throw new Error('--routes must be a JSON array of routes');
+  }
   if (!Number.isFinite(options.waitMs) || options.waitMs < 0) throw new Error('--wait must be a number of milliseconds');
   return options;
 }

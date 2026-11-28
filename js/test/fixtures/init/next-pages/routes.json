@@ -1,0 +1,4 @@
+[
+  { "path": "/api/items", "methods": ["GET", "POST"] },
+  { "path": "/api/orders", "methods": ["GET", "DELETE", "PUT", "POST"] }
+]

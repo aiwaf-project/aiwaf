@@ -1,0 +1,8 @@
+{
+  "root": [
+    { "pattern": "/users", "methods": ["GET", "HEAD"], "handler": "#controllers/users_controller.index", "name": "users.index" },
+    { "pattern": "/users", "methods": ["POST"], "handler": { "type": "controller", "moduleNameOrPath": "#controllers/users_controller", "method": "store" } },
+    { "pattern": "/users/:id", "methods": ["PUT"], "handler": "#controllers/users_controller.update" },
+    { "pattern": "/posts", "methods": ["GET", "HEAD"], "handler": "#controllers/posts_controller.index" }
+  ]
+}

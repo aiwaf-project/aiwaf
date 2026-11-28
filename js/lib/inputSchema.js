@@ -14,7 +14,13 @@
 
 const REQUEST_NAMES = new Set(['req', 'request']);
 const CONTEXT_NAMES = new Set(['ctx', 'context']);
-const CONTAINERS = new Set(['query', 'body']);
+// The query and body containers. Hapi names the body request.payload.
+// AdonisJS's request.qs(), request.body() and request.all(), and Sails' req.allParams(), are
+// called to give them.
+const CONTAINERS = new Set(['query', 'body', 'payload', 'qs', 'all', 'allParams']);
+const BODY_LABEL = /\b(?:body|payload)\b/;
+// Array methods whose callback takes each element first, as lines.map(line => line.sku).
+const ELEMENT_METHODS = new Set(['map', 'forEach', 'filter', 'some', 'every', 'find', 'findIndex', 'flatMap']);
 // Array methods: called on an input, they use it whole.
 const ARRAY_METHODS = new Set(['map', 'forEach', 'filter', 'reduce', 'some', 'every', 'find', 'findIndex', 'flatMap', 'join', 'sort', 'reverse', 'push', 'entries', 'keys', 'values']);
 
@@ -28,12 +34,17 @@ const TEXT_METHODS = new Set([
   'padStart', 'padEnd', 'concat', 'toString', 'at', 'search', 'normalize', 'localeCompare'
 ]);
 
+// Casts that reject what isn't their type. Boolean() isn't one: Boolean('no') is true, so code
+// that calls it accepts any text, and a bool restriction would block values it handles. A
+// declared boolean (a schema's, ParseBoolPipe, isBoolean()) is a restriction.
 const CONVERTERS = new Map([
   ['parseInt', 'int'], ['Number.parseInt', 'int'], ['Number', 'float'], ['parseFloat', 'float'],
-  ['Number.parseFloat', 'float'], ['Boolean', 'bool']
+  ['Number.parseFloat', 'float']
 ]);
 // Request members that read the query string or body some other way.
-const RAW_MEMBERS = new Set(['rawBody', 'read', 'pipe', 'on', 'once', 'body_raw', 'files', 'file']);
+// Request members that read the query string or body some other way (AdonisJS's raw() and
+// allFiles() among them).
+const RAW_MEMBERS = new Set(['rawBody', 'read', 'pipe', 'on', 'once', 'body_raw', 'files', 'file', 'raw', 'allFiles']);
 const URL_PARSERS = /^(?:URL|URLSearchParams|url\.parse|querystring\.parse|qs\.parse|parseUrl)$/;
 // Route middleware that only parses or guards: anything else may read the body itself.
 const ROUTE_HOOKS = new Set(['onRequest', 'preParsing', 'preValidation', 'preHandler', 'preSerialization']);
@@ -93,6 +104,22 @@ function merge(inputs, name, kind) {
   inputs[name] = inputs[name] === undefined || inputs[name] === kind ? kind : 'text';
 }
 
+// Where a container's reads come from, by its label: req.body, request.payload and
+// ctx.request.body are the body, req.query and ctx.query the query string.
+function locationOf(label) {
+  if (BODY_LABEL.test(label)) return 'body';
+  return /\b(?:query|qs)\b/.test(label) ? 'query' : null;
+}
+
+/** Adds one reading's types per location ({ query, body }) to another's. */
+function mergeLocations(into, from) {
+  for (const [where, types] of Object.entries(from || {})) {
+    into[where] = into[where] || {};
+    for (const [name, kind] of Object.entries(types)) merge(into[where], name, kind);
+  }
+  return into;
+}
+
 // The type a zod field's chain says, as in z.number().int() or z.string().uuid().
 function zodType(source) {
   if (/\.uuid\(/.test(source)) return 'uuid';
@@ -132,7 +159,8 @@ function zodSchemas(ast, source) {
  * request is followed into when passed to one, and its string constants. named, when given, is
  * the parameter that holds the request in a followed function.
  */
-function handlerInputs(node, schemas, scope = { functions: new Map(), constants: new Map(), active: new Set() }, named = null, given = null) {
+function handlerInputs(node, schemas, scope = { functions: new Map(), constants: new Map(), active: new Set() }, named = null, given = null,
+  thisRequest = false) {
   const inputs = {};
   const reasons = [];
   // Keys read inside an input, as name in req.body.user.name; and inputs used any other way.
@@ -142,8 +170,86 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
   // Where each name was read: from a body container, or something else.
   const fromBody = new Set();
   const elsewhere = new Set();
+  // Each name's type where it was read ({ query: {...}, body: {...} }), and names read where the
+  // location isn't known (req.param('id'), a whole container's keys from a schema it's parsed with).
+  const locations = {};
+  const unlocated = new Set();
+  // Where each named read is ({ name, kind, where, at }), so reads inside a branch on the request's
+  // method (if (req.method === 'POST')) can be that method's alone.
+  const sites = [];
+  const located = (label, name, kind, at = null) => {
+    const where = locationOf(label);
+    if (where) merge((locations[where] = locations[where] || {}), name, kind);
+    else unlocated.add(name);
+    if (at && typeof at.start === 'number') sites.push({ name, kind, where, at: at.start });
+  };
+  // The keys each element of an array input is read with, when it's iterated straightforwardly:
+  // lines.map(line => line.sku), for (const line of lines) line.qty, lines.forEach(({ sku }) => ...).
+  // Null when the elements are used any other way (passed whole, indexed by a variable).
+  const keysOfUses = (name, within) => {
+    const keys = new Set();
+    for (const item of nodes) {
+      if (item.start < within.start || item.end > within.end || !references(item, name)) continue;
+      const parent = parents.get(item);
+      const key = isMember(parent) && parent.object === item ? memberKey(parent, scope.constants) : null;
+      if (key === null || key === undefined) return null;
+      keys.add(key);
+    }
+    return keys;
+  };
+  const patternKeys = pattern => {
+    if (!pattern || pattern.type !== 'ObjectPattern') return null;
+    const keys = new Set();
+    for (const property of pattern.properties) {
+      if (property.type !== 'ObjectProperty' || property.computed) return null;
+      keys.add(property.key.name || property.key.value);
+    }
+    return keys;
+  };
+  const elementKeys = read => {
+    const parent = parents.get(read);
+    let element = null;
+    let within = null;
+    if (isMember(parent) && parent.object === read && !parent.computed && ELEMENT_METHODS.has(parent.property.name)) {
+      const call = parents.get(parent);
+      const callback = isCall(call) && call.callee === parent ? call.arguments[0] : null;
+      if (!callback || !isFunction(callback)) return null;
+      element = callback.params[0];
+      within = callback.body;
+    } else if (parent && parent.type === 'ForOfStatement' && parent.right === read) {
+      element = parent.left.type === 'VariableDeclaration' && parent.left.declarations.length === 1 ? parent.left.declarations[0].id : null;
+      within = parent.body;
+    }
+    if (!element) return null;
+    if (element.type === 'ObjectPattern') return patternKeys(element);
+    return element.type === 'Identifier' ? keysOfUses(element.name, within) : null;
+  };
+  // An array held in a local first, as const lines = req.body.lines: every use must iterate it.
+  const aliasElementKeys = name => {
+    const keys = new Set();
+    let used = false;
+    for (const item of nodes) {
+      if (!references(item, name)) continue;
+      const found = elementKeys(item);
+      if (!found) return null;
+      used = true;
+      for (const key of found) keys.add(key);
+    }
+    return used ? keys : null;
+  };
+  const addElements = (key, keys) => {
+    const path = `${key}[]`;
+    nested[path] = nested[path] || new Set();
+    for (const sub of keys) nested[path].add(sub);
+  };
   const inner = (read, key) => {
     const parent = parents.get(read);
+    const elements = elementKeys(read) || (parent && parent.type === 'VariableDeclarator' && parent.init === read
+      && parent.id.type === 'Identifier' ? aliasElementKeys(parent.id.name) : null);
+    if (elements && elements.size) {
+      addElements(key, elements);
+      return;
+    }
     const sub = isMember(parent) && parent.object === read ? memberKey(parent, scope.constants) : null;
     // lines.length, or a string or array method called on it: the value used whole, not a key.
     const call = parent ? parents.get(parent) : null;
@@ -168,7 +274,16 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
       if (target.type === 'Identifier' && target.name === named) requests.add(target.name);
     } else if (target.type === 'Identifier' && REQUEST_NAMES.has(target.name)) requests.add(target.name);
     else if (target.type === 'Identifier' && CONTEXT_NAMES.has(target.name)) contexts.add(target.name);
-    else if (target.type === 'ObjectPattern') incomplete('container_whole', 'the request is destructured in the parameters', target);
+    else if (target.type === 'ObjectPattern' && named === null) {
+      // AdonisJS's handler({ request, response }): the context destructured, request among it.
+      const own = target.properties.find(property => property.type === 'ObjectProperty' && !property.computed
+        && (property.key.name || property.key.value) === 'request' && property.value.type === 'Identifier');
+      const rest = target.properties.some(property => property.type === 'RestElement');
+      const containers = target.properties.some(property => property.type === 'ObjectProperty'
+        && ['query', 'body', 'payload'].includes(property.key.name || property.key.value));
+      if (rest || containers) incomplete('container_whole', 'the request is destructured in the parameters', target);
+      else if (own) requests.add(own.value.name);
+    } else if (target.type === 'ObjectPattern') incomplete('container_whole', 'the request is destructured in the parameters', target);
   }
   // The request, or a query or body container (label), passed to a function in this file or one
   // it imports, as in return render(req, res) or readAddress(req.body): its reads count.
@@ -193,6 +308,10 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
         }
         else flat.add(key);
       }
+      mergeLocations(locations, result.locations);
+      for (const name of result.unlocated || []) unlocated.add(name);
+      // A helper's reads happen where it's called.
+      for (const item of result.sites || []) sites.push({ ...item, at: call.start });
       for (const reason of result.reasons) {
         if (!reasons.some(item => item.code === reason.code && item.detail === reason.detail && item.line === reason.line)) reasons.push(reason);
       }
@@ -306,6 +425,12 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
   };
 
   const container = (expr, label) => {
+    const called = parents.get(expr);
+    // request.qs() and request.body() (AdonisJS): the call gives the container.
+    if (isCall(called) && called.callee === expr && !/\)$/.test(label)) {
+      container(called, `${label}()`);
+      return;
+    }
     const parent = parents.get(expr);
     if (isMember(parent) && parent.object === expr) {
       const key = memberKey(parent, scope.constants);
@@ -320,11 +445,15 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
       const imported = key === null && parent.computed && parent.property.type === 'Identifier'
         ? lookup(scope, 'constant', parent.property.name) : null;
       if (key !== null) {
-        merge(inputs, key, converted(parent));
+        const kind = converted(parent);
+        merge(inputs, key, kind);
+        located(label, key, kind, parent);
         inner(parent, key);
-        (/\bbody\b/.test(label) ? fromBody : elsewhere).add(key);
+        (BODY_LABEL.test(label) ? fromBody : elsewhere).add(key);
       } else if (imported) {
-        merge(inputs, imported.node, converted(parent));
+        const kind = converted(parent);
+        merge(inputs, imported.node, kind);
+        located(label, imported.node, kind, parent);
         flat.add(imported.node);
       }
       else incomplete('dynamic_key', `${label} is read with a key that isn't a constant`, parent);
@@ -340,7 +469,14 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
           const key = property.type === 'ObjectProperty' ? (property.key.name || property.key.value) : null;
           if (!key || property.computed) incomplete('container_whole', `the rest of ${label} is kept whole`, property);
           // const { limit } = req.query, then Number(limit): the local name's casts give the type.
-          else merge(inputs, key, property.value && property.value.type === 'Identifier' ? castLater(property.value.name) : 'text');
+          else {
+            const kind = property.value && property.value.type === 'Identifier' ? castLater(property.value.name) : 'text';
+            merge(inputs, key, kind);
+            located(label, key, kind, property);
+            const elements = property.value && property.value.type === 'Identifier' ? aliasElementKeys(property.value.name) : null;
+            if (elements && elements.size) addElements(key, elements);
+            else flat.add(key);
+          }
         }
         return;
       }
@@ -354,7 +490,10 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
         const local = schemas.get(name);
         const found = local !== undefined ? { node: local } : lookup(scope, 'schema', name);
         if (found && found.node) {
-          for (const [key, kind] of Object.entries(found.node)) merge(inputs, key, kind);
+          for (const [key, kind] of Object.entries(found.node)) {
+            merge(inputs, key, kind);
+            located(label, key, kind, parent);
+          }
           return;
         }
         incomplete('external_class', found ? `${name} accepts keys it doesn't declare` : `schema ${name || 'here'} isn't found`, parent);
@@ -369,7 +508,9 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
     incomplete('container_whole', `${label} is used whole`, parent || expr);
   };
 
-  const isRequest = item => item && item.type === 'Identifier' && requests.has(item.name);
+  // this.req in a Sails actions2 fn is the request.
+  const isRequest = item => item && ((item.type === 'Identifier' && requests.has(item.name))
+    || (thisRequest && isMember(item) && !item.computed && item.object.type === 'ThisExpression' && item.property.name === 'req'));
   const isContext = item => item && item.type === 'Identifier' && contexts.has(item.name);
   for (const item of nodes) {
     if (isMember(item) && !item.computed && (isRequest(item.object) || isContext(item.object)
@@ -380,10 +521,30 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
       if (response) continue;
       if (CONTAINERS.has(name)) container(item, dotted(item) || name);
       else if (RAW_MEMBERS.has(name)) incomplete('raw_body', `${dotted(item) || name} reads the raw body`, item);
-      else if (name === 'param') {
+      else if (name === 'only' || name === 'except') {
+        // AdonisJS's request.only(['a', 'b']) names its keys; request.except([...]) keeps the rest whole.
+        const call = parents.get(item);
+        const listed = isCall(call) && call.callee === item && call.arguments[0] && call.arguments[0].type === 'ArrayExpression'
+          ? call.arguments[0].elements : null;
+        if (name === 'only' && listed && listed.every(element => element && element.type === 'StringLiteral')) {
+          for (const element of listed) {
+            merge(inputs, element.value, 'text');
+            unlocated.add(element.value);
+            sites.push({ name: element.value, kind: 'text', where: null, at: call.start });
+          }
+        } else if (isCall(call) && call.callee === item) {
+          incomplete(name === 'only' ? 'dynamic_key' : 'container_whole',
+            `${dotted(item)}() ${name === 'only' ? "is called with keys that aren't constants" : 'keeps the other keys whole'}`, call);
+        }
+      } else if (name === 'param' || name === 'input') {
+        // req.param('id'), and AdonisJS's request.input('name', default): the query's or the body's.
         const call = parents.get(item);
         const key = isCall(call) && call.arguments[0];
-        if (key && key.type === 'StringLiteral') merge(inputs, key.value, converted(call));
+        if (key && key.type === 'StringLiteral') {
+          merge(inputs, key.value, converted(call));
+          unlocated.add(key.value); // req.param() reads the path, the body or the query.
+          sites.push({ name: key.value, kind: converted(call), where: null, at: call.start });
+        }
         else incomplete('dynamic_key', `${dotted(item)}() is called with a key that isn't a constant`, item);
       } else if (['url', 'originalUrl', 'querystring', 'search', 'href'].includes(name)) {
         // The URL is fine to log or redirect to, but not to read the query from by hand.
@@ -411,10 +572,151 @@ function handlerInputs(node, schemas, scope = { functions: new Map(), constants:
       container(item, aliases.get(item.name));
     }
   }
-  const known = Object.fromEntries(Object.entries(nested).filter(([key]) => !flat.has(key) && key in inputs)
+  // A key path's first name, as lines in lines[], is the input.
+  const topName = path => path.split('.')[0].replace(/\[\]$/, '');
+  const known = Object.fromEntries(Object.entries(nested).filter(([key]) => !flat.has(topName(key)) && topName(key) in inputs)
     .map(([key, subs]) => [key, [...subs].sort()]));
   const bodyOnly = [...fromBody].filter(key => !elsewhere.has(key));
-  return { inputs, complete: reasons.length === 0, reasons, nested: known, bodyOnly };
+  const methodReads = methodSites(node, nodes, parents, sites, item => isRequest(item) || isContext(item)
+    || (isMember(item) && isContext(item.object) && memberKey(item) === 'request'));
+  return {
+    inputs, complete: reasons.length === 0, reasons, nested: known, bodyOnly, locations, unlocated: [...unlocated].sort(),
+    sites, methodReads
+  };
+}
+
+// The methods a test of the request's method lets through: { only } for req.method === 'POST' or
+// ['GET', 'HEAD'].includes(req.method), { except } for req.method !== 'POST'; null for any other test.
+function methodTest(test, isRequestLike) {
+  if (!test) return null;
+  const isMethod = item => isMember(item) && !item.computed && item.property.name === 'method' && isRequestLike(item.object);
+  const literal = item => (item && item.type === 'StringLiteral' ? item.value.toUpperCase() : null);
+  if (test.type === 'BinaryExpression' && ['===', '==', '!==', '!='].includes(test.operator)) {
+    const value = isMethod(test.left) ? literal(test.right) : isMethod(test.right) ? literal(test.left) : null;
+    if (!value) return null;
+    return test.operator.startsWith('!') ? { except: [value] } : { only: [value] };
+  }
+  if (test.type === 'CallExpression' && isMember(test.callee) && test.callee.property.name === 'includes'
+    && test.callee.object.type === 'ArrayExpression' && isMethod(test.arguments[0])) {
+    const values = test.callee.object.elements.map(literal);
+    return values.every(Boolean) ? { only: values } : null;
+  }
+  if (test.type === 'LogicalExpression') {
+    const left = methodTest(test.left, isRequestLike);
+    const right = methodTest(test.right, isRequestLike);
+    if (!left || !right) return null;
+    if (test.operator === '||' && left.only && right.only) return { only: [...left.only, ...right.only] };
+    if (test.operator === '&&' && left.except && right.except) return { except: [...left.except, ...right.except] };
+    return null;
+  }
+  if (test.type === 'UnaryExpression' && test.operator === '!') return negateTest(methodTest(test.argument, isRequestLike));
+  return null;
+}
+
+function negateTest(test) {
+  if (!test) return null;
+  return test.only ? { except: test.only } : { only: test.except };
+}
+
+// Whether a statement always leaves the function, as return res.status(405).end().
+function exits(statement) {
+  if (!statement) return false;
+  if (statement.type === 'ReturnStatement' || statement.type === 'ThrowStatement') return true;
+  if (statement.type === 'BlockStatement') return exits(statement.body[statement.body.length - 1]);
+  if (statement.type === 'IfStatement') return exits(statement.consequent) && exits(statement.alternate);
+  return false;
+}
+
+/**
+ * The function's reads with the methods each is for, when any is inside a branch on the request's
+ * method: [{ name, kind, where, only } | { ..., except } | { name, kind, where }] for every read, or
+ * null when no read is. if/else on req.method, switch (req.method), and early-return guards
+ * (if (req.method !== 'POST') return ...) are understood; a switch whose cases fall through into
+ * code isn't, so its reads stay every method's.
+ */
+function methodSites(node, nodes, parents, sites, isRequestLike) {
+  const regions = [];
+  const region = (from, test) => {
+    if (from && test) regions.push({ start: from.start, end: from.end, test });
+  };
+  for (const item of nodes) {
+    if (item.type === 'IfStatement') {
+      const test = methodTest(item.test, isRequestLike);
+      if (!test) continue;
+      region(item.consequent, test);
+      region(item.alternate, negateTest(test));
+      // A guard that leaves for some methods (and else ifs that leave too): what follows it is for
+      // the others.
+      const holder = parents.get(item);
+      if (holder && holder.type !== 'IfStatement' && Array.isArray(holder.body)) {
+        const after = holder.body.slice(holder.body.indexOf(item) + 1);
+        const chain = [];
+        let link = item;
+        while (link && link.type === 'IfStatement' && exits(link.consequent)) {
+          const linkTest = methodTest(link.test, isRequestLike);
+          if (!linkTest) {
+            chain.length = 0;
+            break;
+          }
+          chain.push(negateTest(linkTest));
+          link = link.alternate;
+        }
+        // An else that doesn't leave runs into what follows: only its own methods reach it then.
+        const reaches = !link || link.type !== 'IfStatement';
+        if (after.length && chain.length && (reaches || !link.alternate)) {
+          for (const each of chain) regions.push({ start: after[0].start, end: after[after.length - 1].end, test: each });
+        }
+      }
+    } else if (item.type === 'SwitchStatement' && isMember(item.discriminant) && !item.discriminant.computed
+      && item.discriminant.property.name === 'method' && isRequestLike(item.discriminant.object)) {
+      const cases = item.cases;
+      const literal = test => (test && test.type === 'StringLiteral' ? test.value.toUpperCase() : null);
+      if (cases.some(clause => clause.test && !literal(clause.test))) continue;
+      const ends = clause => {
+        const last = clause.consequent[clause.consequent.length - 1];
+        return Boolean(last) && (exits(last) || last.type === 'BreakStatement'
+          || (last.type === 'BlockStatement' && last.body.length && ['BreakStatement', 'ReturnStatement', 'ThrowStatement'].includes(last.body[last.body.length - 1].type)));
+      };
+      // Code that falls through into the next case: leave the switch alone.
+      if (cases.some((clause, index) => clause.consequent.length && !ends(clause) && index < cases.length - 1)) continue;
+      const named = cases.filter(clause => clause.test).map(clause => literal(clause.test));
+      let pending = [];
+      for (const clause of cases) {
+        if (!clause.test) {
+          if (clause.consequent.length) {
+            regions.push({ start: clause.consequent[0].start, end: clause.consequent[clause.consequent.length - 1].end, test: { except: named } });
+          }
+          pending = [];
+          continue;
+        }
+        pending.push(literal(clause.test));
+        if (!clause.consequent.length) continue;
+        regions.push({ start: clause.consequent[0].start, end: clause.consequent[clause.consequent.length - 1].end, test: { only: pending } });
+        pending = [];
+      }
+    }
+  }
+  if (!regions.length) return null;
+  let constrained = false;
+  const reads = sites.map(site => {
+    let only = null;
+    const except = new Set();
+    for (const { start, end, test } of regions) {
+      if (site.at < start || site.at >= end) continue;
+      if (test.only) only = only ? new Set(test.only.filter(method => only.has(method))) : new Set(test.only);
+      else for (const method of test.except) except.add(method);
+    }
+    const read = { name: site.name, kind: site.kind, where: site.where };
+    if (only) {
+      read.only = [...only].filter(method => !except.has(method)).sort();
+      constrained = true;
+    } else if (except.size) {
+      read.except = [...except].sort();
+      constrained = true;
+    }
+    return read;
+  });
+  return constrained ? reads : null;
 }
 
 const MAX_DEPTH = 6;
@@ -684,7 +986,44 @@ function fileInputs(ast, filename, source, label, scope = null) {
     }
     return lookup(scope, 'function', dotted(reference));
   };
+  // The classes around the node being visited, and objects a controller file exports: a class
+  // method's handler is named Class.method (UsersController.index, as AdonisJS and Nest name
+  // views), and a Sails controller's api/controllers/UserController.js { find } is UserController.find.
+  const classes = [];
+  const exportedObjects = new WeakSet();
+  const controllerFile = (/(?:^|[\\/])api[\\/]controllers[\\/](?:.*[\\/])?([^\\/]+?)\.[cm]?[jt]s$/.exec(filename) || [])[1];
+  const ownLabel = (node, parent) => {
+    let base = label(node, parent);
+    // find: async function (req, res) {...}: the property's name.
+    if (base === '<anonymous>' && parent && parent.type === 'ObjectProperty' && parent.value === node && !parent.computed) {
+      base = parent.key.name || parent.key.value || base;
+    }
+    if (!base || base.includes('.') || base.includes(' ')) return base;
+    if ((node.type === 'ClassMethod' || node.type === 'ClassPrivateMethod') && classes.length && classes[classes.length - 1]) {
+      return `${classes[classes.length - 1]}.${base}`;
+    }
+    const holder = node.type === 'ObjectMethod' ? parent : parent && parent.type === 'ObjectProperty' ? parents.get(parent) : null;
+    if (controllerFile && holder && exportedObjects.has(holder)) return actions2(node, parent) ? controllerIdentity : `${controllerFile}.${base}`;
+    return base;
+  };
+  // A Sails actions2 action's fn: { inputs, exits, fn } exported from api/controllers/user/find.js,
+  // named by its identity, user/find.
+  const controllerIdentity = (/(?:^|[\\/])api[\\/]controllers[\\/](.+?)\.[cm]?[jt]s$/.exec(filename) || [])[1];
+  const actions2 = (node, parent) => {
+    if (!controllerIdentity || !isFunction(node)) return false;
+    const key = node.type === 'ObjectMethod' ? node.key : parent && parent.type === 'ObjectProperty' && parent.value === node ? parent.key : null;
+    const holder = node.type === 'ObjectMethod' ? parent : parent && parents.get(parent);
+    return Boolean(key && (key.name || key.value) === 'fn' && holder && exportedObjects.has(holder)
+      && holder.properties.some(property => property.key && ['inputs', 'exits'].includes(property.key.name || property.key.value)));
+  };
+  const parents = new WeakMap();
   const visit = (node, parent) => {
+    if (parent) parents.set(node, parent);
+    if (node.type === 'AssignmentExpression' && node.right && node.right.type === 'ObjectExpression'
+      && ['module.exports', 'exports'].includes(dotted(node.left))) exportedObjects.add(node.right);
+    if (node.type === 'ExportDefaultDeclaration' && node.declaration && node.declaration.type === 'ObjectExpression') exportedObjects.add(node.declaration);
+    const isClass = node.type === 'ClassDeclaration' || node.type === 'ClassExpression';
+    if (isClass) classes.push(node.id ? node.id.name : (parent && parent.type === 'VariableDeclarator' && parent.id.name) || null);
     // A function's body block is the function's own scope, not another one.
     const opens = isFunction(node) || (SCOPES.has(node.type) && !(node.type === 'BlockStatement' && isFunction(parent)));
     if (opens) enclosing.push(node);
@@ -692,22 +1031,26 @@ function fileInputs(ast, filename, source, label, scope = null) {
       visitNode(node, parent);
     } finally {
       if (opens) enclosing.pop();
+      if (isClass) classes.pop();
     }
   };
   const visitNode = (node, parent) => {
-    if (isFunction(node) && (routeHandler(node, parent) || (node.params || []).some(parameter => {
+    const action = actions2(node, parent);
+    if (isFunction(node) && (action || routeHandler(node, parent) || (node.params || []).some(parameter => {
       const target = parameter.type === 'AssignmentPattern' ? parameter.left : parameter;
-      return target.type === 'Identifier' && (REQUEST_NAMES.has(target.name) || CONTEXT_NAMES.has(target.name));
+      return (target.type === 'Identifier' && (REQUEST_NAMES.has(target.name) || CONTEXT_NAMES.has(target.name)))
+        || destructuresRequest(target);
     }))) {
       scope.active.add(node);
-      const found = handlerInputs(node, schemas, scope);
+      // An actions2 fn takes its declared inputs; this.req is the request, if it reaches for it.
+      const found = action ? handlerInputs(node, schemas, scope, '\0', null, true) : handlerInputs(node, schemas, scope);
       scope.active.delete(node);
       // Names read by validators or route middleware, whose inner keys aren't known.
       let middlewareNames = {};
       // app.post('/x', auth, handler): middleware before the handler may read the body itself.
       if (isCall(parent) && isMember(parent.callee) && ROUTE_METHODS.has(parent.callee.property.name)) {
         const others = parent.arguments.slice(1).filter(argument => argument !== node);
-        const validated = { inputs: {}, exact: false, segments: {} };
+        const validated = { inputs: {}, exact: false, segments: {}, locations: {}, unlocated: new Set() };
         middlewareNames = validated.inputs;
         for (const argument of others) {
           // Fastify's route options, as { schema }: only their hooks run before the handler.
@@ -729,6 +1072,8 @@ function fileInputs(ast, filename, source, label, scope = null) {
                     merge(found.inputs, name, kind);
                     validated.inputs[name] = validated.inputs[name] || kind;
                   }
+                  mergeLocations(validated.locations, read.locations);
+                  for (const name of read.unlocated) validated.unlocated.add(name);
                   found.reasons.push(...read.reasons);
                   continue;
                 }
@@ -747,6 +1092,7 @@ function fileInputs(ast, filename, source, label, scope = null) {
             if (argument.loc) reason.line = argument.loc.start.line;
             found.reasons.push(reason);
             for (const name of found.bodyOnly || []) delete found.inputs[name];
+            delete found.locations.body;
             continue;
           }
           if (isCall(argument) && SAFE_MIDDLEWARE.test(dotted(argument.callee))) continue;
@@ -761,6 +1107,8 @@ function fileInputs(ast, filename, source, label, scope = null) {
               merge(found.inputs, name, kind);
               validated.inputs[name] = validated.inputs[name] || kind; // Its inner keys aren't merged, so unknown.
             }
+            mergeLocations(validated.locations, read.locations);
+            for (const name of read.unlocated) validated.unlocated.add(name);
             found.reasons.push(...read.reasons);
             continue;
           }
@@ -769,13 +1117,15 @@ function fileInputs(ast, filename, source, label, scope = null) {
           found.reasons.push(reason);
         }
         for (const [name, kind] of Object.entries(validated.inputs)) merge(found.inputs, name, kind);
+        mergeLocations(found.locations, validated.locations);
+        found.unlocated = [...new Set([...found.unlocated, ...validated.unlocated])].sort();
         // Requests with any other name are rejected first, so only a raw body read stays unknown.
         if (validated.exact || (validated.segments.query && validated.segments.body)) {
           found.reasons = found.reasons.filter(reason => reason.code === 'raw_body');
         }
       }
       const nested = Object.fromEntries(Object.entries(found.nested || {}).filter(([key]) => !(key in middlewareNames)));
-      const entry = { function: label(node, parent), file: filename, inputs: found.inputs, complete: found.reasons.length === 0 };
+      const entry = { function: ownLabel(node, parent), file: filename, inputs: found.inputs, complete: found.reasons.length === 0 };
       // fastify.addHook('preHandler', fn): it runs before the handlers of the routes in its
       // scope, so what it reads is theirs.
       if (isCall(parent) && isMember(parent.callee) && (parent.callee.property.name || parent.callee.property.value) === 'addHook'
@@ -783,6 +1133,11 @@ function fileInputs(ast, filename, source, label, scope = null) {
         && parent.arguments[0].type === 'StringLiteral' && REQUEST_HOOKS.has(parent.arguments[0].value)) entry.hook = parent.arguments[0].value;
       if (Object.keys(nested).length) entry.nested = nested;
       if (found.reasons.length) entry.reasons = found.reasons;
+      // Each name's type per location, and the names whose location isn't known.
+      if (Object.keys(found.locations).length) entry.locations = found.locations;
+      if (found.unlocated.length) entry.unlocated = found.unlocated;
+      // The reads inside branches on the request's method, with the methods each is for.
+      if (found.methodReads) entry.method_reads = found.methodReads;
       results.push(entry);
     }
     for (const child of children(node)) visit(child, node);
@@ -902,6 +1257,7 @@ function routeValidator(node, out) {
       if (!locations.some(location => location === 'query' || location === 'body')) continue;
       const kind = spec.map(item => item.type === 'ObjectProperty' && CHAIN_KINDS[propertyName(item)]).find(Boolean);
       merge(out.inputs, name, kind || 'text');
+      locate(out, locations, name, kind || 'text');
     }
     return true;
   }
@@ -914,7 +1270,10 @@ function routeValidator(node, out) {
       out.segments[segment] = schema.closed;
       for (const key of schema.keys.properties) {
         const name = key.type === 'ObjectProperty' ? propertyName(key) : null;
-        if (name) merge(out.inputs, name, joiKind(chainMethods(key.value)));
+        if (name) {
+          merge(out.inputs, name, joiKind(chainMethods(key.value)));
+          locate(out, [segment], name, joiKind(chainMethods(key.value)));
+        }
       }
     }
     return true;
@@ -924,17 +1283,34 @@ function routeValidator(node, out) {
     const kind = root.methods.map(method => CHAIN_KINDS[method]).find(Boolean) || 'text';
     for (const field of strings(first)) {
       const name = topName(field);
-      if (name) merge(out.inputs, name, name === field ? kind : 'text');
+      if (!name) continue;
+      merge(out.inputs, name, name === field ? kind : 'text');
+      locate(out, VALIDATOR_LOCATIONS.get(root.name), name, name === field ? kind : 'text');
     }
   }
   return true;
+}
+
+// A validator's name and type at each location it checks; check() checks both.
+function locate(out, locations, name, kind) {
+  if (!out.locations) return;
+  for (const where of locations) {
+    if (where === 'query' || where === 'body') merge((out.locations[where] = out.locations[where] || {}), name, kind);
+  }
+}
+
+// A parameter that destructures the request out of a context, as AdonisJS's ({ request, response }).
+function destructuresRequest(target) {
+  return Boolean(target && target.type === 'ObjectPattern' && target.properties.some(property => property.type === 'ObjectProperty'
+    && !property.computed && (property.key.name || property.key.value) === 'request'));
 }
 
 // Whether a function takes the request first, as a handler or middleware does.
 function takesRequest(node) {
   const [first] = node.params || [];
   const target = first && first.type === 'AssignmentPattern' ? first.left : first;
-  return Boolean(target && target.type === 'Identifier' && (REQUEST_NAMES.has(target.name) || CONTEXT_NAMES.has(target.name)));
+  return Boolean(target && ((target.type === 'Identifier' && (REQUEST_NAMES.has(target.name) || CONTEXT_NAMES.has(target.name)))
+    || destructuresRequest(target)));
 }
 
 const MAX_REASONS = 20;
@@ -945,11 +1321,15 @@ function mergeInto(routes, path, entry) {
   data.inputs = data.inputs || {};
   for (const [name, kind] of Object.entries(entry.inputs)) {
     merge(data.inputs, name, kind);
-    // An input's inner keys are only known when every handler reading it reads them.
+    // An input's inner keys are only known when every handler reading it reads them: its own
+    // keys (customer) or its elements' (lines[]).
     const own = (table, key) => Boolean(table) && Object.prototype.hasOwnProperty.call(table, key);
-    if (own(entry.nested, name)) {
+    const paths = Object.keys(entry.nested || {}).filter(path => path.split('.')[0].replace(/\[\]$/, '') === name);
+    if (paths.length) {
       data._nested = data._nested || Object.create(null);
-      data._nested[name] = [...new Set([...(own(data._nested, name) ? data._nested[name] : []), ...entry.nested[name]])].sort();
+      for (const path of paths) {
+        data._nested[path] = [...new Set([...(own(data._nested, path) ? data._nested[path] : []), ...entry.nested[path]])].sort();
+      }
     } else {
       data._flat = [...new Set([...(data._flat || []), name])];
     }

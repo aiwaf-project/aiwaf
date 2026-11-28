@@ -268,3 +268,152 @@ class RecorderTests(SimpleTestCase):
             self.assertTrue(input_recorder.add_django_recorder())
             self.assertEqual(settings.MIDDLEWARE.count(input_recorder.DJANGO_RECORDER), 1)
             self.assertEqual(input_recorder.DjangoInputRecorder(lambda request: None).path, Path(".aiwaf/observed_inputs.jsonl"))
+
+
+ORDER_VIEWS = '''import json
+from django.http import JsonResponse
+from django.views import View
+
+
+def create_order(data):
+    return data
+
+
+class Orders(View):
+    def post(self, request):
+        data = json.loads(request.body)
+        create_order(data)
+        return JsonResponse({"ok": True})
+
+
+class Lines(View):
+    def post(self, request):
+        data = json.loads(request.body)
+        return JsonResponse({"sku": data["sku"], "quantity": int(data.get("quantity"))})
+'''
+
+
+class ParsedBodyTests(SimpleTestCase):
+    def test_a_class_view_that_parses_the_body_and_hands_it_on_stays_incomplete(self):
+        import importlib
+
+        from aiwaf.django.path_manifest import generate_django_manifest
+
+        with TemporaryDirectory() as folder:
+            source = Path(folder) / "src"
+            (source / "orders").mkdir(parents=True)
+            (source / "orders" / "__init__.py").write_text("", encoding="utf-8")
+            (source / "orders" / "views.py").write_text(ORDER_VIEWS, encoding="utf-8")
+            urls = types.ModuleType("orders_urls")
+            sys.path.insert(0, str(source))
+            try:
+                views = importlib.import_module("orders.views")
+                urls.urlpatterns = [path("orders/", views.Orders.as_view()), path("lines/", views.Lines.as_view())]
+                sys.modules["orders_urls"] = urls
+                with override_settings(ROOT_URLCONF="orders_urls"):
+                    routes = generate_django_manifest(str(Path(folder) / "paths.json"), audit_source=str(source))["routes"]
+            finally:
+                sys.path.remove(str(source))
+                for name in ("orders_urls", "orders.views", "orders"):
+                    sys.modules.pop(name, None)
+        # The parsed object goes on whole and nothing declares its keys: not an empty, complete list.
+        self.assertFalse(routes["/orders/"]["inputs_complete"])
+        self.assertIn("container_whole", [reason["code"] for reason in routes["/orders/"]["inputs_incomplete"]])
+        # Named reads from the parsed object are its inputs, and then the list is complete.
+        self.assertEqual(routes["/lines/"]["inputs"], {"sku": "text", "quantity": "int"})
+        self.assertTrue(routes["/lines/"]["inputs_complete"])
+
+    def test_the_framework_answers_whole_reads_only_when_it_defines_the_body(self):
+        class Plain(TemplateView):
+            pass
+
+        self.assertNotIn("container_whole", django_inputs(Plain.as_view(), ["POST"])["covers"])
+        self.assertIn("container_whole", django_inputs(Contact.as_view(), ["POST"])["covers"])
+        self.assertIn("container_whole", django_inputs(Notes.as_view(), ["POST"])["covers"])
+
+
+METHOD_VIEWS = '''import json
+from django.http import JsonResponse
+from django.views import View
+
+
+class Items(View):
+    def get(self, request):
+        return JsonResponse({"q": request.GET.get("q"), "page": int(request.GET.get("page", "1"))})
+
+    def post(self, request):
+        data = json.loads(request.body)
+        return JsonResponse({"title": data["title"], "page": data.get("page")})
+
+    def patch(self, request):
+        data = json.loads(request.body)
+        return JsonResponse({"note": data["note"]})
+
+
+class Search(View):
+    def post(self, request):
+        return JsonResponse({"limit": int(request.GET["limit"]), "label": request.POST.get("limit")})
+'''
+
+
+class MethodInputsTests(SimpleTestCase):
+    def test_each_class_handler_keeps_its_inputs_and_types_and_each_location_its_own(self):
+        import importlib
+
+        from aiwaf.django.path_manifest import generate_django_manifest
+
+        with TemporaryDirectory() as folder:
+            source = Path(folder) / "src"
+            (source / "methodviews").mkdir(parents=True)
+            (source / "methodviews" / "__init__.py").write_text("", encoding="utf-8")
+            (source / "methodviews" / "views.py").write_text(METHOD_VIEWS, encoding="utf-8")
+            urls = types.ModuleType("methodviews_urls")
+            sys.path.insert(0, str(source))
+            try:
+                views = importlib.import_module("methodviews.views")
+                urls.urlpatterns = [path("items/", views.Items.as_view()), path("search/", views.Search.as_view())]
+                sys.modules["methodviews_urls"] = urls
+                with override_settings(ROOT_URLCONF="methodviews_urls"):
+                    routes = generate_django_manifest(str(Path(folder) / "paths.json"), audit_source=str(source))["routes"]
+            finally:
+                sys.path.remove(str(source))
+                for name in ("methodviews_urls", "methodviews.views", "methodviews"):
+                    sys.modules.pop(name, None)
+        items = routes["/items/"]
+        self.assertTrue(items["inputs_complete"])
+        # GET doesn't take POST's title, and PATCH doesn't replace GET's reads.
+        self.assertEqual(items["inputs_by_method"], {"GET": ["page", "q"], "PATCH": ["note"], "POST": ["page", "title"]})
+        self.assertEqual(items["inputs"]["page"], "text")
+        self.assertEqual(items["inputs_types_by_method"], {"GET": {"page": "int"}})
+        self.assertEqual(routes["/search/"]["inputs_types_by_location"], {"POST": {"query": {"limit": "int"}}})
+
+
+class NestedSerializerTests(SimpleTestCase):
+    def test_nested_and_many_serializers_give_their_keys(self):
+        from aiwaf.core.input_sources import serializer_nested
+
+        class Product(serializers.Serializer):
+            code = serializers.CharField()
+
+        class Line(serializers.Serializer):
+            sku = serializers.CharField()
+            qty = serializers.IntegerField()
+            product = Product()
+            id = serializers.IntegerField(read_only=True)
+
+        class Customer(serializers.Serializer):
+            email = serializers.EmailField()
+
+        class Order(serializers.Serializer):
+            lines = Line(many=True)
+            extras = serializers.ListField(child=Line())
+            customer = Customer()
+            tags = serializers.ListField(child=serializers.CharField())
+
+        class Create(generics.CreateAPIView):
+            serializer_class = Order
+
+        expected = {"lines[]": ["product", "qty", "sku"], "lines[].product": ["code"], "extras[]": ["product", "qty", "sku"],
+                    "extras[].product": ["code"], "customer": ["email"]}
+        self.assertEqual(serializer_nested(Order), expected)
+        self.assertEqual(django_inputs(Create.as_view(), ["POST"])["nested"], expected)

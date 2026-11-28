@@ -218,7 +218,8 @@ def test_reports_have_the_shared_shape_and_readable_output(tmp_path):
     report = analyze_path(str(tmp_path))
     assert set(report) == {"schema_version", "language", "files_scanned", "findings", "errors", "inputs", "definitions"}
     assert "definitions" not in json.loads(to_json(report))
-    assert report["inputs"] == [{"function": "search", "file": report["findings"][0]["file"], "inputs": {"q": "text"}, "complete": True}]
+    assert report["inputs"] == [{"function": "search", "file": report["findings"][0]["file"], "inputs": {"q": "text"}, "complete": True,
+                                 "locations": {"query": {"q": "text"}}}]
     # entry_file is added only for an operation in another module than the view.
     assert set(report["findings"][0]) == {"file", "line", "function", "sink", "call", "source", "confidence"}
     assert json.loads(to_json(report))["language"] == "python"

@@ -274,6 +274,70 @@ def _nested_paths(cls: Any, prefix: str, depth: int) -> Dict[str, List[str]]:
     return found
 
 
+def serializer_nested(cls: Any) -> Dict[str, List[str]]:
+    """The keys inside a DRF serializer's or marshmallow schema's nested fields, by path: a
+    nested serializer or Nested field gives "customer", a many=True one or a list of them
+    "lines[]", and deeper ones "lines[].product". Bounded in depth; read-only fields are left out."""
+    try:
+        instance = cls() if isinstance(cls, type) else cls
+    except Exception:  # noqa: BLE001 - a serializer that needs arguments can't be read
+        return {}
+    return _declared_paths(instance, "", 0, set())
+
+
+def _declared_fields(instance: Any) -> Optional[Dict[str, Any]]:
+    """A serializer's or schema instance's writable fields by input key, or None."""
+    if any(base.__module__.startswith("rest_framework.") for base in type(instance).__mro__) and hasattr(instance, "fields"):
+        try:
+            fields = instance.fields
+        except Exception:  # noqa: BLE001
+            return None
+        return {getattr(field, "field_name", None) or name: field for name, field in fields.items() if not getattr(field, "read_only", False)}
+    declared = getattr(instance, "declared_fields", None) or getattr(type(instance), "_declared_fields", None)
+    if isinstance(declared, dict):
+        if str(getattr(getattr(instance, "Meta", None), "unknown", "")).lower() == "include":
+            return None
+        return {(getattr(field, "data_key", None) or name): field for name, field in declared.items()
+                if not getattr(field, "dump_only", False)}
+    return None
+
+
+def _nested_target(field: Any) -> tuple:
+    """(the serializer or schema a field holds, whether it's a list of them), or (None, False)."""
+    names = {base.__name__ for base in type(field).__mro__}
+    if "ListSerializer" in names:
+        return getattr(field, "child", None), True
+    if "ListField" in names:  # DRF's ListField(child=LineSerializer()).
+        child = getattr(field, "child", None)
+        return (child, True) if child is not None and _declared_fields(child) is not None else (None, False)
+    if "List" in names and hasattr(field, "inner"):  # marshmallow's List(Nested(...)).
+        inner, _ = _nested_target(field.inner)
+        return (inner, True) if inner is not None else (None, False)
+    if "Nested" in names:  # marshmallow's Nested(Schema) or Nested(Schema, many=True).
+        target = getattr(field, "schema", None)
+        return target, bool(getattr(field, "many", False))
+    if _declared_fields(field) is not None and "Serializer" in names:
+        return field, False
+    return None, False
+
+
+def _declared_paths(instance: Any, prefix: str, depth: int, seen: set) -> Dict[str, List[str]]:
+    fields = _declared_fields(instance)
+    if fields is None or depth >= _MAX_NESTED_DEPTH or type(instance) in seen:
+        return {}
+    seen = seen | {type(instance)}
+    found: Dict[str, List[str]] = {}
+    for key, field in fields.items():
+        target, many = _nested_target(field)
+        keys = _declared_fields(target) if target is not None else None
+        if not keys:
+            continue
+        path = f"{prefix}{key}{'[]' if many else ''}"
+        found[path] = sorted(keys)
+        found.update(_declared_paths(target, f"{path}.", depth + 1, seen))
+    return found
+
+
 def _loaded_module(name: str) -> Any:
     """An already-imported module by its name, or one whose name ends with it. Never imports."""
     if not name:
@@ -331,7 +395,12 @@ def django_inputs(callback: Any, methods: Iterable[str] = ()) -> Optional[dict]:
     found: Dict[str, str] = {}
     reasons: List[dict] = []
     covers: List[str] = []
+    nested: Dict[str, List[str]] = {}
     body = bool(set(methods) & _BODY_METHODS) or not methods
+    # Whether the framework itself defines the body, through a form or serializer whose fields
+    # were read. Only then does it answer the code reading's container_whole: a plain View or
+    # APIView that parses request.body and hands the object on accepts any keys.
+    defines_body = False
     if "APIView" in names and any(base.__module__.startswith("rest_framework.") for base in view_class.__mro__):
         try:
             from rest_framework.settings import api_settings
@@ -349,6 +418,8 @@ def django_inputs(callback: Any, methods: Iterable[str] = ()) -> Optional[dict]:
                     reasons.append(_reason("external_class", f"{serializer.__name__}'s fields can't be read"))
                 else:
                     found.update(fields)
+                    defines_body = True
+                    nested.update(serializer_nested(serializer))
             elif body and "get_serializer_class" in vars(view_class):
                 reasons.append(_reason("class_view", f"{view_class.__name__} chooses its serializer in code"))
             pagination = getattr(view_class, "pagination_class", None)
@@ -374,7 +445,7 @@ def django_inputs(callback: Any, methods: Iterable[str] = ()) -> Optional[dict]:
                         reasons.append(_reason("class_view", f"{name} on {view_class.__name__} has no filterset to read"))
                 else:
                     reasons.append(_reason("class_view", f"filter backend {name} isn't understood"))
-        covers = ["external_class", "model_fields", "container_whole"]
+        covers = ["external_class", "model_fields", "container_whole"] if defines_body else []
     elif "View" in names and any(base.__module__.startswith("django.views.") for base in view_class.__mro__):
         if "FormMixin" in names and body:
             form_class = getattr(view_class, "form_class", None)
@@ -390,6 +461,7 @@ def django_inputs(callback: Any, methods: Iterable[str] = ()) -> Optional[dict]:
                 reasons.append(_reason("class_view", f"{view_class.__name__} chooses its form in code"))
             else:
                 found.update(fields)
+                defines_body = True
         if "MultipleObjectMixin" in names and getattr(view_class, "paginate_by", None):
             found[getattr(view_class, "page_kwarg", "page") or "page"] = "text"
         if "RedirectView" in names and getattr(view_class, "query_string", False):
@@ -397,7 +469,7 @@ def django_inputs(callback: Any, methods: Iterable[str] = ()) -> Optional[dict]:
         redirect_field = getattr(view_class, "redirect_field_name", None)
         if isinstance(redirect_field, str) and redirect_field:
             found[redirect_field] = "text"
-        covers = ["external_class", "model_fields", "container_whole"]
+        covers = ["external_class", "model_fields", "container_whole"] if defines_body else []
     else:
         return None
     unmodeled = [base for base in known if not base.__module__.startswith(_GENERIC_MODULES + _DRF_MODULES)]
@@ -407,7 +479,10 @@ def django_inputs(callback: Any, methods: Iterable[str] = ()) -> Optional[dict]:
     else:
         names_other = ", ".join(sorted({base.__name__ for base in other}))
         reasons.append(_reason("class_view", f"{view_class.__name__} also inherits from {names_other}"))
-    return {"inputs": found, "covers": covers, "reasons": reasons, "standalone": framework_only}
+    result = {"inputs": found, "covers": covers, "reasons": reasons, "standalone": framework_only}
+    if nested:
+        result["nested"] = nested
+    return result
 
 
 def fastapi_inputs(route: Any) -> Optional[dict]:
@@ -540,6 +615,7 @@ def webargs_inputs(view: Any) -> Optional[dict]:
     found: Dict[str, str] = {}
     reasons: List[dict] = []
     closed: Dict[str, bool] = {}
+    nested: Dict[str, List[str]] = {}
     layers = 0
     seen = set()
     current = view
@@ -562,6 +638,8 @@ def webargs_inputs(view: Any) -> Optional[dict]:
             if segment is not None:
                 for attribute, field in fields.items():
                     _merge(found, str(getattr(field, "data_key", None) or attribute), _marshmallow_kind(field))
+                # Nested(...) and List(Nested(...)) fields: their keys, as customer and lines[].
+                nested.update(_declared_paths(schema, "", 0, set()))
                 # webargs' own default is a sentinel: the location's default, which None leaves to the schema.
                 unknown = values.get("unknown")
                 if unknown not in {"raise", "exclude", "include", None}:
@@ -576,7 +654,10 @@ def webargs_inputs(view: Any) -> Optional[dict]:
         return None
     exact = bool(closed.get("query") and closed.get("body"))
     covers = [code for code in REASON_CODES if code not in {"raw_body", "unread_view"}] if exact else []
-    return {"inputs": found, "covers": covers, "reasons": reasons, "standalone": exact}
+    result = {"inputs": found, "covers": covers, "reasons": reasons, "standalone": exact}
+    if nested:
+        result["nested"] = nested
+    return result
 
 
 def _dependency_reads(call: Any) -> Optional[Dict[str, str]]:
@@ -922,6 +1003,11 @@ def finalize(
         declared_types = data.pop("declared_types", None) or {}
         declared_locations = data.pop("declared_locations", None)
         code_methods = {str(method).upper(): set(names) for method, names in (data.pop("_input_methods", None) or {}).items()}
+        # What each method's own code reads, by type and by location, and the names it reads
+        # where the location isn't known.
+        code_types = data.pop("_input_types", None) or {}
+        code_locations = data.pop("_input_locations", None) or {}
+        code_unlocated = {method: set(names) for method, names in (data.pop("_input_unlocated", None) or {}).items()}
         declared_methods = {str(method).upper(): set(names) for method, names in (data.pop("declared_methods", None) or {}).items()}
         claims = {method: set(names) for method, names in code_methods.items()}
         for method, names in declared_methods.items():
@@ -978,12 +1064,15 @@ def finalize(
                 read = True
                 counts["declared"] += 1
         operations = (openapi or {}).get(key)
+        # Each method's OpenAPI types, which weaken that method's code types like any other reading.
+        openapi_types: Dict[str, Dict[str, str]] = {}
         if operations:
             methods = [method for method in data.get("methods") or operations.keys()]
             listed = [operations[method] for method in methods if method in operations]
             for method in methods:
                 for name, kind in (operations.get(method) or {"inputs": {}})["inputs"].items():
                     _merge(found, name, kind)
+                    _merge(openapi_types.setdefault(str(method).upper(), {}), name, kind)
                     claims.setdefault(str(method).upper(), set()).add(name)
             if listed and len(listed) == len(methods) and all(operation["complete"] for operation in listed):
                 authoritative = True
@@ -1036,6 +1125,20 @@ def finalize(
             for name, kind in types.items():
                 if kind != "text" and name in found and found[name] != kind:
                     own_types.setdefault(str(method).upper(), {})[name] = kind
+        # And a method's type from its own code (a GET's integer page beside a POST's text page),
+        # for names only code reads. A declared type for that method is kept instead; a name some
+        # reading shares with every method (a declaration, a recording, a resolved class) isn't split.
+        def code_only(name: str) -> bool:
+            return name in found and name not in shared
+
+        for method, types in code_types.items():
+            for name, kind in types.items():
+                if not code_only(name) or name in (declared_types.get(method) or {}):
+                    continue
+                if name in (openapi_types.get(method) or {}) and openapi_types[method][name] != kind:
+                    kind = "text"
+                if kind != "text" and found[name] != kind:
+                    own_types.setdefault(method, {})[name] = kind
         if own_types:
             data["inputs_types_by_method"] = own_types
         else:
@@ -1044,13 +1147,26 @@ def finalize(
         # integer next to a JSON limit that's text): checked for values sent there alone.
         if declared_locations is None and isinstance(framework, dict) and framework.get("locations"):
             declared_locations = {str(method).upper(): framework["locations"] for method in data.get("methods") or ()}
+        # The framework's locations, then each method's code reads at a location the framework
+        # doesn't type: only for names only code reads, and never one the method also reads where
+        # the location isn't known (request.values), since that read takes either location's value.
+        locations_by_method: Dict[str, Dict[str, Dict[str, str]]] = {
+            str(method).upper(): {where: dict(types) for where, types in locations.items()}
+            for method, locations in (declared_locations or {}).items()}
+        for method, located in code_locations.items():
+            for where, types in located.items():
+                for name, kind in types.items():
+                    if not code_only(name) or name in code_unlocated.get(method, ()):
+                        continue
+                    locations_by_method.setdefault(method, {}).setdefault(where, {}).setdefault(name, kind)
         by_location: Dict[str, Dict[str, Dict[str, str]]] = {}
-        for method, locations in (declared_locations or {}).items():
+        for method, locations in locations_by_method.items():
             for where, types in locations.items():
                 for name, kind in types.items():
-                    # The route's type is the weakest of the locations', so only a stricter one differs.
-                    if name in found and found[name] != kind:
-                        by_location.setdefault(str(method).upper(), {}).setdefault(where, {})[name] = kind
+                    # Only a type that differs from what the method checks otherwise.
+                    otherwise = (own_types.get(method) or {}).get(name, found.get(name))
+                    if name in found and kind != otherwise:
+                        by_location.setdefault(method, {}).setdefault(where, {})[name] = kind
         if by_location:
             data["inputs_types_by_location"] = by_location
         else:

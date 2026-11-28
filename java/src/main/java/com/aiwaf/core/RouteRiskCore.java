@@ -433,13 +433,16 @@ public final class RouteRiskCore {
                     Map<String, Object> nested = target.get("_nested") instanceof Map<?, ?> saved ? (Map<String, Object>) saved : new TreeMap<>();
                     Set<String> flat = target.get("_flat") instanceof Set<?> saved ? (Set<String>) saved : new TreeSet<>();
                     for (String name : entry.inputs().keySet()) {
-                        List<String> keys = entry.nested().get(name);
-                        if (keys == null) {
+                        // Its own keys (customer) or its elements' (lines[]), and deeper paths.
+                        List<String> paths = entry.nested().keySet().stream().filter(path -> InputSourcesCore.topOf(path).equals(name)).toList();
+                        if (paths.isEmpty()) {
                             flat.add(name);
-                        } else {
-                            Set<String> merged = new TreeSet<>((java.util.Collection<String>) nested.getOrDefault(name, List.of()));
-                            merged.addAll(keys);
-                            nested.put(name, List.copyOf(merged));
+                            continue;
+                        }
+                        for (String path : paths) {
+                            Set<String> merged = new TreeSet<>((java.util.Collection<String>) nested.getOrDefault(path, List.of()));
+                            merged.addAll(entry.nested().get(path));
+                            nested.put(path, List.copyOf(merged));
                         }
                     }
                     target.put("_nested", nested);

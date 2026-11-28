@@ -6,7 +6,8 @@
 const { loadManifest, writeManifest } = require('./pathManifest');
 const { bodyBytes } = require('./sqlInjection');
 const wasmChecks = require('./wasmChecks');
-const { mergeInto } = require('./inputSchema');
+const inputSchema = require('./inputSchema');
+const { mergeInto } = inputSchema;
 const inputSources = require('./inputSources');
 
 // The operations a saved finding can name. The rules for each run in aiwaf-wasm.
@@ -215,6 +216,12 @@ function routesFor(finding, routes) {
     if (mounted.length === 1) return mounted;
     if (entry.includes(' ')) return [];
   }
+  // A class method (UsersController.index, as AdonisJS and Nest name views) matches its own view.
+  if (/^[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*$/.test(entry)) {
+    const exact = paths.filter(path => String(routes[path]?.view || '').replace(/^bound /, '') === entry
+      || (routes[path]?.views || []).includes(entry));
+    if (exact.length) return exact;
+  }
   // JavaScript views are bare function names, so a name used twice can't be trusted.
   const name = entry.split('.').pop();
   const named = paths.filter(path => {
@@ -294,12 +301,56 @@ function applyReport(report, manifest, sources = {}) {
       const route = routes[path];
       // Or, for a handler passed by name, the methods the app routed it for.
       const named = (route.handler_methods || {})[String(entry.function || '').split('.').pop()];
-      const methods = labelled ? [labelled.toUpperCase()] : (named || []);
-      if (methods.length) {
+      const branched = Array.isArray(entry.method_reads) && entry.method_reads.length;
+      // A handler that branches on the request's method serves the route's methods, each with
+      // only the reads its branch can reach.
+      const methods = labelled ? [labelled.toUpperCase()] : (named && named.length ? named
+        : branched ? (route.methods || []).map(method => String(method).toUpperCase()) : []);
+      if (branched && methods.length) {
         route._input_methods = route._input_methods || {};
+        route._input_types = route._input_types || {};
+        route._input_locations = route._input_locations || {};
+        route._input_unlocated = route._input_unlocated || {};
+        const sited = new Set(entry.method_reads.map(read => read.name));
+        for (const method of methods) {
+          const reads = entry.method_reads.filter(read => (!read.only || read.only.includes(method))
+            && !(read.except || []).includes(method));
+          const names = new Set([...(route._input_methods[method] || []), ...reads.map(read => read.name),
+            ...Object.keys(entry.inputs || {}).filter(name => !sited.has(name))]);
+          route._input_methods[method] = [...names].sort();
+          const types = (route._input_types[method] = route._input_types[method] || {});
+          const where = (route._input_locations[method] = route._input_locations[method] || {});
+          const unlocated = new Set(route._input_unlocated[method] || []);
+          for (const read of reads) {
+            inputSchema.merge(types, read.name, read.kind);
+            if (read.where) inputSchema.merge((where[read.where] = where[read.where] || {}), read.name, read.kind);
+            else unlocated.add(read.name);
+          }
+          // Names read some other way (a validator, a hook) are every method's, at no known location.
+          for (const [name, kind] of Object.entries(entry.inputs || {})) {
+            if (sited.has(name)) continue;
+            inputSchema.merge(types, name, kind);
+            unlocated.add(name);
+          }
+          route._input_unlocated[method] = [...unlocated].sort();
+        }
+      } else if (methods.length) {
+        route._input_methods = route._input_methods || {};
+        route._input_types = route._input_types || {};
+        route._input_locations = route._input_locations || {};
+        route._input_unlocated = route._input_unlocated || {};
         for (const method of methods) {
           const names = new Set([...(route._input_methods[method] || []), ...Object.keys(entry.inputs || {})]);
           route._input_methods[method] = [...names].sort();
+          // This method's own types and locations, kept apart from the other methods' reads.
+          const types = (route._input_types[method] = route._input_types[method] || {});
+          for (const [name, kind] of Object.entries(entry.inputs || {})) inputSchema.merge(types, name, kind);
+          const where = (route._input_locations[method] = route._input_locations[method] || {});
+          for (const [location, located] of Object.entries(entry.locations || {})) {
+            where[location] = where[location] || {};
+            for (const [name, kind] of Object.entries(located)) inputSchema.merge(where[location], name, kind);
+          }
+          route._input_unlocated[method] = [...new Set([...(route._input_unlocated[method] || []), ...(entry.unlocated || [])])].sort();
         }
       } else {
         route._input_shared = [...new Set([...(route._input_shared || []), ...Object.keys(entry.inputs || {})])].sort();

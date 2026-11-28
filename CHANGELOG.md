@@ -7,6 +7,42 @@
   `aiwaf-rust>=0.2.19`, the first engine that reads the renamed list files. npm 1.3.4 requires
   `aiwaf-wasm ^0.2.14`, which already accepts the current field names, so `js-v1.3.4` can be
   tagged now and aiwaf-wasm 0.2.15 can follow.
+- **Hapi's `request.payload` is read as the body:** Node.js `init` skipped it, so a Hapi handler
+  that read `request.payload.sku` listed nothing, and one that handed the whole payload on was
+  marked complete. Named payload reads are now inputs at the body location, and a payload used
+  whole, or read as text, leaves the route incomplete unless a closed `validate.payload` schema
+  names its keys.
+- **A Django view that parses `request.body` and hands it on stays incomplete:** every Django and
+  DRF class-based view let the framework answer "the body is used whole", so `data =
+  json.loads(request.body)` passed on to a helper came out as an empty, complete list. The
+  framework now answers that only when it defines the body itself, through a form class or
+  serializer whose fields were read. Named reads from the parsed object (`data["sku"]`,
+  `int(data.get("quantity"))`) are still the view's inputs.
+- **Each method keeps its own inputs (Hapi, Nest, Koa, Django):** `init` attached a handler's
+  reads to every method on its path when it couldn't tell which method the handler served, so a
+  GET took a POST's body fields, and in Nest and Koa a later handler could leave an earlier
+  method's reads out altogether (a Nest path with GET, POST and PATCH came out as PATCH's one
+  field, marked complete). Hapi's `server.route({ method, path, handler })`, Nest controller
+  methods, Koa router layers and Django class views' `get`/`post`/`patch` handlers now link to
+  their own method. A Django class view's handler is read with the class's other methods (they
+  share `self.request`), so its helpers still count for every method.
+- **Types per method and location from the code, too:** `inputs_types_by_method` and
+  `inputs_types_by_location` were only written from declared schemas. They now also come from
+  what each method's code reads, in Express, Koa, Hapi, Nest, Next.js, Flask and Django: a GET's
+  `parseInt(req.query.page)` keeps `page` an integer for GET when POST reads it as text, and an
+  integer query `limit` next to a text body `limit` keeps each location's type. A declared type
+  still wins, and a name read where the location isn't known (`req.param()`, `request.values`)
+  or shared with every method (a hook, a declaration, a recording) isn't split.
+- **`Boolean()`, `bool()` and `type=bool` no longer make an input boolean:** they accept any text
+  (`Boolean('no')` is true), so a `bool` restriction blocked values the code handles. Declared
+  booleans (a schema's, `ParseBoolPipe`, `isBoolean()`, a Pydantic or form field) still are.
+- **Nested-array keys:** `inputs_nested` now has each element's keys, as `lines[]` (and deeper,
+  `lines[].product`), from code that iterates a request array (`lines.map(line => line.sku)`,
+  `for (const line of lines)`, `for line in data["lines"]`, comprehensions) when every use of the
+  element reads a constant key; and from closed Joi and zod objects and arrays of them, nested
+  Nest DTOs (`@ApiProperty({ type: [LineDto] })` or class-transformer's `@Type`), DRF nested and
+  `many=True` serializers, marshmallow `Nested` and `List(Nested)` fields, and Spring DTOs with
+  `List<LineDto>`, array or deeper DTO fields (Java read only one level before).
 - **Allowlist and blocklist everywhere:** the CSV list files are now `allowlist.csv` and
   `blocklist.csv`. A data directory that still has `whitelist.csv` or `blacklist.csv` has them
   renamed the first time Python or the engine opens it; when both names exist, the current file
